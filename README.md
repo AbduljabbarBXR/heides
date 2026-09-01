@@ -53,7 +53,7 @@ HEIDES is event driven. It wakes when a session starts or a file changes, works,
 
 One core, every shell. The same binary speaks to everything.
 
-* CLI. Native commands: scan, watch, status and mcp.
+* CLI. Native commands: scan, status, query, check, staged, plan, scaffold, deps, watch and mcp.
 * MCP. A Model Context Protocol server over stdio. Any MCP aware agent, editor or harness attaches directly.
 * Agent systems. Claude Code, Codex, Cursor, OpenCode, Hermes and custom builds via MCP.
 * Skills. HEIDES exposes its capabilities as MCP tools and resources, so skill systems can compose it.
@@ -86,6 +86,40 @@ The Spine maps the codebase and saves the index under `.heides`.
 
 Shows the state of the index.
 
+    heides query callers send_order
+
+Asks the graph who calls a symbol, who imports a module, where a definition
+lives, and what a function calls.
+
+    heides check
+
+Runs every guard against the workspace and prints findings with a file, a
+line, a severity, and the reason.
+
+    heides staged patch.diff
+
+Checks an agent proposed diff before anything is applied. Signature changes,
+removed symbols, duplicate definitions and deleted files are blocked with the
+exact call sites that would break.
+
+    heides plan "refactor the checkout_flow"
+
+Grounds an objective against the spine. Confirmed symbols, missing symbols
+and path facts come back before the agent starts.
+
+    heides scaffold "rust cli tool" my_app
+
+Turns a plan into a starter project and indexes it immediately.
+
+    heides deps
+
+Checks dependencies against the OSV vulnerability database and the latest
+published versions.
+
+    heides watch
+
+Stays alive and reindexes on demand as files change.
+
     heides mcp
 
 Starts the MCP server on stdio. Point any MCP client at it.
@@ -114,7 +148,25 @@ Example VS Code settings fragment:
 
 ## Project status
 
-This is milestone one: the repository, the MCP server shell, the CLI, the index format, and the guard framework. The Spine currently performs file inventory and shallow symbol extraction. Tree sitter parsing, the staged apply guard, taint analysis, dependency diffing, web grounding and the scaffold builder are the scheduled milestones. Every milestone lands behind the same test gate: lint, build, tests, and a live smoke run against a real repository.
+This is milestone two: a working deterministic harness. The Spine parses
+Rust, JavaScript, TypeScript and Python with tree sitter and builds symbols,
+call edges, import edges and signatures into a persistent index. Harmony runs
+the staged apply guard, edge case checks, security taint tracking (SQL,
+shell, filesystem and prompt injection), best practice rules and the OSV
+dependency check. Grounding evaluates plans against the graph, scaffolds new
+projects, and confirms facts against the package registries on the web. The
+MCP server exposes every capability as a tool, and the watch loop keeps the
+index fresh. The whole harness ships as one binary that runs on desktop,
+server, CI and Termux.
+
+Every change lands behind the same gate: lint, build, the unit suite, and the
+serial battle suite of forty three end to end checks run against a real
+fixture workspace, including MCP round trips and dash free output
+enforcement.
+
+The roadmap: more languages in the deep set (Go, PHP, Java, C#), incremental
+index updates, interprocedural taint flow, upgrade breakage analysis against
+the graph, and a TUI panel for reviewing guard output while the agent works.
 
 ## Development
 
