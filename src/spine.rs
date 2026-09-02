@@ -25,6 +25,11 @@ pub struct Symbol {
     /// every non function symbol kind. Feeds the interprocedural taint
     /// summaries, so a schema change on this field is a version bump.
     pub params: Vec<String>,
+    /// Doc comment captured directly above the declaration, cleaned of
+    /// comment markers and capped in length. Empty when no comment
+    /// precedes the symbol. Carried into the SQLite index so agents can
+    /// read what a symbol is for without opening the file.
+    pub doc: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -259,8 +264,8 @@ pub fn save(graph: &CodeGraph, root: &Path) -> Result<(), String> {
     {
         let mut ins_sym = tx
             .prepare(
-                "INSERT INTO symbols(file, name, kind, line, lang, signature, params) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO symbols(file, name, kind, line, lang, signature, params, doc) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )
             .map_err(|e| e.to_string())?;
         for s in &graph.symbols {
@@ -273,7 +278,8 @@ pub fn save(graph: &CodeGraph, root: &Path) -> Result<(), String> {
                     s.line as i64,
                     s.lang,
                     s.signature,
-                    params
+                    params,
+                    s.doc
                 ])
                 .map_err(|e| e.to_string())?;
         }
@@ -353,7 +359,7 @@ pub fn load(root: &Path) -> Result<CodeGraph, String> {
     {
         let mut stmt = conn
             .prepare(
-                "SELECT file, name, kind, line, lang, signature, params FROM symbols ORDER BY id",
+                "SELECT file, name, kind, line, lang, signature, params, doc FROM symbols ORDER BY id",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
@@ -367,6 +373,7 @@ pub fn load(root: &Path) -> Result<CodeGraph, String> {
                     lang: r.get(4)?,
                     signature: r.get(5)?,
                     params: serde_json::from_str(&params_raw).unwrap_or_default(),
+                    doc: r.get(7)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -437,6 +444,7 @@ mod tests {
             lang: "rust".into(),
             signature: "fn run()".into(),
             params: vec!["x".into()],
+            doc: "Starts the worker".into(),
         });
         g.symbols.push(Symbol {
             name: "main".into(),
@@ -446,6 +454,7 @@ mod tests {
             lang: "rust".into(),
             signature: "fn main()".into(),
             params: vec![],
+            doc: String::new(),
         });
         g.calls.push(CallEdge {
             caller: "main".into(),
@@ -485,6 +494,7 @@ mod tests {
         let sym = &loaded.symbols[0];
         assert_eq!(sym.name, "run");
         assert_eq!(sym.params, vec!["x"]);
+        assert_eq!(sym.doc, "Starts the worker");
         assert_eq!(loaded.callers_of("run").len(), 1);
         assert_eq!(loaded.importers_of("std::env").len(), 1);
         let _ = std::fs::remove_dir_all(&dir);

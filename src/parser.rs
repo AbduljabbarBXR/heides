@@ -389,6 +389,82 @@ const SYMBOL_KINDS: &[&str] = &[
 /// nesting that would otherwise overflow the call stack.
 const MAX_TREE_DEPTH: usize = 512;
 
+/// Comment markers stripped from doc lines, longest first so a triple
+/// slash loses only its own prefix.
+const DOC_MARKERS: [&str; 10] = ["///", "//!", "//", "/**", "*/", "/*", "*", "#!", "#", "-->"];
+
+/// True when a trimmed line is comment text in any indexed dialect.
+fn comment_line(t: &str) -> bool {
+    t.is_empty()
+        || t.starts_with("//")
+        || t.starts_with("/*")
+        || t == "*/"
+        || t.starts_with('*')
+        || t.starts_with('#')
+        || t.starts_with("<!--")
+        || t.starts_with("-->")
+        || t.starts_with("--")
+}
+
+/// Capture the doc comment directly above a declaration line. Blank lines
+/// between the comment and the declaration are allowed and skipped, code
+/// between them ends the capture. Rust attributes are not comments, so a
+/// derive line above a symbol never leaks into its doc.
+fn doc_above(content: &str, line: u64) -> String {
+    if line < 2 {
+        return String::new();
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let mut i = (line - 1) as usize;
+    if i > lines.len() {
+        return String::new();
+    }
+    // Skip blank lines directly above the declaration.
+    while i > 0 && lines[i - 1].trim().is_empty() {
+        i -= 1;
+    }
+    let mut raw: Vec<&str> = Vec::new();
+    while i > 0 {
+        let t = lines[i - 1].trim_start();
+        if comment_line(t) && !t.starts_with("#[") {
+            raw.push(lines[i - 1].trim_end());
+            i -= 1;
+            if raw.len() >= 24 {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    if raw.is_empty() {
+        return String::new();
+    }
+    let mut doc: Vec<String> = Vec::new();
+    for piece in raw.iter().rev() {
+        let mut t = piece.trim();
+        loop {
+            let before = t;
+            for m in DOC_MARKERS {
+                if t.starts_with(m) {
+                    t = t[m.len()..].trim_start();
+                }
+            }
+            if t == before {
+                break;
+            }
+        }
+        if !t.is_empty() {
+            doc.push(t.to_string());
+        }
+    }
+    let joined = doc.join(" ");
+    let mut out: String = joined.chars().take(400).collect();
+    if out.len() < joined.len() {
+        out.push('…');
+    }
+    out
+}
+
 fn walk(
     node: Node,
     content: &str,
@@ -420,6 +496,7 @@ fn walk(
             lang: out.lang.clone(),
             signature: sig,
             params: params_of(node, content),
+            doc: doc_above(content, line),
         });
     }
 
@@ -438,6 +515,7 @@ fn walk(
             lang: out.lang.clone(),
             signature: signature_of(node, content),
             params: params_of(node, content),
+            doc: doc_above(content, line),
         });
     }
 
@@ -767,6 +845,45 @@ fn main() {
                 .calls
                 .iter()
                 .any(|c| c.callee == "helper" && c.caller == "Load")
+        );
+    }
+
+    #[test]
+    fn doc_comment_above_symbol_is_captured() {
+        let src = "// Parses an order file into line items.\n// Handles both csv and json.\nfn parse_file(path: &str) -> Vec<String> { vec![] }\n\nfn plain() {}\n";
+        let p = std::path::Path::new("probe.rs");
+        let parsed = parse_file(p, src).unwrap();
+        let parse_sym = parsed
+            .symbols
+            .iter()
+            .find(|s| s.name == "parse_file")
+            .unwrap();
+        assert_eq!(
+            parse_sym.doc,
+            "Parses an order file into line items. Handles both csv and json."
+        );
+        let plain = parsed.symbols.iter().find(|s| s.name == "plain").unwrap();
+        assert_eq!(plain.doc, "", "symbol without a comment must carry no doc");
+    }
+
+    #[test]
+    fn doc_skips_blank_lines_but_stops_at_code() {
+        let src = "// Documented.\n\nfn spaced() {}\nlet marker = 1;\nfn after_code() {}\n";
+        let p = std::path::Path::new("probe.rs");
+        let parsed = parse_file(p, src).unwrap();
+        let spaced = parsed.symbols.iter().find(|s| s.name == "spaced").unwrap();
+        assert_eq!(
+            spaced.doc, "Documented.",
+            "blank line between doc and symbol is allowed"
+        );
+        let after = parsed
+            .symbols
+            .iter()
+            .find(|s| s.name == "after_code")
+            .unwrap();
+        assert_eq!(
+            after.doc, "",
+            "code between comment and symbol ends the capture"
         );
     }
 }
