@@ -19,4 +19,6 @@ jobs:
           pip install --quiet --no-cache-dir "timesfm==2.0.2"
           pip install --quiet --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
       - name: Run the zero shot forecast
-        run: python research/timesfm_forecast.py
+        run: |
+          python -c "import timesfm; print('version', getattr(timesfm, '__version__', '?')); print('exports', [a for a in dir(timesfm) if a[0].isupper()])"
+          python research/timesfm_forecast.py
