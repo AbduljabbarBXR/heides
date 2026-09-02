@@ -57,6 +57,8 @@ Refinement. Grounding takes an objective or a plan and checks it against the Spi
 
 ## How it works
 
+![How HEIDES works, the event driven flow](assets/how-it-works.png)
+
 HEIDES is event driven. It wakes when a session starts or a file changes, works, and sleeps when the job is done. Nothing is stale because everything recomputes on demand against the persistent index.
 
 1. The agent or user summons HEIDES before any change.
@@ -68,6 +70,8 @@ HEIDES is event driven. It wakes when a session starts or a file changes, works,
 
 ## How the guards work
 
+![How the HEIDES guards run](assets/guards.png)
+
 * Staged apply. An agent proposes a patch that changes add(a, b) into add(a, b, c). HEIDES applies the patch in memory, parses the changed file again, compares signatures against the spine, finds that main still calls add with two arguments, and reports a blocker with the exact call site. Nothing has been written to disk.
 * Security taint. A line assigns from req.query. A later line passes that variable into db.query. HEIDES reports the sink line and names the source line. SQL, shell, filesystem and prompt injection sinks are covered across every deep language.
 * Edge cases. unwrap calls, JSON.parse without try, bare except blocks, mutable python defaults and unguarded storage reads are flagged with a severity.
@@ -75,6 +79,8 @@ HEIDES is event driven. It wakes when a session starts or a file changes, works,
 * Dependencies. Manifests are read, every pinned package is checked against the OSV vulnerability database, and the latest published version is fetched for comparison.
 
 ## Connectivity
+
+![Every shell HEIDES connects to](assets/connectivity.png)
 
 One core, every shell. The same binary speaks to everything.
 
