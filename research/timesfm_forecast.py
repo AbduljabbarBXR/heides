@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """TimesFM zero shot forecast smoke test.
 
-Feeds a repo health shaped series into the hosted open weights model and
-prints a forecast with quantiles. Runs on CPU, no GPU needed.
+Feeds a repo health shaped series into the open weights model and prints a
+forecast with quantiles. Runs on CPU, no GPU needed.
 """
-import json
 import time
 
+import numpy as np
 import timesfm
 
 HORIZON = 8
@@ -17,19 +17,30 @@ SERIES = [10 + i * 0.35 + (i % 5) + (i * i) / 220.0 for i in range(40)]
 
 def main() -> None:
     t0 = time.time()
-    hparams = timesfm.TimesFmHparams(backend="cpu", per_core_batch_size=32, horizon=HORIZON)
-    checkpoint = timesfm.TimesFmCheckpoint(hf_model="google/timesfm-2.0-500m-pytorch")
-    tfm = timesfm.TimesFm(hparams=hparams, checkpoint=checkpoint)
-    print(f"model loaded in {time.time() - t0:.1f}s", flush=True)
+    model = timesfm.TimesFM_2p5_200M_torch.from_pretrained(
+        "google/timesfm-2.5-200m-pytorch", torch_compile=False
+    )
+    model.compile(
+        timesfm.ForecastConfig(
+            max_context=1024,
+            max_horizon=256,
+            normalize_inputs=True,
+            use_continuous_quantile_head=True,
+        )
+    )
+    print(f"model loaded and compiled in {time.time() - t0:.1f}s", flush=True)
 
     t1 = time.time()
-    out = tfm.forecast([SERIES], horizon=HORIZON)[0]
+    point, quantile = model.forecast(horizon=HORIZON, inputs=[np.array(SERIES)])
     print(f"forecast computed in {time.time() - t1:.1f}s", flush=True)
 
-    print("input tail:", [round(x, 2) for x in SERIES[-6:]])
-    print("mean forecast:", [round(x, 2) for x in out["mean"]])
-    for q in out.get("quantiles", []):
-        print(f"quantile {q['quantile']}:", [round(x, 2) for x in q["values"]])
+    print("input tail:", [round(float(x), 2) for x in SERIES[-6:]])
+    print("point forecast:", [round(float(x), 2) for x in point[0]])
+    # quantile shape (n, horizon, 10): mean, then 10th..90th
+    low = quantile[0, :, 1]
+    high = quantile[0, :, 9]
+    print("p10 band:", [round(float(x), 2) for x in low])
+    print("p90 band:", [round(float(x), 2) for x in high])
 
 
 if __name__ == "__main__":
