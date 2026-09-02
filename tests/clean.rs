@@ -1,0 +1,265 @@
+// The clean corpus gate.
+//
+// Idiomatic, correct code in every deep language must produce ZERO findings
+// from the taint, edge and practice guards. This is the permanent tripwire
+// against cosmetics. If a rule fires on clean code, the rule is wrong.
+
+use std::path::{Path, PathBuf};
+
+fn scan_guards(path: &Path, content: &str) -> Vec<String> {
+    let mut findings = Vec::new();
+    for r in heides::taint::scan_file(path, content) {
+        findings.push(format!("taint: {}", r.message));
+    }
+    for r in heides::edge::scan_file(path, content) {
+        findings.push(format!("edge: {}", r.message));
+    }
+    let lang = heides::parser::detect_language(path).unwrap_or_default();
+    for r in heides::practice::scan_file(path, content, &lang) {
+        findings.push(format!("practice: {}", r.message));
+    }
+    findings
+}
+
+fn check_clean(name: &str, file: &str, content: &str) {
+    let path = PathBuf::from(file);
+    let findings = scan_guards(&path, content);
+    assert!(
+        findings.is_empty(),
+        "{} must be clean, got: {:?}",
+        name,
+        findings
+    );
+    println!("[PASS] clean corpus {}", name);
+}
+
+#[test]
+fn clean_corpus_all_languages() {
+    // Rust: idiomatic, no unwrap, with return types.
+    check_clean(
+        "rust",
+        "clean.rs",
+        r#"use std::collections::HashMap;
+
+fn average(values: &[i64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let sum: i64 = values.iter().sum();
+    Some(sum as f64 / values.len() as f64)
+}
+
+fn lookup(map: &HashMap<String, i64>, key: &str) -> i64 {
+    map.get(key).copied().unwrap_or(0)
+}
+
+fn main() {
+    let data = vec![1, 2, 3, 4];
+    match average(&data) {
+        Some(avg) => println!("average {}", avg),
+        None => println!("no data"),
+    }
+    let mut map = HashMap::new();
+    map.insert("x".to_string(), 7);
+    println!("{}", lookup(&map, "x"));
+}
+"#,
+    );
+
+    // JavaScript: strict equality, radix, guarded storage, no debug output.
+    check_clean(
+        "javascript",
+        "clean.js",
+        r#"const MAX = 100;
+
+function average(values) {
+  if (values.length === 0) {
+    return 0;
+  }
+  const sum = values.reduce((a, b) => a + b, 0);
+  return sum / values.length;
+}
+
+function loadUser() {
+  const raw = localStorage.getItem("user");
+  if (raw == null) {
+    return null;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    return null;
+  }
+}
+
+function parsePort(value) {
+  return parseInt(value, 10);
+}
+
+module.exports = { average, loadUser, parsePort };
+"#,
+    );
+
+    // TypeScript: same discipline with types.
+    check_clean(
+        "typescript",
+        "clean.ts",
+        r#"interface User {
+  id: number;
+  name: string;
+}
+
+export function formatUser(user: User | null): string {
+  if (user === null) {
+    return "unknown";
+  }
+  return `${user.name} (${user.id})`;
+}
+
+export function safeDivide(a: number, b: number): number {
+  if (b === 0) {
+    return 0;
+  }
+  return a / b;
+}
+"#,
+    );
+
+    // Python: named exceptions, with blocks, no mutable defaults, no prints.
+    check_clean(
+        "python",
+        "clean.py",
+        r#"""A clean module."""
+
+def average(values):
+    if not values:
+        return 0.0
+    return sum(values) / len(values)
+
+
+def read_config(path):
+    with open(path, "r") as handle:
+        return handle.read()
+
+
+def parse_number(text):
+    try:
+        return int(text)
+    except ValueError as error:
+        return None
+"#,
+    );
+
+    // PHP: typed, no superglobals in sinks, no eval.
+    check_clean(
+        "php",
+        "clean.php",
+        r#"<?php
+
+namespace App;
+
+function average(array $values): float
+{
+    if (count($values) === 0) {
+        return 0.0;
+    }
+    return array_sum($values) / count($values);
+}
+
+final class Calculator
+{
+    public function add(int $a, int $b): int
+    {
+        return $a + $b;
+    }
+}
+"#,
+    );
+
+    // Go: handled errors, no exec of user input.
+    check_clean(
+        "go",
+        "clean.go",
+        r#"package main
+
+import (
+	"errors"
+	"strings"
+)
+
+func average(values []int) (float64, error) {
+	if len(values) == 0 {
+		return 0, errors.New("empty input")
+	}
+	sum := 0
+	for _, v := range values {
+		sum += v
+	}
+	return float64(sum) / float64(len(values)), nil
+}
+
+func normalize(input string) string {
+	return strings.TrimSpace(strings.ToLower(input))
+}
+"#,
+    );
+
+    // Java: prepared statements, no raw exec of input.
+    check_clean(
+        "java",
+        "clean.java",
+        r#"import java.util.List;
+
+public class Calculator {
+    public double average(List<Integer> values) {
+        if (values.isEmpty()) {
+            return 0.0;
+        }
+        double sum = 0.0;
+        for (int value : values) {
+            sum += value;
+        }
+        return sum / values.size();
+    }
+
+    public String normalize(String input) {
+        if (input == null) {
+            return "";
+        }
+        return input.trim().toLowerCase();
+    }
+}
+"#,
+    );
+
+    // C#: parameterized queries, guarded console input.
+    check_clean(
+        "csharp",
+        "clean.cs",
+        r#"using System;
+using System.Collections.Generic;
+using System.Linq;
+
+public class Calculator
+{
+    public double Average(List<int> values)
+    {
+        if (values.Count == 0)
+        {
+            return 0.0;
+        }
+        return values.Average();
+    }
+
+    public string Normalize(string input)
+    {
+        if (string.IsNullOrEmpty(input))
+        {
+            return string.Empty;
+        }
+        return input.Trim().ToLowerInvariant();
+    }
+}
+"#,
+    );
+}

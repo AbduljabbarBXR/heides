@@ -1,19 +1,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-mod deps;
-mod edge;
-mod grounding;
-mod harmony;
-mod indexer;
-mod parser;
-mod practice;
-mod server;
-mod spine;
-mod staged;
-mod taint;
-mod watch;
-mod web;
+use heides::{deps, grounding, harmony, indexer, server, spine, watch};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 

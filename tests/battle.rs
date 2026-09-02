@@ -122,7 +122,7 @@ fn battle_serial() {
     std::fs::create_dir_all(&b.fixture).unwrap();
 
     // Fixture: a real polyglot workspace with planted bugs.
-    b.write("Cargo.toml", "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nserde = \"1\"\n");
+    b.write("Cargo.toml", "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nserde = \"=1.0.1\"\n");
     b.write("src/lib.rs", &fixture_lib());
     b.write("src/main.rs", &fixture_main());
     b.write("app.js", &fixture_js());
@@ -134,7 +134,7 @@ fn battle_serial() {
 
     // 1. Version
     let (out, _, ok) = b.cli(&["version"]);
-    b.check("version command exits clean and prints a version", ok && out.contains("0.2"));
+    b.check("version command exits clean and prints a version", ok && out.contains("0.3"));
 
     // 2. Scan builds the spine
     let (out, _, ok) = b.cli(&["scan"]);
@@ -310,6 +310,31 @@ fn battle_serial() {
     // 19. Dependency guard talks to the registries
     let (out, _, _) = b.cli(&["deps"]);
     b.check("deps reports serde from the manifest", out.contains("serde"));
+
+    // 20. Anti cosmetic: a caret range must never be called outdated
+    let cosmetic_dir = b.fixture.join("caret_ok");
+    std::fs::create_dir_all(&cosmetic_dir).unwrap();
+    std::fs::write(
+        cosmetic_dir.join("Cargo.toml"),
+        "[package]\nname = \"caret_ok\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1\"\n",
+    )
+    .unwrap();
+    let (out, _, _) = Command::new(BIN)
+        .args(["deps", "caret_ok"])
+        .current_dir(&b.fixture)
+        .output()
+        .map(|o| {
+            (
+                String::from_utf8_lossy(&o.stdout).to_string(),
+                String::from_utf8_lossy(&o.stderr).to_string(),
+                o.status.success(),
+            )
+        })
+        .unwrap();
+    b.check(
+        "caret range serde 1 is not reported outdated",
+        !out.contains("outdated") && !out.contains("falls outside"),
+    );
 
     let _ = std::fs::remove_dir_all(&b.fixture);
     b.score();

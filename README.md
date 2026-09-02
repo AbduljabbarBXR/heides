@@ -197,7 +197,7 @@ Example VS Code settings fragment.
 
 This is milestone three. The Spine parses eight languages with tree sitter and builds symbols, call edges, import edges and signatures into a persistent index. Harmony runs the staged apply guard, edge case checks, security taint tracking for SQL, shell, filesystem and prompt injection, best practice rules and the OSV dependency check. Grounding evaluates plans against the graph, scaffolds new projects, and confirms facts against the package registries on the web. The MCP server exposes every capability as a tool, and the watch loop keeps the index fresh. The whole harness ships as one binary that runs on desktop, server, CI and Termux.
 
-Every change lands behind the same gate, lint, build, the unit suite, and the serial battle suite of forty seven end to end checks run against a real fixture workspace, including MCP round trips and taint scenarios in all eight languages.
+Every change lands behind the same gate, lint, build, the unit suite, and the serial battle suite of forty eight end to end checks run against a real fixture workspace, including MCP round trips and taint scenarios in all eight languages. A clean corpus gate asserts zero findings on idiomatic code in all eight languages, so a rule that fires on clean code fails the build.
 
 ## FAQ
 
