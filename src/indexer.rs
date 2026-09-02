@@ -26,6 +26,12 @@ fn skip_dir(name: &str) -> bool {
             | "venv"
             | "__pycache__"
             | ".next"
+            | ".open-next"
+            | ".netlify"
+            | ".vercel"
+            | ".output"
+            | "storage"
+            | "temp"
             | "dist"
             | "build"
     )
@@ -226,6 +232,15 @@ mod tests {
     fn skips_junk_dirs() {
         assert!(skip_dir("node_modules"));
         assert!(skip_dir(".git"));
+        assert!(skip_dir(".open-next"));
+        assert!(skip_dir(".netlify"));
+        assert!(skip_dir(".vercel"));
+        assert!(skip_dir(".output"));
+        assert!(skip_dir("storage"));
+        assert!(skip_dir("temp"));
+        assert!(skip_dir(".next"));
+        assert!(skip_dir("dist"));
+        assert!(skip_dir("build"));
         assert!(!skip_dir("src"));
     }
 
