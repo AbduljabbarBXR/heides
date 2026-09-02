@@ -92,6 +92,22 @@ fn fixture_py() -> String {
     .to_string()
 }
 
+fn fixture_php() -> String {
+    "<?php\nfunction load() {\n    $q = $_GET['id'];\n    mysqli_query($conn, $q);\n}\n".to_string()
+}
+
+fn fixture_go() -> String {
+    "package main\n\nfunc load() {\n    q := r.URL.Query().Get(\"id\")\n    db.Query(q)\n}\n".to_string()
+}
+
+fn fixture_java() -> String {
+    "class App {\n    void load(HttpServletRequest request) {\n        String q = request.getParameter(\"id\");\n        stmt.executeQuery(q);\n    }\n}\n".to_string()
+}
+
+fn fixture_cs() -> String {
+    "class App {\n    void Load() {\n        var q = Request.QueryString[\"id\"];\n        cmd.ExecuteScalar(q);\n    }\n}\n".to_string()
+}
+
 fn has_no_dash(text: &str) -> bool {
     !text.contains('-') && !text.contains('\u{2013}') && !text.contains('\u{2014}')
 }
@@ -111,6 +127,10 @@ fn battle_serial() {
     b.write("src/main.rs", &fixture_main());
     b.write("app.js", &fixture_js());
     b.write("app.py", &fixture_py());
+    b.write("app.php", &fixture_php());
+    b.write("app.go", &fixture_go());
+    b.write("app.java", &fixture_java());
+    b.write("app.cs", &fixture_cs());
 
     // 1. Version
     let (out, _, ok) = b.cli(&["version"]);
@@ -143,6 +163,10 @@ fn battle_serial() {
     b.check("check exits clean", ok);
     b.check("check catches SQL taint", out.contains("SQL"));
     b.check("check catches shell taint", out.contains("shell"));
+    b.check("check catches PHP SQL taint", out.contains("app.php"));
+    b.check("check catches Go SQL taint", out.contains("app.go"));
+    b.check("check catches Java SQL taint", out.contains("app.java"));
+    b.check("check catches C# SQL taint", out.contains("app.cs"));
     b.check("check catches unwrap panic risk", out.contains("unwrap"));
     b.check("check catches hardcoded secret", out.contains("secret"));
     b.check("check catches debug output", out.contains("debug output"));

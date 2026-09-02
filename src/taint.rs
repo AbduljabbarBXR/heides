@@ -15,7 +15,7 @@ pub struct TaintReport {
     pub line: u64,
 }
 
-const SOURCES: [(&str, &str); 10] = [
+const SOURCES: [(&str, &str); 15] = [
     ("javascript", r"\b(req|request)\.(query|params|body|headers|cookies)\b"),
     ("javascript", r"\bprocess\.env\b"),
     ("javascript", r"\blocalStorage\b"),
@@ -26,9 +26,14 @@ const SOURCES: [(&str, &str); 10] = [
     ("python", r"\bos\.environ\b"),
     ("python", r"\bsys\.argv\b"),
     ("python", r"\brequest\.(args|form|json|values)\b"),
+    ("php", r"\b\$_(GET|POST|REQUEST|COOKIE|SERVER)\b"),
+    ("go", r"\b(r\.URL\.Query|FormValue|os\.Args|os\.Getenv)\b"),
+    ("java", r"\b(request|req)\.(getParameter|getHeader|getCookies)\b"),
+    ("java", r"\bSystem\.(getenv|getProperty)\b"),
+    ("csharp", r"\b(Request\.(QueryString|Form|Headers)|Console\.ReadLine|Environment\.GetEnvironmentVariable)\b"),
 ];
 
-const SINKS: [(&str, &str, &str); 10] = [
+const SINKS: [(&str, &str, &str); 20] = [
     ("javascript", r"\b(query|execute|exec)\s*\(", "SQL"),
     ("javascript", r"\b(eval|Function)\s*\(", "eval"),
     ("javascript", r"\bexec\s*\(", "shell"),
@@ -39,6 +44,16 @@ const SINKS: [(&str, &str, &str); 10] = [
     ("python", r"\bopen\s*\(", "filesystem"),
     ("javascript", r"\b(prompt|system_message|messages)\b", "prompt"),
     ("python", r"\b(prompt|system_message|messages)\b", "prompt"),
+    ("php", r"\b(mysqli_query|query|exec|system|shell_exec|eval|include|unlink)\s*\(", "SQL"),
+    ("php", r"\b(file_get_contents|file_put_contents|fopen)\s*\(", "filesystem"),
+    ("go", r"\b(db\.Query|QueryRow|Exec|exec\.Command|sql\.Open)\s*\(", "SQL"),
+    ("go", r"\b(os\.(Create|WriteFile|Remove)|ioutil\.WriteFile)\s*\(", "filesystem"),
+    ("java", r"\b(executeQuery|executeUpdate|execute|createQuery)\s*\(", "SQL"),
+    ("java", r"\b(Runtime\.getRuntime\(\)\.exec|ProcessBuilder)\s*\(", "shell"),
+    ("java", r"\b(Files\.(write|readAllBytes)|FileWriter|FileOutputStream)\s*\(", "filesystem"),
+    ("csharp", r"\b(SqlCommand|ExecuteScalar|ExecuteNonQuery|ExecuteReader)\s*\(", "SQL"),
+    ("csharp", r"\bProcess\.Start\s*\(", "shell"),
+    ("csharp", r"\bFile\.(WriteAllText|ReadAllText|Delete|Move)\s*\(", "filesystem"),
 ];
 
 /// Scan one source file for taint flows.
@@ -122,7 +137,8 @@ fn regex_hit(pattern: &str, line: &str) -> bool {
         .replace(r"\s", " ")
         .replace(r"\.", ".")
         .replace(r"\(", "(")
-        .replace(r"\)", ")");
+        .replace(r"\)", ")")
+        .replace(r"\$", "$");
     let mut start_bound = false;
     let mut end_bound = false;
     if let Some(stripped) = pat.strip_prefix('\u{1}') {
@@ -291,7 +307,7 @@ fn assigned_var(line: &str) -> Option<String> {
     }
     let lhs = &trimmed[..eq];
     let mut ident = String::new();
-    for ch in lhs.trim_end().chars().rev() {
+    for ch in lhs.trim_end().trim_end_matches(':').trim_end().chars().rev() {
         if ch.is_alphanumeric() || ch == '_' {
             ident.insert(0, ch);
         } else {
@@ -398,5 +414,37 @@ mod tests {
         let reports = scan_file(p, src);
         // "run(" must not trigger shell taint without a source.
         assert!(!reports.iter().any(|r| r.message.contains("shell")));
+    }
+
+    #[test]
+    fn detects_php_sql_taint() {
+        let src = "<?php\nfunction load() {\n    $q = $_GET['id'];\n    mysqli_query($conn, $q);\n}\n";
+        let p = std::path::Path::new("app.php");
+        let reports = scan_file(p, src);
+        assert!(reports.iter().any(|r| r.message.contains("SQL")));
+    }
+
+    #[test]
+    fn detects_go_sql_taint() {
+        let src = "package main\n\nfunc load() {\n    q := r.URL.Query().Get(\"id\")\n    db.Query(q)\n}\n";
+        let p = std::path::Path::new("app.go");
+        let reports = scan_file(p, src);
+        assert!(reports.iter().any(|r| r.message.contains("SQL")));
+    }
+
+    #[test]
+    fn detects_java_sql_taint() {
+        let src = "class App {\n    void load(HttpServletRequest request) {\n        String q = request.getParameter(\"id\");\n        stmt.executeQuery(q);\n    }\n}\n";
+        let p = std::path::Path::new("app.java");
+        let reports = scan_file(p, src);
+        assert!(reports.iter().any(|r| r.message.contains("SQL")));
+    }
+
+    #[test]
+    fn detects_csharp_sql_taint() {
+        let src = "class App {\n    void Load() {\n        var q = Request.QueryString[\"id\"];\n        cmd.ExecuteScalar(q);\n    }\n}\n";
+        let p = std::path::Path::new("app.cs");
+        let reports = scan_file(p, src);
+        assert!(reports.iter().any(|r| r.message.contains("SQL")));
     }
 }
