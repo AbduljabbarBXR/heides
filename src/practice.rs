@@ -91,6 +91,97 @@ fn secret_assignment(line: &str) -> bool {
         _ => return false,
     };
     let content = value[1..].split(q).next().unwrap_or("");
+    // Constant references and env var names are not credentials. Real
+    // secrets almost never render as SCREAMING_SNAKE, aws keys, sk and pk
+    // prefixed keys and PEM blocks carry lowercase or no underscores, so
+    // they keep firing below.
+    if !content.is_empty()
+        && content
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        && content.contains('_')
+    {
+        return false;
+    }
+    // Escaped control sequences and NUL marker strings are not credentials.
+    // Real newlines inside multiline PEM bodies stay allowed.
+    if content.contains("\\u") || content.contains('\0') {
+        return false;
+    }
+    // Fixture and placeholder values. Truncated keys carry an ellipsis,
+    // dummy keys start with a clearly fake marker token. Values that merely
+    // contain such a token later, like sk_test keys, still fire.
+    if content.contains("...") {
+        return false;
+    }
+    let first = content
+        .split(['-', '_', ' '])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if matches!(
+        first.as_str(),
+        "test"
+            | "dummy"
+            | "example"
+            | "fake"
+            | "your"
+            | "sample"
+            | "demo"
+            | "mock"
+            | "changeme"
+            | "placeholder"
+            | "xxxx"
+            | "invalid"
+    ) {
+        return false;
+    }
+    // Prose and display labels are not credentials. Real keys never carry
+    // a space, except PEM headers which keep their leading marker.
+    if content.contains(' ') && !content.starts_with("-----") {
+        return false;
+    }
+    // Quoted env references, chat template tokens and file names are
+    // references, not credentials.
+    if content.starts_with("{env") || content.contains("<|") {
+        return false;
+    }
+    if content.ends_with(".json")
+        || content.ends_with(".yaml")
+        || content.ends_with(".yml")
+        || content.ends_with(".toml")
+        || content.ends_with(".txt")
+        || content.ends_with(".csv")
+        || content.ends_with(".pem")
+        || content.ends_with(".crt")
+        || content.ends_with(".key")
+        || content.ends_with(".p12")
+        || content.ends_with(".env")
+    {
+        return false;
+    }
+    // Endpoints and paths are not credentials. PEM bodies keep their
+    // leading marker or trailing padding and still fire.
+    if content.contains("://") {
+        return false;
+    }
+    if content.contains('/') && !content.starts_with("-----") && !content.ends_with('=') {
+        return false;
+    }
+    // A lowercase word without a single digit or capital is a name, not a
+    // credential, unless it carries a known credential prefix.
+    let lower = content.to_ascii_lowercase();
+    let credential_prefix = [
+        "sk-", "pk-", "glpat-", "ghp_", "gho_", "xoxb", "xapp-", "nv-", "hf_", "akia", "ya29",
+        "-----",
+    ];
+    if !content
+        .chars()
+        .any(|c| c.is_ascii_digit() || c.is_ascii_uppercase())
+        && !credential_prefix.iter().any(|p| lower.starts_with(p))
+    {
+        return false;
+    }
     let has_non_alpha = content.chars().any(|c| !c.is_ascii_alphabetic());
     content.len() >= 6
         && (has_non_alpha || content.len() >= 16)
@@ -158,15 +249,66 @@ pub fn scan_file(path: &Path, content: &str, lang: &str) -> Vec<PracticeReport> 
             && !line.contains("os.environ")
             && !lower.contains("getenv")
         {
+            let severity = if is_test_path(path) && !strong_credential_shape(line) {
+                // Mock credentials in test files are idiomatic. They stay
+                // visible as warnings but only real key structure blocks.
+                "warning"
+            } else {
+                "critical"
+            };
             reports.push(rep(
                 path,
                 line_no,
-                "critical",
+                severity,
                 "possible secret or credential hardcoded in source.",
             ));
         }
     }
     reports
+}
+
+/// True when the path marks test code: a test directory segment or a test
+/// file name. Fixture and spec trees are where mock credentials live.
+fn is_test_path(path: &Path) -> bool {
+    let Some(text) = path.to_str() else {
+        return false;
+    };
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("__tests__")
+        || lower.contains(".test.")
+        || lower.contains(".spec.")
+        || lower.contains("_test.")
+    {
+        return true;
+    }
+    text.split('/').any(|seg| {
+        let s = seg.to_ascii_lowercase();
+        s == "test" || s == "tests" || s == "testing"
+    })
+}
+
+/// True when the quoted value carries real credential structure: a long
+/// value under a known key prefix, or a PEM body. Short ambiguous values
+/// in test files are mocks and stay warnings.
+fn strong_credential_shape(line: &str) -> bool {
+    let Some(q) = line.find(['"', '\'']) else {
+        return false;
+    };
+    let quote = line.as_bytes()[q];
+    let Some(rest) = line[q + 1..].find(quote as char) else {
+        return false;
+    };
+    let content = &line[q + 1..q + 1 + rest];
+    content.len() >= 20
+        && (content.starts_with("sk-")
+            || content.starts_with("pk-")
+            || content.starts_with("glpat-")
+            || content.starts_with("ghp_")
+            || content.starts_with("gho_")
+            || content.starts_with("AKIA")
+            || content.starts_with("ya29")
+            || content.starts_with("eyJ")
+            || content.starts_with("-----"))
 }
 
 /// Find the line and indent of the python main guard, if present.
@@ -340,5 +482,70 @@ mod tests {
         let lines: Vec<&str> = src.lines().collect();
         assert_eq!(body_length(&lines, 0, "rust"), 5);
         assert_eq!(body_length(&lines, 5, "rust"), 1);
+    }
+
+    #[test]
+    fn placeholder_and_fixture_values_stay_silent() {
+        // Env var name placeholders, fixture keys, truncated keys and NUL
+        // marker strings are not credentials.
+        let src = concat!(
+            "const sudo_password = \"SUDO_PASSWORD\";\n",
+            "const api_key = \"AUXILIARY_VISION_API_KEY\";\n",
+            "const apiKey = \"test-key\";\n",
+            "const serverToken = \"\\u0000server\\u0000\";\n",
+            "const redacted = \"sk-proj-...e999\";\n",
+            "const apiKeyDisplay = \"Microsoft Entra ID\";\n",
+            "const tokenEvent = \"token_auth_success\";\n",
+            "const tokenizer_file = \"tokenizer.json\";\n",
+            "const chat_eos_token = \"<|im_end|>\";\n",
+            "const providerUrl = \"https://bots.qq.com/app/getAppAccessToken\";\n",
+        );
+        let p = std::path::Path::new("clean.js");
+        let reports = scan_file(p, src, "javascript");
+        assert!(
+            !reports.iter().any(|r| r.message.contains("secret")),
+            "placeholders must not fire, got {:?}",
+            reports
+        );
+    }
+
+    #[test]
+    fn real_credential_shapes_still_fire() {
+        let src = concat!(
+            "const apiKey = \"sk-proj-9f3a7c2e11b4d50891aab3c4d5e6f7a8\";\n",
+            "const aws_secret_key = \"AKIAIOSFODNN7EXAMPLE\";\n",
+            "PRIVATE_KEY = \"-----BEGIN RSA PRIVATE KEY-----MIIEowIBAAKCAQEA5XyZ2bQ8Jk3f7pL9mVn0cRdU4Hs\"\n",
+        );
+        let p = std::path::Path::new("dirty.py");
+        let reports = scan_file(p, src, "python");
+        let secrets: Vec<_> = reports
+            .iter()
+            .filter(|r| r.message.contains("secret"))
+            .collect();
+        assert_eq!(secrets.len(), 3, "real keys must fire, got {:?}", reports);
+    }
+
+    #[test]
+    fn weak_mock_in_test_path_is_warning_strong_stays_critical() {
+        let p = std::path::Path::new("specs/login.test.ts");
+        let weak = "const api_key = \"sk-12345abc\";\n";
+        let reports = scan_file(p, weak, "typescript");
+        let hits: Vec<_> = reports
+            .iter()
+            .filter(|r| r.message.contains("secret"))
+            .collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].severity, "warning", "mock in test must downgrade");
+        let strong = "const api_key = \"sk-proj-9f3a7c2e11b4d50891aab3c4d5e6f7a8\";\n";
+        let reports = scan_file(p, strong, "typescript");
+        let hits: Vec<_> = reports
+            .iter()
+            .filter(|r| r.message.contains("secret"))
+            .collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0].severity, "critical",
+            "real key in test stays critical"
+        );
     }
 }
