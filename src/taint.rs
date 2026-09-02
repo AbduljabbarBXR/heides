@@ -191,7 +191,36 @@ fn is_word_char(c: char) -> bool {
 }
 
 /// Match a rule pattern against a line with word boundary support.
-pub(crate) fn regex_hit(pattern: &str, line: &str) -> bool {
+pub(crate) fn regex_hit(pattern: &'static str, line: &str) -> bool {
+    let cache = PREPARED.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().unwrap();
+    let (start_bound, end_bound, candidates) =
+        guard.entry(pattern).or_insert_with(|| prepare(pattern));
+    for cand in candidates.iter() {
+        if let Some(pos) = line.find(cand) {
+            let before_ok = if *start_bound {
+                pos == 0 || !is_word_char(line[..pos].chars().last().unwrap_or(' '))
+            } else {
+                true
+            };
+            let end = pos + cand.chars().count();
+            let after_ok = if *end_bound {
+                end >= line.chars().count() || !is_word_char(line.chars().nth(end).unwrap_or(' '))
+            } else {
+                true
+            };
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Normalize a rule pattern once and enumerate every concrete candidate
+/// string it can match. The normalization and expansion used to run on
+/// every line, which made the guard passes quadratic in real workspaces.
+fn prepare(pattern: &'static str) -> (bool, bool, Vec<String>) {
     let mut pat = pattern
         .replace(r"\b", "\u{1}")
         .replace(r"\s", " ")
@@ -209,35 +238,20 @@ pub(crate) fn regex_hit(pattern: &str, line: &str) -> bool {
         end_bound = true;
         pat = pat.trim_end_matches('\u{1}').to_string();
     }
-    let Ok(pos) = match_position(line, &pat) else {
-        return false;
-    };
-    let before_ok = if start_bound {
-        pos == 0 || !is_word_char(line[..pos].chars().last().unwrap_or(' '))
-    } else {
-        true
-    };
-    let end = pos + pat.chars().count();
-    let after_ok = if end_bound {
-        end >= line.chars().count() || !is_word_char(line.chars().nth(end).unwrap_or(' '))
-    } else {
-        true
-    };
-    before_ok && after_ok
+    let mut candidates = Vec::new();
+    for concrete in concrete_patterns(&pat) {
+        candidates.extend(expand(&concrete));
+    }
+    (start_bound, end_bound, candidates)
 }
 
-/// Find the byte position of a pattern in a line.
-/// Handles parenthesized alternation groups and bounded quantifiers.
-fn match_position(line: &str, pattern: &str) -> Result<usize, ()> {
-    for concrete in concrete_patterns(pattern) {
-        for cand in expand(&concrete) {
-            if let Some(pos) = line.find(&cand) {
-                return Ok(pos);
-            }
-        }
-    }
-    Err(())
-}
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
+type PreparedPattern = (bool, bool, Vec<String>);
+type PreparedCache = HashMap<&'static str, PreparedPattern>;
+
+static PREPARED: OnceLock<Mutex<PreparedCache>> = OnceLock::new();
 
 /// Expand alternation groups like (a|b|c) into concrete patterns.
 /// Handles multiple flat groups; nested groups are supported one level deep.
