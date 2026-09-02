@@ -1,6 +1,6 @@
 # HEIDES
 
-![HEIDES, the code nervous system](assets/banner.png)
+![HEIDES, the code nervous system](assets/banner.webp)
 
 ## The code nervous system
 
@@ -20,7 +20,7 @@ HEIDES is three organs over one spine, all deterministic, all local, all explain
 
 ### The Spine
 
-![The Spine maps the codebase into a persistent graph](assets/spine.png)
+![The Spine maps the codebase into a persistent graph](assets/spine.webp)
 
 Perception and memory. The Spine walks the codebase and builds a compact persistent graph of symbols, files, callers, callees, imports and signatures. The index lives on disk in the workspace and is updated incrementally as files change. Every later query, from Harmony guards to Grounding plans to the agent itself, reads the same map. No model is involved. This layer is pure analysis.
 
@@ -33,7 +33,7 @@ The graph answers four questions directly.
 
 ### Harmony
 
-![The HEIDES architecture](assets/graph.png)
+![The HEIDES architecture](assets/graph.webp)
 
 Judgment. Harmony runs the guard modules against the Spine graph and against proposed patches. Every guard is deterministic and reports evidence, never guesses.
 
@@ -51,13 +51,13 @@ Here is what a finding looks like.
 
 ### Grounding
 
-![Grounding refines plans against the spine and the web](assets/grounding.png)
+![Grounding refines plans against the spine and the web](assets/grounding.webp)
 
 Refinement. Grounding takes an objective or a plan and checks it against the Spine and against the outside world. It confirms feasibility, surfaces missing prerequisites, and returns a bounded specification that the agent then builds against. For new projects it turns a plan into a scaffold, confirms security and best practices, and hands a clean foundation back to the agent. For facts that change over time it can consult the web and update its own knowledge.
 
 ## How it works
 
-![How HEIDES works, the event driven flow](assets/how-it-works.png)
+![How HEIDES works, the event driven flow](assets/how-it-works.webp)
 
 HEIDES is event driven. It wakes when a session starts or a file changes, works, and sleeps when the job is done. Nothing is stale because everything recomputes on demand against the persistent index.
 
@@ -70,7 +70,7 @@ HEIDES is event driven. It wakes when a session starts or a file changes, works,
 
 ## How the guards work
 
-![How the HEIDES guards run](assets/guards.png)
+![How the HEIDES guards run](assets/guards.webp)
 
 * Staged apply. An agent proposes a patch that changes add(a, b) into add(a, b, c). HEIDES applies the patch in memory, parses the changed file again, compares signatures against the spine, finds that main still calls add with two arguments, and reports a blocker with the exact call site. Nothing has been written to disk.
 * Security taint. A line assigns from req.query. A later line passes that variable into db.query. HEIDES reports the sink line and names the source line. SQL, shell, filesystem and prompt injection sinks are covered across every deep language.
@@ -80,7 +80,7 @@ HEIDES is event driven. It wakes when a session starts or a file changes, works,
 
 ## Connectivity
 
-![Every shell HEIDES connects to](assets/connectivity.png)
+![Every shell HEIDES connects to](assets/connectivity.webp)
 
 One core, every shell. The same binary speaks to everything.
 
