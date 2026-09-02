@@ -18,6 +18,10 @@ pub fn detect_language(path: &Path) -> Option<String> {
         "ts" => "typescript",
         "tsx" => "typescript",
         "py" => "python",
+        "php" => "php",
+        "go" => "go",
+        "java" => "java",
+        "cs" => "csharp",
         _ => return None,
     };
     Some(lang.to_string())
@@ -36,6 +40,10 @@ fn language_for(lang: &str) -> Option<tree_sitter::Language> {
             Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
         }
         "python" => Some(tree_sitter_python::LANGUAGE.into()),
+        "php" => Some(tree_sitter_php::LANGUAGE_PHP.into()),
+        "go" => Some(tree_sitter_go::LANGUAGE.into()),
+        "java" => Some(tree_sitter_java::LANGUAGE.into()),
+        "csharp" => Some(tree_sitter_c_sharp::LANGUAGE.into()),
         _ => None,
     }
 }
@@ -99,6 +107,14 @@ fn last_segment(full: &str) -> String {
     full.rsplit(['.', ':']).next().unwrap_or(full).trim().to_string()
 }
 
+/// Extract the quoted string path from a Go import spec text.
+fn quoted_path(spec: &str) -> Option<String> {
+    let start = spec.find('"')? + 1;
+    let rest = &spec[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
 /// Extract a readable signature for a function node, truncated at the body.
 fn signature_of(node: Node, content: &str) -> String {
     let raw = text(node, content);
@@ -114,15 +130,16 @@ fn enclosing_function(node: Node, content: &str) -> Option<String> {
     let mut cur = node.parent();
     while let Some(n) = cur {
         let kind = n.kind();
-        if matches!(
-            kind,
-            "function_item"
-                | "function_declaration"
-                | "generator_function_declaration"
-                | "method_definition"
-                | "function_definition"
-                | "arrow_function"
-        ) {
+        if kind == "function_item"
+                || kind == "function_declaration"
+                || kind == "generator_function_declaration"
+                || kind == "method_definition"
+                || kind == "function_definition"
+                || kind == "method_declaration"
+                || kind == "constructor_declaration"
+                || kind == "local_function_statement"
+                || kind == "arrow_function"
+        {
             return name_of(n, content);
         }
         cur = n.parent();
@@ -136,14 +153,21 @@ const SYMBOL_KINDS: &[&str] = &[
     "generator_function_declaration",
     "function_definition",
     "method_definition",
+    "method_declaration",
+    "constructor_declaration",
+    "local_function_statement",
     "struct_item",
     "class_declaration",
     "class_definition",
+    "struct_declaration",
+    "record_declaration",
     "enum_item",
     "enum_declaration",
     "trait_item",
+    "trait_declaration",
     "interface_declaration",
     "type_alias_declaration",
+    "type_declaration",
     "type_item",
     "mod_item",
     "const_item",
@@ -194,11 +218,20 @@ fn walk(node: Node, content: &str, path: &Path, out: &mut ParsedFile, _current: 
     // Calls
     let is_call = match out.lang.as_str() {
         "python" => kind == "call",
+        "java" => kind == "method_invocation",
+        "php" => kind == "function_call_expression" || kind == "method_call_expression",
+        "csharp" => kind == "invocation_expression",
         _ => kind == "call_expression",
     };
     if is_call {
-        if let Some(callee) = field_text(node, content, "function") {
-            if !callee.is_empty() && !callee.contains('"') {
+        let callee_field = match out.lang.as_str() {
+            "java" | "php" if kind == "method_invocation" || kind == "method_call_expression" => {
+                field_text(node, content, "name")
+            }
+            _ => field_text(node, content, "function"),
+        };
+        if let Some(callee) = callee_field {
+            if !callee.is_empty() && !callee.contains('"') && !callee.contains('(') {
                 let caller = enclosing_function(node, content).unwrap_or_else(|| "module level".to_string());
                 out.calls.push(CallEdge {
                     caller,
@@ -274,6 +307,98 @@ fn walk(node: Node, content: &str, path: &Path, out: &mut ParsedFile, _current: 
                 });
             }
         }
+        "import_declaration" if out.lang == "go" => {
+            // Go: import ( "fmt" ; alias "path" ) or import "path"
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == "import_spec" || child.kind() == "import_spec_list" {
+                    if child.kind() == "import_spec_list" {
+                        let mut c2 = child.walk();
+                        for spec in child.children(&mut c2) {
+                            if spec.kind() == "import_spec" {
+                                if let Some(imp) = quoted_path(&text(spec, content)) {
+                                    out.imports.push(ImportEdge {
+                                        file: path.display().to_string(),
+                                        imported: imp,
+                                        line,
+                                    });
+                                }
+                            }
+                        }
+                    } else if let Some(imp) = quoted_path(&text(child, content)) {
+                        out.imports.push(ImportEdge {
+                            file: path.display().to_string(),
+                            imported: imp,
+                            line,
+                        });
+                    }
+                }
+            }
+        }
+        "import_declaration" if out.lang == "java" => {
+            // Java: import java.util.List;  the path is the node text minus
+            // the keyword and the terminator
+            let raw = text(node, content);
+            let imp = raw
+                .trim_start_matches("import")
+                .trim_start_matches("static")
+                .trim()
+                .trim_end_matches(';')
+                .trim()
+                .to_string();
+            if !imp.is_empty() {
+                out.imports.push(ImportEdge {
+                    file: path.display().to_string(),
+                    imported: imp,
+                    line,
+                });
+            }
+        }
+        "using_directive" if out.lang == "csharp" => {
+            // C#: using System.Collections.Generic;  the name is the node
+            // text minus the keyword and the terminator
+            let raw = text(node, content);
+            let imp = raw
+                .trim_start_matches("using")
+                .trim()
+                .trim_end_matches(';')
+                .trim()
+                .to_string();
+            let imp = imp.rsplit('=').next().unwrap_or(&imp).trim().to_string();
+            if !imp.is_empty() {
+                out.imports.push(ImportEdge {
+                    file: path.display().to_string(),
+                    imported: imp,
+                    line,
+                });
+            }
+        }
+        "namespace_use_declaration" if out.lang == "php" => {
+            // PHP: use Vendor\Package\Class as Alias;
+            let mut imp = None;
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == "namespace_use_clause" {
+                    imp = Some(text(child, content));
+                }
+            }
+            if let Some(raw) = imp {
+                let clean = raw
+                    .split(" as ")
+                    .next()
+                    .unwrap_or(&raw)
+                    .trim()
+                    .trim_start_matches('\\')
+                    .to_string();
+                if !clean.is_empty() {
+                    out.imports.push(ImportEdge {
+                        file: path.display().to_string(),
+                        imported: clean,
+                        line,
+                    });
+                }
+            }
+        }
         _ => {}
     }
 
@@ -317,15 +442,51 @@ fn main() {
     }
 
     #[test]
-    fn python_classes_and_imports() {
-        let src = "import os\nfrom pathlib import Path\n\ndef run(name):\n    return Path(name)\n\nclass Worker:\n    def go(self):\n        return run('x')\n";
-        let p = std::path::Path::new("probe.py");
+    fn php_symbols_calls_and_imports() {
+        let src = "<?php\nuse Vendor\\Package\\Thing;\nfunction greet($name) {\n    return helper($name);\n}\nclass App {\n    public function run() {\n        return greet('x');\n    }\n}\n";
+        let p = std::path::Path::new("probe.php");
         let parsed = parse_file(p, src).unwrap();
-        assert!(parsed.imports.iter().any(|i| i.imported == "os"));
-        assert!(parsed.imports.iter().any(|i| i.imported == "pathlib"));
+        assert!(parsed.symbols.iter().any(|s| s.name == "greet"));
+        assert!(parsed.symbols.iter().any(|s| s.name == "App"));
         assert!(parsed.symbols.iter().any(|s| s.name == "run"));
-        assert!(parsed.symbols.iter().any(|s| s.name == "Worker"));
-        assert!(parsed.symbols.iter().any(|s| s.name == "go"));
-        assert!(parsed.calls.iter().any(|c| c.callee == "run"));
+        assert!(parsed.imports.iter().any(|i| i.imported == "Vendor\\Package\\Thing"));
+        assert!(parsed.calls.iter().any(|c| c.callee == "helper" && c.caller == "greet"));
+        assert!(parsed.calls.iter().any(|c| c.callee == "greet" && c.caller == "run"));
     }
+
+    #[test]
+    fn go_symbols_calls_and_imports() {
+        let src = "package main\n\nimport (\n    \"fmt\"\n)\n\nfunc add(a int, b int) int {\n    return a + b\n}\n\nfunc main() {\n    fmt.Println(add(1, 2))\n}\n";
+        let p = std::path::Path::new("probe.go");
+        let parsed = parse_file(p, src).unwrap();
+        assert!(parsed.symbols.iter().any(|s| s.name == "add"));
+        assert!(parsed.symbols.iter().any(|s| s.name == "main"));
+        assert!(parsed.imports.iter().any(|i| i.imported == "fmt"));
+        assert!(parsed.calls.iter().any(|c| c.callee == "add" && c.caller == "main"));
+        assert!(parsed.calls.iter().any(|c| c.callee == "Println"));
+    }
+
+    #[test]
+    fn java_symbols_calls_and_imports() {
+        let src = "import java.util.List;\n\nclass App {\n    void load(HttpServletRequest request) {\n        String q = request.getParameter(\"id\");\n        run(q);\n    }\n    void run(String s) {}\n}\n";
+        let p = std::path::Path::new("probe.java");
+        let parsed = parse_file(p, src).unwrap();
+        assert!(parsed.symbols.iter().any(|s| s.name == "App"));
+        assert!(parsed.symbols.iter().any(|s| s.name == "load"));
+        assert!(parsed.imports.iter().any(|i| i.imported == "java.util.List"));
+        assert!(parsed.calls.iter().any(|c| c.callee == "getParameter" && c.caller == "load"));
+        assert!(parsed.calls.iter().any(|c| c.callee == "run" && c.caller == "load"));
+    }
+
+    #[test]
+    fn csharp_symbols_calls_and_imports() {
+        let src = "using System.Collections.Generic;\n\nclass App {\n    void Load() {\n        var x = helper(1);\n    }\n    int helper(int n) => n;\n}\n";
+        let p = std::path::Path::new("probe.cs");
+        let parsed = parse_file(p, src).unwrap();
+        assert!(parsed.symbols.iter().any(|s| s.name == "App"));
+        assert!(parsed.symbols.iter().any(|s| s.name == "Load"));
+        assert!(parsed.imports.iter().any(|i| i.imported == "System.Collections.Generic"));
+        assert!(parsed.calls.iter().any(|c| c.callee == "helper" && c.caller == "Load"));
+    }
+
 }
