@@ -69,7 +69,7 @@ fn main() -> ExitCode {
         "status" => {
             let root = PathBuf::from(arg2);
             if !spine::exists(&root) {
-                println!("no spine index found. run: heides scan");
+                println!("no spine index found. run heides scan");
                 return ExitCode::FAILURE;
             }
             match spine::load(&root) {
@@ -94,7 +94,7 @@ fn main() -> ExitCode {
             let kind = args.get(2).map(|s| s.as_str()).unwrap_or("");
             let name = args.get(3).map(|s| s.as_str()).unwrap_or("");
             if kind.is_empty() || name.is_empty() {
-                println!("usage: heides query [callers|imports|definition|calls] [name]");
+                println!("usage. heides query [callers|imports|definition|calls] [name]");
                 return ExitCode::FAILURE;
             }
             let graph = match indexer::load_or_build(&root) {
@@ -183,7 +183,7 @@ fn main() -> ExitCode {
         "staged" => {
             let patch_path = args.get(2).map(|s| s.as_str()).unwrap_or("");
             if patch_path.is_empty() {
-                println!("usage: heides staged [patch file]");
+                println!("usage. heides staged [patch file]");
                 return ExitCode::FAILURE;
             }
             let patch_text = match std::fs::read_to_string(patch_path) {
@@ -233,7 +233,7 @@ fn main() -> ExitCode {
                 }
             };
             let verdict = grounding::evaluate(&plan, &graph, &root);
-            println!("feasible: {}", verdict.feasible);
+            println!("feasible {}", verdict.feasible);
             for n in &verdict.notes {
                 println!("  {}", n);
             }
@@ -243,7 +243,7 @@ fn main() -> ExitCode {
             let plan = args.get(2).map(|s| s.as_str()).unwrap_or("");
             let dir = args.get(3).map(|s| s.as_str()).unwrap_or(".");
             if plan.is_empty() {
-                println!("usage: heides scaffold [plan text] [dir]");
+                println!("usage. heides scaffold [plan text] [dir]");
                 return ExitCode::FAILURE;
             }
             match grounding::scaffold(plan, &PathBuf::from(dir)) {

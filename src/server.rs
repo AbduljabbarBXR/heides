@@ -130,7 +130,7 @@ fn handle(id: &Value, method: &str, params: &Value) {
                             "spine indexed {} files, {} symbols, {} call edges, {} imports",
                             graph.files.len(), graph.symbols.len(), graph.calls.len(), graph.imports.len()
                         ))),
-                        Err(e) => err(id, 1, &format!("save failed: {}", e)),
+                        Err(e) => err(id, 1, &format!("save failed. {}", e)),
                     }
                 }
                 "spine.query" => {
@@ -200,7 +200,7 @@ fn handle(id: &Value, method: &str, params: &Value) {
                     };
                     match harmony::check_staged(&std::path::PathBuf::from(&root), &graph, patch) {
                         Ok(reports) => ok(id, text_result(report_lines(&reports))),
-                        Err(e) => err(id, 2, &format!("patch could not be parsed: {}", e)),
+                        Err(e) => err(id, 2, &format!("patch could not be parsed. {}", e)),
                     }
                 }
                 "grounding.plan" => {
@@ -217,7 +217,7 @@ fn handle(id: &Value, method: &str, params: &Value) {
                     let dir = args.get("dir").and_then(|v| v.as_str()).unwrap_or(".");
                     match grounding::scaffold(plan, &std::path::PathBuf::from(dir)) {
                         Ok(files) => ok(id, text_result(format!("created:\n{}", files.join("\n")))),
-                        Err(e) => err(id, 3, &format!("scaffold failed: {}", e)),
+                        Err(e) => err(id, 3, &format!("scaffold failed. {}", e)),
                     }
                 }
                 "deps.check" => {
@@ -233,10 +233,10 @@ fn handle(id: &Value, method: &str, params: &Value) {
                     let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
                     ok(id, text_result(grounding::web_confirm(query)));
                 }
-                _ => err(id, 4, &format!("unknown tool: {}", name)),
+                _ => err(id, 4, &format!("unknown tool, {}", name)),
             }
         }
-        _ => err(id, 3, &format!("unknown method: {}", method)),
+        _ => err(id, 3, &format!("unknown method, {}", method)),
     }
 }
 

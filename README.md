@@ -4,15 +4,15 @@
 
 ## The code nervous system
 
-HEIDES is a deterministic harness that gives AI coding agents what they do not have on their own: senses, memory and judgment for code. Before an agent touches anything, HEIDES maps the entire codebase into a persistent graph, derives warnings and edge cases from that map, and grounds every plan against reality. The agent suggests. HEIDES decides what is safe.
+HEIDES is a deterministic harness that gives AI coding agents what they do not have on their own. Senses, memory and judgment for code. Before an agent touches anything, HEIDES maps the entire codebase into a persistent graph, derives warnings and edge cases from that map, and grounds every plan against reality. The agent suggests. HEIDES decides what is safe.
 
 HEIDES does not compete with agents. It is the substrate beneath them. One binary, no cloud, no model required for the core. It runs on a laptop, a server, a CI runner, and a phone running Termux.
 
 ## Why it exists
 
-An AI agent is powerful and blind. It can generate a perfect function and still break three callers it never saw, because it has no persistent map of the code. Linters and tests catch that damage after it lands, and only on paths that actually run. The classic failure: an agent changes a signature, unexercised call sites break, the test suite stays green, and production breaks at two in the morning.
+An AI agent is powerful and blind. It can generate a perfect function and still break three callers it never saw, because it has no persistent map of the code. Linters and tests catch that damage after it lands, and only on paths that actually run. The classic failure. An agent changes a signature, unexercised call sites break, the test suite stays green, and production breaks at two in the morning.
 
-HEIDES closes that gap at the moment that matters: before the patch is applied. It answers questions no tool answers in that instant. Who calls this function? Which imports does this file really use? Does this change conflict with the current graph? Is user input flowing into a SQL string, a shell, or a prompt?
+HEIDES closes that gap at the moment that matters, before the patch is applied. It answers questions no tool answers in that instant. Who calls this function? Which imports does this file really use? Does this change conflict with the current graph? Is user input flowing into a SQL string, a shell, or a prompt?
 
 ## Architecture
 
@@ -20,7 +20,7 @@ HEIDES is three organs over one spine, all deterministic, all local, all explain
 
 ### The Spine
 
-Perception and memory. The Spine walks the codebase and builds a compact persistent graph: symbols, files, callers, callees, imports and dataflow. The index lives on disk in the workspace and is updated incrementally as files change. Every later query, from Harmony guards to Grounding plans to the agent itself, reads the same map. No model is involved. This layer is pure analysis.
+Perception and memory. The Spine walks the codebase and builds a compact persistent graph of symbols, files, callers, callees, imports and dataflow. The index lives on disk in the workspace and is updated incrementally as files change. Every later query, from Harmony guards to Grounding plans to the agent itself, reads the same map. No model is involved. This layer is pure analysis.
 
 ### Harmony
 
@@ -32,7 +32,7 @@ Judgment. Harmony runs the guard modules against the Spine graph and against pro
 * Dependency. Detects upgrades that break the imports this project actually uses.
 * Practices. Surfaces violations of project conventions.
 
-Warnings are delivered the way a senior reviewer would deliver them: a file, a line, a severity, and the reason.
+Warnings are delivered the way a senior reviewer would deliver them. A file, a line, a severity, and the reason.
 
 ### Grounding
 
@@ -45,7 +45,7 @@ HEIDES is event driven. It wakes when a session starts or a file changes, works,
 1. The agent or user summons HEIDES before any change.
 2. The Spine maps the codebase and saves the index.
 3. Harmony derives warnings, edge cases and security notes from the map.
-4. The user states the objective. Grounding refines it: this is not feasible as stated, it needs these pieces, this variant is sound.
+4. The user states the objective. Grounding refines it. This is not feasible as stated, it needs these pieces, this variant is sound.
 5. The agent builds against the grounded spec while HEIDES guards every proposed patch.
 6. The job ends. HEIDES goes dormant until the next trigger.
 
@@ -53,7 +53,7 @@ HEIDES is event driven. It wakes when a session starts or a file changes, works,
 
 One core, every shell. The same binary speaks to everything.
 
-* CLI. Native commands: scan, status, query, check, staged, plan, scaffold, deps, watch and mcp.
+* CLI. Native commands are scan, status, query, check, staged, plan, scaffold, deps, watch and mcp.
 * MCP. A Model Context Protocol server over stdio. Any MCP aware agent, editor or harness attaches directly.
 * Agent systems. Claude Code, Codex, Cursor, OpenCode, Hermes and custom builds via MCP.
 * Skills. HEIDES exposes its capabilities as MCP tools and resources, so skill systems can compose it.
@@ -64,11 +64,11 @@ No ports, no daemon protocol, no cloud account. Just one process on stdio.
 
 ## Supported languages
 
-Deep analysis (taint, dataflow, call graph) targets the primary set: JavaScript, TypeScript, Python, Java, C#, Go, Rust, PHP, Ruby, C, C++, Kotlin and Swift. Every other language is covered by structural analysis through tree sitter: conflict checks, imports and practices. AI system files are first class: agent configs, MCP server manifests, prompt files, notebooks and dependency manifests are modeled as their own file kinds.
+Deep analysis (taint, dataflow, call graph) targets the primary set of JavaScript, TypeScript, Python, Java, C#, Go, Rust, PHP, Ruby, C, C++, Kotlin and Swift. Every other language is covered by structural analysis through tree sitter for conflict checks, imports and practices. AI system files are first class, agent configs, MCP server manifests, prompt files, notebooks and dependency manifests are modeled as their own file kinds.
 
 ## Install
 
-Requirements: a Rust toolchain to build from source, or a prebuilt binary from releases.
+Requirements are a Rust toolchain to build from source, or a prebuilt binary from releases.
 
     git clone git@github.com:AbduljabbarBXR/heides.git
     cd heides
@@ -124,7 +124,7 @@ Stays alive and reindexes on demand as files change.
 
 Starts the MCP server on stdio. Point any MCP client at it.
 
-Example VS Code settings fragment:
+Example VS Code settings fragment.
 
     {
       "mcp": {
@@ -148,7 +148,7 @@ Example VS Code settings fragment:
 
 ## Project status
 
-This is milestone two: a working deterministic harness. The Spine parses
+This is milestone two, a working deterministic harness. The Spine parses
 Rust, JavaScript, TypeScript and Python with tree sitter and builds symbols,
 call edges, import edges and signatures into a persistent index. Harmony runs
 the staged apply guard, edge case checks, security taint tracking (SQL,
@@ -159,14 +159,15 @@ MCP server exposes every capability as a tool, and the watch loop keeps the
 index fresh. The whole harness ships as one binary that runs on desktop,
 server, CI and Termux.
 
-Every change lands behind the same gate: lint, build, the unit suite, and the
+Every change lands behind the same gate, lint, build, the unit suite, and the
 serial battle suite of forty three end to end checks run against a real
 fixture workspace, including MCP round trips and dash free output
 enforcement.
 
-The roadmap: more languages in the deep set (Go, PHP, Java, C#), incremental
-index updates, interprocedural taint flow, upgrade breakage analysis against
-the graph, and a TUI panel for reviewing guard output while the agent works.
+The roadmap covers more languages in the deep set (Go, PHP, Java, C#),
+incremental index updates, interprocedural taint flow, upgrade breakage
+analysis against the graph, and a TUI panel for reviewing guard output while
+the agent works.
 
 ## Development
 
