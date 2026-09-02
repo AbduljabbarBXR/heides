@@ -196,7 +196,7 @@ edition = "2021"
 
     // Index the fresh project immediately so the agent starts with a map.
     let (graph, count) = crate::indexer::build_graph(dir);
-    crate::spine::save(&graph, &dir.to_path_buf()).map_err(|e| e.to_string())?;
+    crate::spine::save(&graph, dir).map_err(|e| e.to_string())?;
     created.push(format!("spine index built from {} parsed files", count));
     Ok(created)
 }
@@ -211,16 +211,16 @@ pub fn web_confirm(query: &str) -> String {
     );
     match crate::web::get(&crates_url) {
         Ok(body) => {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
-                if let Some(crates) = value.get("crates").and_then(|v| v.as_array()) {
-                    for c in crates.iter().take(3) {
-                        let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-                        let desc = c
-                            .get("description")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("no description");
-                        out.push(format!("crate {} : {}", name, desc));
-                    }
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body)
+                && let Some(crates) = value.get("crates").and_then(|v| v.as_array())
+            {
+                for c in crates.iter().take(3) {
+                    let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                    let desc = c
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("no description");
+                    out.push(format!("crate {} : {}", name, desc));
                 }
             }
         }
@@ -232,17 +232,17 @@ pub fn web_confirm(query: &str) -> String {
     );
     match crate::web::get(&npm_url) {
         Ok(body) => {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
-                if let Some(objs) = value.get("objects").and_then(|v| v.as_array()) {
-                    for o in objs.iter().take(3) {
-                        if let Some(pkg) = o.get("package") {
-                            let name = pkg.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-                            let desc = pkg
-                                .get("description")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("no description");
-                            out.push(format!("npm package {} : {}", name, desc));
-                        }
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body)
+                && let Some(objs) = value.get("objects").and_then(|v| v.as_array())
+            {
+                for o in objs.iter().take(3) {
+                    if let Some(pkg) = o.get("package") {
+                        let name = pkg.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                        let desc = pkg
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("no description");
+                        out.push(format!("npm package {} : {}", name, desc));
                     }
                 }
             }

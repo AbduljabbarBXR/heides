@@ -62,29 +62,33 @@ pub fn scan_file(path: &Path, content: &str) -> Vec<EdgeReport> {
                         ));
                     }
                 }
-                if trimmed.contains("getItem(") {
-                    if let Some(var) = storage_var(trimmed) {
-                        let (_s, e) = enclosing_block(&lines, &brace_blocks, i, &lang);
-                        let mut usages = 0usize;
-                        let mut guarded = false;
-                        for j in (i + 1)..=e {
-                            let l = lines[j];
-                            if contains_word(l, &var) {
-                                usages += 1;
-                                if l.contains("??")
-                                    || l.contains("||")
-                                    || l.contains("?.")
-                                    || l.contains("== null")
-                                    || l.contains("!= null")
-                                    || l.contains("if (")
-                                {
-                                    guarded = true;
-                                }
+                if trimmed.contains("getItem(")
+                    && let Some(var) = storage_var(trimmed)
+                {
+                    let (_s, e) = enclosing_block(&lines, &brace_blocks, i, &lang);
+                    let mut usages = 0usize;
+                    let mut guarded = false;
+                    for &l in lines.iter().take(e + 1).skip(i + 1) {
+                        if contains_word(l, &var) {
+                            usages += 1;
+                            if l.contains("??")
+                                || l.contains("||")
+                                || l.contains("?.")
+                                || l.contains("== null")
+                                || l.contains("!= null")
+                                || l.contains("if (")
+                            {
+                                guarded = true;
                             }
                         }
-                        if usages > 0 && !guarded {
-                            reports.push(rep(path, line_no, "warning", "storage reads can return null and the value is used without a guard."));
-                        }
+                    }
+                    if usages > 0 && !guarded {
+                        reports.push(rep(
+                            path,
+                            line_no,
+                            "warning",
+                            "storage reads can return null and the value is used without a guard.",
+                        ));
                     }
                 }
                 if trimmed.contains("parseInt(") && !trimmed.contains(",") {
@@ -233,8 +237,8 @@ fn enclosing_block(
         }
         let header_indent = leading_spaces(lines[start]);
         let mut end = last;
-        for j in (at + 1)..lines.len() {
-            if !lines[j].trim().is_empty() && leading_spaces(lines[j]) <= header_indent {
+        for (j, &l) in lines.iter().enumerate().skip(at + 1) {
+            if !l.trim().is_empty() && leading_spaces(l) <= header_indent {
                 end = j.saturating_sub(1);
                 break;
             }

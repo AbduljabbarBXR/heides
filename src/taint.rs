@@ -127,10 +127,11 @@ pub fn scan_file(path: &Path, content: &str) -> Vec<TaintReport> {
             let line = lines[i];
             let line_no = i as u64 + 1;
             for (l, pat) in SOURCES {
-                if l == lang && regex_hit(pat, line) {
-                    if let Some(var) = assigned_var(line) {
-                        tainted.push((var, i));
-                    }
+                if l == lang
+                    && regex_hit(pat, line)
+                    && let Some(var) = assigned_var(line)
+                {
+                    tainted.push((var, i));
                 }
             }
             for (l, pat, sink) in SINKS {
@@ -436,10 +437,10 @@ fn function_blocks(lines: &[&str], lang: &str) -> Vec<(usize, usize, usize)> {
         // Stray closing braces (error nodes, garbage text) must never push
         // the depth below zero. Clamp so the scan stays sound.
         depth = (depth + opens - closes).max(0);
-        if depth == 0 {
-            if let Some(s) = start.take() {
-                blocks.push((s, i, 0));
-            }
+        if depth == 0
+            && let Some(s) = start.take()
+        {
+            blocks.push((s, i, 0));
         }
     }
     blocks

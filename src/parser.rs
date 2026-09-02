@@ -190,10 +190,10 @@ fn field_text<'a>(node: Node<'a>, content: &'a str, field: &str) -> Option<Strin
 }
 
 fn name_of(node: Node, content: &str) -> Option<String> {
-    if let Some(name) = field_text(node, content, "name") {
-        if !name.is_empty() {
-            return Some(name);
-        }
+    if let Some(name) = field_text(node, content, "name")
+        && !name.is_empty()
+    {
+        return Some(name);
     }
     // Fallback: first identifier leaf below the node.
     let mut cursor = node.walk();
@@ -307,40 +307,39 @@ fn walk(
     let line = node.start_position().row as u64 + 1;
 
     // Symbols
-    if SYMBOL_KINDS.contains(&kind) {
-        if let Some(name) = name_of(node, content) {
-            let sig = if kind.contains("function") || kind == "method_definition" {
-                signature_of(node, content)
-            } else {
-                String::new()
-            };
-            out.symbols.push(Symbol {
-                name: name.clone(),
-                kind: kind.to_string(),
-                file: path.display().to_string(),
-                line,
-                lang: out.lang.clone(),
-                signature: sig,
-            });
-        }
+    if SYMBOL_KINDS.contains(&kind)
+        && let Some(name) = name_of(node, content)
+    {
+        let sig = if kind.contains("function") || kind == "method_definition" {
+            signature_of(node, content)
+        } else {
+            String::new()
+        };
+        out.symbols.push(Symbol {
+            name: name.clone(),
+            kind: kind.to_string(),
+            file: path.display().to_string(),
+            line,
+            lang: out.lang.clone(),
+            signature: sig,
+        });
     }
 
     // Arrow functions assigned to const / let / var: a function symbol.
-    if (kind == "arrow_function" || kind == "function") && out.lang != "python" {
-        if let Some(parent) = node.parent() {
-            if parent.kind() == "variable_declarator" {
-                if let Some(name) = field_text(parent, content, "name") {
-                    out.symbols.push(Symbol {
-                        name: name.clone(),
-                        kind: "function".to_string(),
-                        file: path.display().to_string(),
-                        line,
-                        lang: out.lang.clone(),
-                        signature: signature_of(node, content),
-                    });
-                }
-            }
-        }
+    if (kind == "arrow_function" || kind == "function")
+        && out.lang != "python"
+        && let Some(parent) = node.parent()
+        && parent.kind() == "variable_declarator"
+        && let Some(name) = field_text(parent, content, "name")
+    {
+        out.symbols.push(Symbol {
+            name: name.clone(),
+            kind: "function".to_string(),
+            file: path.display().to_string(),
+            line,
+            lang: out.lang.clone(),
+            signature: signature_of(node, content),
+        });
     }
 
     // Calls
@@ -358,32 +357,35 @@ fn walk(
             }
             _ => field_text(node, content, "function"),
         };
-        if let Some(callee) = callee_field {
-            if !callee.is_empty() && !callee.contains('"') && !callee.contains('(') {
-                let caller =
-                    enclosing_function(node, content).unwrap_or_else(|| "module level".to_string());
-                out.calls.push(CallEdge {
-                    caller,
-                    callee: last_segment(&callee),
-                    file: path.display().to_string(),
-                    line,
-                });
-            }
-        }
-    }
-
-    // Rust macro invocations behave like calls (println!, vec!, panic!).
-    if out.lang == "rust" && kind == "macro_invocation" {
-        if let Some(macro_name) = field_text(node, content, "macro") {
+        if let Some(callee) = callee_field
+            && !callee.is_empty()
+            && !callee.contains('"')
+            && !callee.contains('(')
+        {
             let caller =
                 enclosing_function(node, content).unwrap_or_else(|| "module level".to_string());
             out.calls.push(CallEdge {
                 caller,
-                callee: macro_name.trim_end_matches('!').to_string(),
+                callee: last_segment(&callee),
                 file: path.display().to_string(),
                 line,
             });
         }
+    }
+
+    // Rust macro invocations behave like calls (println!, vec!, panic!).
+    if out.lang == "rust"
+        && kind == "macro_invocation"
+        && let Some(macro_name) = field_text(node, content, "macro")
+    {
+        let caller =
+            enclosing_function(node, content).unwrap_or_else(|| "module level".to_string());
+        out.calls.push(CallEdge {
+            caller,
+            callee: macro_name.trim_end_matches('!').to_string(),
+            file: path.display().to_string(),
+            line,
+        });
     }
 
     // Imports
@@ -445,14 +447,14 @@ fn walk(
                     if child.kind() == "import_spec_list" {
                         let mut c2 = child.walk();
                         for spec in child.children(&mut c2) {
-                            if spec.kind() == "import_spec" {
-                                if let Some(imp) = quoted_path(&text(spec, content)) {
-                                    out.imports.push(ImportEdge {
-                                        file: path.display().to_string(),
-                                        imported: imp,
-                                        line,
-                                    });
-                                }
+                            if spec.kind() == "import_spec"
+                                && let Some(imp) = quoted_path(&text(spec, content))
+                            {
+                                out.imports.push(ImportEdge {
+                                    file: path.display().to_string(),
+                                    imported: imp,
+                                    line,
+                                });
                             }
                         }
                     } else if let Some(imp) = quoted_path(&text(child, content)) {

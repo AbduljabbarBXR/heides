@@ -79,12 +79,11 @@ pub fn parse_patch(patch: &str) -> Result<Vec<PatchFile>, String> {
                 old_start,
                 lines: Vec::new(),
             });
-        } else if let Some(cur) = current.as_mut() {
-            if line.starts_with(' ') || line.starts_with('+') || line.starts_with('-') {
-                if let Some(h) = cur.hunks.last_mut() {
-                    h.lines.push(line.to_string());
-                }
-            }
+        } else if let Some(cur) = current.as_mut()
+            && (line.starts_with(' ') || line.starts_with('+') || line.starts_with('-'))
+            && let Some(h) = cur.hunks.last_mut()
+        {
+            h.lines.push(line.to_string());
         }
     }
     if let Some(cur) = current.take() {

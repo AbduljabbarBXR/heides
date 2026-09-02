@@ -19,17 +19,17 @@ pub fn watch(root: &Path, max_checks: Option<u64>, delay_secs: u64) -> u64 {
     let mut changes = 0u64;
     let mut checks = 0u64;
     loop {
-        if let Some(max) = max_checks {
-            if checks >= max {
-                break;
-            }
+        if let Some(max) = max_checks
+            && checks >= max
+        {
+            break;
         }
         std::thread::sleep(Duration::from_secs(delay_secs));
         checks += 1;
         let mut current = last.clone();
         let touched = indexer::update_graph(root, &mut current);
         if touched > 0 {
-            if let Err(e) = crate::spine::save(&current, &root.to_path_buf()) {
+            if let Err(e) = crate::spine::save(&current, root) {
                 eprintln!("could not persist index: {}", e);
             }
             changes += 1;

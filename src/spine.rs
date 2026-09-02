@@ -7,7 +7,7 @@
 // graph size.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const INDEX_VERSION: u32 = 3;
 
@@ -168,12 +168,12 @@ impl CodeGraph {
     }
 }
 
-pub fn index_path(root: &PathBuf) -> PathBuf {
+pub fn index_path(root: &Path) -> PathBuf {
     root.join(".heides").join("index.bin")
 }
 
 /// Save the graph to a binary index with an atomic replace.
-pub fn save(graph: &CodeGraph, root: &PathBuf) -> Result<(), String> {
+pub fn save(graph: &CodeGraph, root: &Path) -> Result<(), String> {
     let path = index_path(root);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -191,7 +191,7 @@ pub fn save(graph: &CodeGraph, root: &PathBuf) -> Result<(), String> {
     std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }
 
-pub fn load(root: &PathBuf) -> Result<CodeGraph, String> {
+pub fn load(root: &Path) -> Result<CodeGraph, String> {
     let path = index_path(root);
     let raw = std::fs::read(&path).map_err(|e| e.to_string())?;
     let (version, files, symbols, calls, imports): (
@@ -219,6 +219,6 @@ pub fn load(root: &PathBuf) -> Result<CodeGraph, String> {
     Ok(graph)
 }
 
-pub fn exists(root: &PathBuf) -> bool {
+pub fn exists(root: &Path) -> bool {
     index_path(root).exists()
 }

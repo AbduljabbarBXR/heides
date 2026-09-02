@@ -44,18 +44,18 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            if let Some(name) = entry.file_name().to_str() {
-                if skip_dir(name) {
-                    continue;
-                }
+            if let Some(name) = entry.file_name().to_str()
+                && skip_dir(name)
+            {
+                continue;
             }
             walk(&path, out);
-        } else if path.is_file() && parser::is_indexable(&path) {
-            if let Ok(meta) = std::fs::metadata(&path) {
-                if meta.len() <= MAX_FILE_BYTES {
-                    out.push(path);
-                }
-            }
+        } else if path.is_file()
+            && parser::is_indexable(&path)
+            && let Ok(meta) = std::fs::metadata(&path)
+            && meta.len() <= MAX_FILE_BYTES
+        {
+            out.push(path);
         }
     }
 }
@@ -127,7 +127,7 @@ fn fill_graph(graph: &mut CodeGraph, files: &[PathBuf]) -> usize {
     };
 
     let mut parsed_count = 0usize;
-    for (path, item) in files.iter().zip(parsed.into_iter()) {
+    for (path, item) in files.iter().zip(parsed) {
         let lang = parser::detect_language(path).unwrap_or_default();
         graph.files.push(describe(path, &lang));
         if let Some(pf) = item {

@@ -50,15 +50,15 @@ pub fn scan_file(path: &Path, content: &str, lang: &str) -> Vec<PracticeReport> 
                 "unfinished work marker left in the code.",
             ));
         }
-        if lang == "javascript" || lang == "typescript" {
-            if line.contains("console.log") || line.contains("debugger") {
-                reports.push(rep(
-                    path,
-                    line_no,
-                    "warning",
-                    "debug output left in the code.",
-                ));
-            }
+        if (lang == "javascript" || lang == "typescript")
+            && (line.contains("console.log") || line.contains("debugger"))
+        {
+            reports.push(rep(
+                path,
+                line_no,
+                "warning",
+                "debug output left in the code.",
+            ));
         }
         if lang == "rust" && line.contains("dbg!") {
             reports.push(rep(
@@ -166,8 +166,7 @@ fn body_length(lines: &[&str], start: usize, lang: &str) -> usize {
     if lang == "python" {
         let indent = leading_spaces(lines[start]);
         let mut end = start;
-        for j in (start + 1)..lines.len() {
-            let l = lines[j];
+        for (j, &l) in lines.iter().enumerate().skip(start + 1) {
             if l.trim().is_empty() {
                 continue;
             }

@@ -174,7 +174,7 @@ fn parse_clause(raw: &str) -> Option<Clause> {
         return Some(Clause::Any);
     }
     // Bare version. npm treats it as exact, cargo treats it as caret.
-    Version::parse(raw).map(|v| Clause::Exact(v))
+    Version::parse(raw).map(Clause::Exact)
 }
 
 pub fn bare_is_caret(ecosystem: &str) -> bool {
@@ -236,16 +236,16 @@ pub fn read_manifests(root: &Path) -> Vec<Dependency> {
         if let Ok(text) = std::fs::read_to_string(&cargo_toml) {
             deps.extend(parse_cargo_toml(&text));
         }
-    } else if cargo_lock.exists() {
-        if let Ok(text) = std::fs::read_to_string(&cargo_lock) {
-            deps.extend(parse_cargo_lock(&text));
-        }
+    } else if cargo_lock.exists()
+        && let Ok(text) = std::fs::read_to_string(&cargo_lock)
+    {
+        deps.extend(parse_cargo_lock(&text));
     }
 
-    if package_json.exists() {
-        if let Ok(text) = std::fs::read_to_string(&package_json) {
-            deps.extend(parse_package_json(&text));
-        }
+    if package_json.exists()
+        && let Ok(text) = std::fs::read_to_string(&package_json)
+    {
+        deps.extend(parse_package_json(&text));
     }
     deps
 }
@@ -420,8 +420,8 @@ pub fn check(root: &Path) -> (Vec<DepReport>, bool) {
             },
         };
         checked += 1;
-        match osv_check(&dep) {
-            Some(vuln) => reports.push(DepReport {
+        if let Some(vuln) = osv_check(&dep) {
+            reports.push(DepReport {
                 severity: "critical".to_string(),
                 message: format!(
                     "{} {} has a known vulnerability: {}",
@@ -429,8 +429,7 @@ pub fn check(root: &Path) -> (Vec<DepReport>, bool) {
                 ),
                 file: "manifest".to_string(),
                 line: 0,
-            }),
-            None => {}
+            })
         }
         match latest_version(&dep) {
             Some(latest) => {
