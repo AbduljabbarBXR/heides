@@ -301,11 +301,13 @@ fn parse_cargo_lock(text: &str) -> Vec<Dependency> {
                 .trim_start_matches("version = ")
                 .trim_matches('"')
                 .to_string();
-            deps.push(Dependency {
-                name: name.take().unwrap(),
-                version,
-                ecosystem: "crates.io",
-            });
+            if let Some(dep_name) = name.take() {
+                deps.push(Dependency {
+                    name: dep_name,
+                    version,
+                    ecosystem: "crates.io",
+                });
+            }
         } else if t.starts_with("[") {
             name = None;
         }

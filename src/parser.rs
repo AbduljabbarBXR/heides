@@ -56,7 +56,113 @@ pub struct ParsedFile {
 }
 
 /// Parse one file and return every extraction for it.
+/// Bracket nesting beyond this depth can crash the C parser itself, which
+/// is not a failure HEIDES may ever allow. Real source nests under a
+/// hundred levels, minified bundles stay under five hundred, so any file
+/// past this bound is treated as unparseable and skipped, the same way
+/// oversized files are. The bound also leaves a wide safety margin above
+/// the measured crash depth of the parser on a grown stack.
+const MAX_BRACKET_DEPTH: usize = 500;
+
+/// Lexically track bracket depth, ignoring brackets inside strings and
+/// comments, so real files with long comment or string content are never
+/// misjudged. Returns true when the file is too deeply nested to parse
+/// safely.
+fn pathological_nesting(content: &str) -> bool {
+    let bytes = content.as_bytes();
+    let mut depth: isize = 0;
+    let mut in_line: bool = false;
+    let mut in_block: bool = false;
+    let mut in_str: Option<u8> = None;
+    let mut escaped = false;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_line {
+            if b == b'\n' {
+                in_line = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_block {
+            if b == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                in_block = false;
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(q) = in_str {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == q {
+                in_str = None;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                in_line = true;
+                i += 2;
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                in_block = true;
+                i += 2;
+            }
+            b'#' => {
+                in_line = true;
+                i += 1;
+            }
+            b'\'' | b'"' | b'`' => {
+                in_str = Some(b);
+                i += 1;
+            }
+            b'(' | b'[' | b'{' => {
+                depth += 1;
+                if depth > MAX_BRACKET_DEPTH as isize {
+                    return true;
+                }
+                i += 1;
+            }
+            b')' | b']' | b'}' => {
+                depth = (depth - 1).max(0);
+                i += 1;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+    false
+}
+
 pub fn parse_file(path: &Path, content: &str) -> Option<ParsedFile> {
+    // Refuse files that could crash the C parser before it ever runs.
+    if pathological_nesting(content) {
+        return None;
+    }
+    // Every parse runs on a thread with a grown stack. The C parser
+    // recurses with the nesting depth, and a hostile file at the allowed
+    // limit must never be able to overflow whatever stack the caller
+    // happens to run on. The reservation is virtual, the memory is only
+    // committed as the stack actually grows.
+    let owned_path = path.to_path_buf();
+    let owned_content = content.to_string();
+    std::thread::Builder::new()
+        .name("heides parse".to_string())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || parse_inner(&owned_path, &owned_content))
+        .ok()?
+        .join()
+        .ok()?
+}
+
+fn parse_inner(path: &Path, content: &str) -> Option<ParsedFile> {
     let lang = detect_language(path)?;
     let grammar = language_for(&lang)?;
     let mut parser = Parser::new();
@@ -71,7 +177,7 @@ pub fn parse_file(path: &Path, content: &str) -> Option<ParsedFile> {
         imports: Vec::new(),
     };
 
-    walk(root, content, path, &mut parsed, None);
+    walk(root, content, path, &mut parsed, None, 0);
     Some(parsed)
 }
 
@@ -181,7 +287,22 @@ const SYMBOL_KINDS: &[&str] = &[
     "static_item",
 ];
 
-fn walk(node: Node, content: &str, path: &Path, out: &mut ParsedFile, _current: Option<&str>) {
+/// Never descend deeper than this into the syntax tree. Real code nests
+/// far shallower, and the cap keeps the walker immune to adversarial
+/// nesting that would otherwise overflow the call stack.
+const MAX_TREE_DEPTH: usize = 512;
+
+fn walk(
+    node: Node,
+    content: &str,
+    path: &Path,
+    out: &mut ParsedFile,
+    _current: Option<&str>,
+    depth: usize,
+) {
+    if depth > MAX_TREE_DEPTH {
+        return;
+    }
     let kind = node.kind();
     let line = node.start_position().row as u64 + 1;
 
@@ -414,7 +535,7 @@ fn walk(node: Node, content: &str, path: &Path, out: &mut ParsedFile, _current: 
     let mut cursor = node.walk();
     let children: Vec<Node> = node.children(&mut cursor).collect();
     for child in children {
-        walk(child, content, path, out, None);
+        walk(child, content, path, out, None, depth + 1);
     }
 }
 

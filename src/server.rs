@@ -320,15 +320,25 @@ fn handle(id: &Value, method: &str, params: &Value) {
 }
 
 pub fn run() -> ExitCode {
+    const MAX_MSG_BYTES: usize = 16 * 1024 * 1024;
     let stdin = std::io::stdin();
-    let mut line = String::new();
+    let mut buf: Vec<u8> = Vec::new();
     let mut reader = stdin.lock();
     loop {
-        line.clear();
-        match reader.read_line(&mut line) {
+        buf.clear();
+        // read_until is byte based, so binary junk on the wire can never
+        // poison the stream the way a utf8 read line would.
+        match reader.read_until(b'\n', &mut buf) {
             Ok(0) => break,
             Ok(_) => {
-                let trimmed = line.trim();
+                // A hostile or broken client must not be able to push the
+                // process memory up with one unbounded message.
+                if buf.len() > MAX_MSG_BYTES {
+                    eprintln!("json rpc message too large, {} bytes dropped", buf.len());
+                    continue;
+                }
+                let trimmed = String::from_utf8_lossy(&buf);
+                let trimmed = trimmed.trim();
                 if trimmed.is_empty() {
                     continue;
                 }

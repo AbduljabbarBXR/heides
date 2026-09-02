@@ -143,7 +143,7 @@ fn battle_serial() {
     let (out, _, ok) = b.cli(&["version"]);
     b.check(
         "version command exits clean and prints a version",
-        ok && out.contains("0.4"),
+        ok && out.contains("0.5"),
     );
 
     // 2. Scan builds the spine
@@ -530,6 +530,89 @@ fn battle_serial() {
     b.check(
         "tiny workspace still answers after scale phase",
         out.contains("main calls add"),
+    );
+
+    // 22. Hostile phase. Garbage files on disk, then a hostile MCP client.
+    let hostile_dir = b.fixture.join("hostile");
+    std::fs::create_dir_all(&hostile_dir).unwrap();
+    std::fs::write(
+        hostile_dir.join("garbage.rs"),
+        vec![0u8, 159, 146, 150, 255, 0, 13, 10, 7],
+    )
+    .unwrap();
+    std::fs::write(hostile_dir.join("empty.py"), "").unwrap();
+    std::fs::write(
+        hostile_dir.join("nul.js"),
+        "\u{0}\u{0}\u{0}console.log(1);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        hostile_dir.join("deep.rs"),
+        format!("let x = {}1{};\n", "(".repeat(600), ")".repeat(600)),
+    )
+    .unwrap();
+    std::fs::write(
+        hostile_dir.join("huge.go"),
+        format!("package main\n// {}\n", "a".repeat(800_000)),
+    )
+    .unwrap();
+    let (out, _, ok) = Command::new(BIN)
+        .args(["scan"])
+        .current_dir(&hostile_dir)
+        .output()
+        .map(|o| {
+            (
+                String::from_utf8_lossy(&o.stdout).to_string(),
+                String::from_utf8_lossy(&o.stderr).to_string(),
+                o.status.success(),
+            )
+        })
+        .unwrap();
+    b.check("scan survives garbage files", ok && out.contains("indexed"));
+    let (_, _, ok) = Command::new(BIN)
+        .args(["check"])
+        .current_dir(&hostile_dir)
+        .output()
+        .map(|o| {
+            (
+                String::from_utf8_lossy(&o.stdout).to_string(),
+                String::from_utf8_lossy(&o.stderr).to_string(),
+                o.status.success(),
+            )
+        })
+        .unwrap();
+    b.check("check survives garbage files", ok);
+
+    // A hostile MCP client: binary junk, a giant message over the cap,
+    // then a legitimate request. The server must stay alive and answer.
+    let giant = format!("{}x", "z".repeat(17 * 1024 * 1024));
+    let mut hostile_mcp = Command::new(BIN)
+        .arg("mcp")
+        .current_dir(&b.fixture)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    {
+        let stdin = hostile_mcp.stdin.as_mut().unwrap();
+        stdin
+            .write_all(b"\xff\xfe\x00garbage not json\r\n")
+            .unwrap();
+        stdin.write_all(giant.as_bytes()).unwrap();
+        stdin.write_all(b"\n").unwrap();
+        stdin
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\",\"params\":{}}\n")
+            .unwrap();
+    }
+    drop(hostile_mcp.stdin.take());
+    let output = hostile_mcp.wait_with_output().unwrap();
+    let hostile_out = String::from_utf8_lossy(&output.stdout).to_string();
+    b.check(
+        "mcp survives garbage and giant messages",
+        hostile_out.contains("spine.scan")
+            && hostile_out.contains("web.confirm")
+            && output.status.success(),
     );
 
     let _ = std::fs::remove_dir_all(&b.fixture);

@@ -425,18 +425,21 @@ fn function_blocks(lines: &[&str], lang: &str) -> Vec<(usize, usize, usize)> {
         }
         return blocks;
     }
-    let mut depth = 0usize;
+    let mut depth: isize = 0;
     let mut start: Option<usize> = None;
     for (i, line) in lines.iter().enumerate() {
-        let opens = line.matches('{').count();
-        let closes = line.matches('}').count();
+        let opens = line.matches('{').count() as isize;
+        let closes = line.matches('}').count() as isize;
         if start.is_none() && opens > 0 {
             start = Some(i);
         }
-        depth = depth + opens - closes;
-        if start.is_some() && depth == 0 {
-            blocks.push((start.unwrap(), i, 0));
-            start = None;
+        // Stray closing braces (error nodes, garbage text) must never push
+        // the depth below zero. Clamp so the scan stays sound.
+        depth = (depth + opens - closes).max(0);
+        if depth == 0 {
+            if let Some(s) = start.take() {
+                blocks.push((s, i, 0));
+            }
         }
     }
     blocks
