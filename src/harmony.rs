@@ -79,7 +79,8 @@ pub fn check_workspace(root: &Path, graph: &CodeGraph) -> Vec<GuardReport> {
         reports.push(GuardReport {
             guard: "dependency".to_string(),
             severity: "info".to_string(),
-            message: "network was unavailable for the dependency check. results are partial.".to_string(),
+            message: "network was unavailable for the dependency check. results are partial."
+                .to_string(),
             file: String::new(),
             line: 0,
         });
@@ -89,7 +90,11 @@ pub fn check_workspace(root: &Path, graph: &CodeGraph) -> Vec<GuardReport> {
 }
 
 /// Check a proposed patch against the workspace before it is applied.
-pub fn check_staged(root: &Path, graph: &CodeGraph, patch_text: &str) -> Result<Vec<GuardReport>, String> {
+pub fn check_staged(
+    root: &Path,
+    graph: &CodeGraph,
+    patch_text: &str,
+) -> Result<Vec<GuardReport>, String> {
     let parsed = crate::staged::parse_patch(patch_text)?;
     let findings = crate::staged::check_patch(graph, root, &parsed);
     let reports = findings

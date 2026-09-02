@@ -46,8 +46,16 @@ pub fn parse_patch(patch: &str) -> Result<Vec<PatchFile>, String> {
             if let Some(cur) = current.take() {
                 files.push(cur);
             }
-            let old = rest.split(' ').next().unwrap_or("a/").trim_start_matches("a/");
-            let new = rest.rsplit(' ').next().unwrap_or("b/").trim_start_matches("b/");
+            let old = rest
+                .split(' ')
+                .next()
+                .unwrap_or("a/")
+                .trim_start_matches("a/");
+            let new = rest
+                .rsplit(' ')
+                .next()
+                .unwrap_or("b/")
+                .trim_start_matches("b/");
             current = Some(PatchFile {
                 old_path: old.to_string(),
                 new_path: new.to_string(),
@@ -90,17 +98,17 @@ pub fn parse_patch(patch: &str) -> Result<Vec<PatchFile>, String> {
 
 /// Apply the patch files to the workspace in memory and return the new
 /// content for every touched file. Deleted files map to None.
-pub fn apply_in_memory(
-    patch: &[PatchFile],
-    root: &Path,
-) -> Vec<(String, Option<String>)> {
+pub fn apply_in_memory(patch: &[PatchFile], root: &Path) -> Vec<(String, Option<String>)> {
     let mut results = Vec::new();
     for pf in patch {
         let target = root.join(pf.old_path.trim_start_matches('/'));
         let original = std::fs::read_to_string(&target).unwrap_or_default();
         let applied = apply_hunks(&original, &pf.hunks);
         let deleted = pf.new_path == "/dev/null" || applied.trim().is_empty();
-        results.push((pf.old_path.clone(), if deleted { None } else { Some(applied) }));
+        results.push((
+            pf.old_path.clone(),
+            if deleted { None } else { Some(applied) },
+        ));
     }
     results
 }
@@ -133,11 +141,7 @@ fn apply_hunks(original: &str, hunks: &[Hunk]) -> String {
 }
 
 /// Check a parsed patch against the workspace graph.
-pub fn check_patch(
-    graph: &CodeGraph,
-    root: &Path,
-    patch: &[PatchFile],
-) -> Vec<StagedReport> {
+pub fn check_patch(graph: &CodeGraph, root: &Path, patch: &[PatchFile]) -> Vec<StagedReport> {
     let norm = |p: &str| p.trim_start_matches("./").replace('\\', "/");
     let mut reports = Vec::new();
     let applied = apply_in_memory(patch, root);
@@ -195,10 +199,7 @@ pub fn check_patch(
                             severity: "blocker".to_string(),
                             message: format!(
                                 "{} declares {} which already exists at {}:{}",
-                                file,
-                                s.name,
-                                elsewhere[0].file,
-                                elsewhere[0].line
+                                file, s.name, elsewhere[0].file, elsewhere[0].line
                             ),
                             file: file.clone(),
                             line: s.line,
@@ -218,8 +219,7 @@ pub fn check_patch(
                                 severity: "blocker".to_string(),
                                 message: format!(
                                     "function {} is removed by the patch but still called at {}",
-                                    old.name,
-                                    callers[0].file
+                                    old.name, callers[0].file
                                 ),
                                 file: file.clone(),
                                 line: old.line,
@@ -247,7 +247,11 @@ pub fn check_patch(
                             if !old_sig.is_empty() && old_sig != new_sig {
                                 let callers = graph.callers_of(&old.name);
                                 reports.push(StagedReport {
-                                    severity: if callers.is_empty() { "warning".to_string() } else { "blocker".to_string() },
+                                    severity: if callers.is_empty() {
+                                        "warning".to_string()
+                                    } else {
+                                        "blocker".to_string()
+                                    },
                                     message: format!(
                                         "signature of {} changed ({} caller(s) may break: {})",
                                         old.name,
@@ -297,7 +301,8 @@ mod tests {
     #[test]
     fn applies_hunks_in_memory() {
         let original = "one\ntwo\nthree\n";
-        let patch = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n";
+        let patch =
+            "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n";
         let files = parse_patch(patch).unwrap();
         let applied = apply_hunks(original, &files[0].hunks);
         assert_eq!(applied, "one\nTWO\nthree");

@@ -35,16 +35,24 @@ fn main() -> ExitCode {
     match cmd {
         "scan" => {
             let root = PathBuf::from(arg2);
-            let (graph, count) = indexer::build_graph(&root);
+            let mut graph = match spine::load(&root) {
+                Ok(g) => g,
+                Err(_) => spine::CodeGraph::new(),
+            };
+            let touched = indexer::update_graph(&root, &mut graph);
             match spine::save(&graph, &root) {
                 Ok(()) => {
+                    let rss = indexer::peak_rss_mb()
+                        .map(|mb| format!(", peak rss {} MB", mb))
+                        .unwrap_or_default();
                     println!(
-                        "spine indexed {} files, {} symbols, {} call edges, {} imports ({} parsed)",
+                        "spine indexed {} files, {} symbols, {} call edges, {} imports ({} touched){}",
                         graph.files.len(),
                         graph.symbols.len(),
                         graph.calls.len(),
                         graph.imports.len(),
-                        count
+                        touched,
+                        rss
                     );
                     ExitCode::SUCCESS
                 }
@@ -121,7 +129,10 @@ fn main() -> ExitCode {
                         println!("no definition for {} in the spine", name);
                     } else {
                         for s in symbols {
-                            println!("{} defined at {}:{} (kind {})", s.name, s.file, s.line, s.kind);
+                            println!(
+                                "{} defined at {}:{} (kind {})",
+                                s.name, s.file, s.line, s.kind
+                            );
                         }
                     }
                 }

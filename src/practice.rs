@@ -16,37 +16,63 @@ pub struct PracticeReport {
     pub line: u64,
 }
 
-const SECRET_PATTERN: [&str; 6] = ["api_key", "apikey", "secret", "password", "token", "private_key"];
+const SECRET_PATTERN: [&str; 6] = [
+    "api_key",
+    "apikey",
+    "secret",
+    "password",
+    "token",
+    "private_key",
+];
 
 /// Scan one source file for practice issues.
 pub fn scan_file(path: &Path, content: &str, lang: &str) -> Vec<PracticeReport> {
     let mut reports = Vec::new();
     let lines: Vec<&str> = content.lines().collect();
-    let has_definitions = lines
-        .iter()
-        .any(|l| {
-            let t = l.trim_start();
-            t.starts_with("def ") || t.starts_with("class ") || t.starts_with("fn ") || t.starts_with("func ") || t.starts_with("function ")
-        });
+    let has_definitions = lines.iter().any(|l| {
+        let t = l.trim_start();
+        t.starts_with("def ")
+            || t.starts_with("class ")
+            || t.starts_with("fn ")
+            || t.starts_with("func ")
+            || t.starts_with("function ")
+    });
     let main_guard = python_main_guard(&lines);
 
     for (i, line) in lines.iter().enumerate() {
         let line_no = i as u64 + 1;
         let lower = line.to_ascii_lowercase();
         if lower.contains("todo") || lower.contains("fixme") || lower.contains("hack") {
-            reports.push(rep(path, line_no, "info", "unfinished work marker left in the code."));
+            reports.push(rep(
+                path,
+                line_no,
+                "info",
+                "unfinished work marker left in the code.",
+            ));
         }
         if lang == "javascript" || lang == "typescript" {
             if line.contains("console.log") || line.contains("debugger") {
-                reports.push(rep(path, line_no, "warning", "debug output left in the code."));
+                reports.push(rep(
+                    path,
+                    line_no,
+                    "warning",
+                    "debug output left in the code.",
+                ));
             }
         }
         if lang == "rust" && line.contains("dbg!") {
-            reports.push(rep(path, line_no, "warning", "debug macro left in the code."));
+            reports.push(rep(
+                path,
+                line_no,
+                "warning",
+                "debug macro left in the code.",
+            ));
         }
         if lang == "python" && line.contains("print(") && !line.trim_start().starts_with('#') {
             let inside_guard = main_guard
-                .map(|(guard_line, guard_indent)| i > guard_line && leading_spaces(line) > guard_indent)
+                .map(|(guard_line, guard_indent)| {
+                    i > guard_line && leading_spaces(line) > guard_indent
+                })
                 .unwrap_or(false);
             // A print in a library module outside the main guard is a
             // leftover. Scripts and main guarded blocks are legitimate.
@@ -59,7 +85,12 @@ pub fn scan_file(path: &Path, content: &str, lang: &str) -> Vec<PracticeReport> 
                 && (line.contains('=') || line.contains(':'))
                 && (line.contains('"') || line.contains('\''))
             {
-                reports.push(rep(path, line_no, "critical", "possible secret or credential hardcoded in source."));
+                reports.push(rep(
+                    path,
+                    line_no,
+                    "critical",
+                    "possible secret or credential hardcoded in source.",
+                ));
                 break;
             }
         }
@@ -113,7 +144,10 @@ pub fn long_functions(graph: &CodeGraph) -> Vec<PracticeReport> {
             if body_lines > 80 {
                 reports.push(PracticeReport {
                     severity: "info".to_string(),
-                    message: format!("function {} spans {} lines. consider splitting it.", f.name, body_lines),
+                    message: format!(
+                        "function {} spans {} lines. consider splitting it.",
+                        f.name, body_lines
+                    ),
                     file: file.to_string(),
                     line: f.line,
                 });
@@ -149,7 +183,7 @@ fn body_length(lines: &[&str], start: usize, lang: &str) -> usize {
     let mut depth: isize = 0;
     let mut counted = 0usize;
     let mut opened = false;
-    for (offset, line) in lines.iter().enumerate().skip(start) {
+    for line in lines.iter().skip(start) {
         if !opened {
             let brace = line.find('{');
             match brace {

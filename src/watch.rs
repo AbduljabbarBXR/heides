@@ -1,7 +1,8 @@
 // The watch loop.
 //
-// HEIDES is event driven. Watch mode polls the workspace for changes and
-// reindexes on demand, keeping the spine fresh while the agent works.
+// HEIDES is event driven. Watch mode polls the workspace, diffs the file
+// table against disk and reparses only the changed files, keeping the spine
+// fresh while the agent works without rebuilding the whole graph each poll.
 
 use std::path::Path;
 use std::time::Duration;
@@ -25,27 +26,20 @@ pub fn watch(root: &Path, max_checks: Option<u64>, delay_secs: u64) -> u64 {
         }
         std::thread::sleep(Duration::from_secs(delay_secs));
         checks += 1;
-        let fresh = indexer::build_graph(root);
-        if snapshot_changed(&last, &fresh.0) {
-            if let Err(e) = crate::spine::save(&fresh.0, &root.to_path_buf()) {
+        let mut current = last.clone();
+        let touched = indexer::update_graph(root, &mut current);
+        if touched > 0 {
+            if let Err(e) = crate::spine::save(&current, &root.to_path_buf()) {
                 eprintln!("could not persist index: {}", e);
             }
             changes += 1;
-            println!("spine reindexed: {} parsed files, {} symbols", fresh.1, fresh.0.symbols.len());
-            last = fresh.0;
+            println!(
+                "spine reindexed: {} files touched, {} symbols",
+                touched,
+                current.symbols.len()
+            );
+            last = current;
         }
     }
     changes
-}
-
-fn snapshot_changed(a: &CodeGraph, b: &CodeGraph) -> bool {
-    if a.files.len() != b.files.len() {
-        return true;
-    }
-    for (fa, fb) in a.files.iter().zip(b.files.iter()) {
-        if fa.path != fb.path || fa.mtime != fb.mtime {
-            return true;
-        }
-    }
-    a.symbols.len() != b.symbols.len()
 }

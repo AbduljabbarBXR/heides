@@ -11,7 +11,7 @@
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::grounding;
 use crate::harmony;
@@ -47,7 +47,10 @@ fn report_lines(reports: &[harmony::GuardReport]) -> String {
         } else {
             format!(" at {}:{}", r.file, r.line)
         };
-        lines.push(format!("[{}] {} ({}){}{}", r.severity, r.message, r.guard, loc, ""));
+        lines.push(format!(
+            "[{}] {} ({}){}{}",
+            r.severity, r.message, r.guard, loc, ""
+        ));
     }
     lines.join("\n")
 }
@@ -59,77 +62,100 @@ fn load_graph(root: &str) -> Result<spine::CodeGraph, String> {
 fn handle(id: &Value, method: &str, params: &Value) {
     match method {
         "initialize" => {
-            ok(id, json!({
-                "protocolVersion": "2025-06-18",
-                "capabilities": { "tools": {} },
-                "serverInfo": { "name": "heides", "version": env!("CARGO_PKG_VERSION") }
-            }));
+            ok(
+                id,
+                json!({
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "heides", "version": env!("CARGO_PKG_VERSION") }
+                }),
+            );
         }
         "notifications/initialized" => {}
         "tools/list" => {
-            ok(id, json!({
-                "tools": [
-                    {
-                        "name": "spine.scan",
-                        "description": "Map the current codebase into the persistent spine index.",
-                        "inputSchema": { "type": "object", "properties": { "root": { "type": "string" } } }
-                    },
-                    {
-                        "name": "spine.query",
-                        "description": "Query the spine graph. Ask who calls a symbol, who imports a module, or where a symbol is defined.",
-                        "inputSchema": { "type": "object", "properties": {
-                            "kind": { "type": "string", "enum": ["callers", "imports", "definition", "calls"] },
-                            "name": { "type": "string" }
-                        }, "required": ["kind", "name"] }
-                    },
-                    {
-                        "name": "harmony.check",
-                        "description": "Run every guard on the workspace and return findings with evidence.",
-                        "inputSchema": { "type": "object", "properties": { "root": { "type": "string" } } }
-                    },
-                    {
-                        "name": "harmony.staged",
-                        "description": "Check a unified diff before applying it. Blocks conflicts and signature breaks.",
-                        "inputSchema": { "type": "object", "properties": {
-                            "patch": { "type": "string" },
-                            "root": { "type": "string" }
-                        }, "required": ["patch"] }
-                    },
-                    {
-                        "name": "grounding.plan",
-                        "description": "Evaluate a plan against the codebase. Confirms symbols, flags missing ones, checks paths.",
-                        "inputSchema": { "type": "object", "properties": { "plan": { "type": "string" } }, "required": ["plan"] }
-                    },
-                    {
-                        "name": "grounding.scaffold",
-                        "description": "Scaffold a new project from a plan and index it immediately.",
-                        "inputSchema": { "type": "object", "properties": { "plan": { "type": "string" }, "dir": { "type": "string" } }, "required": ["plan"] }
-                    },
-                    {
-                        "name": "deps.check",
-                        "description": "Check dependencies for known vulnerabilities and outdated versions.",
-                        "inputSchema": { "type": "object", "properties": { "root": { "type": "string" } } }
-                    },
-                    {
-                        "name": "web.confirm",
-                        "description": "Confirm a fact against package registries on the web.",
-                        "inputSchema": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }
-                    }
-                ]
-            }));
+            ok(
+                id,
+                json!({
+                    "tools": [
+                        {
+                            "name": "spine.scan",
+                            "description": "Map the current codebase into the persistent spine index.",
+                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" } } }
+                        },
+                        {
+                            "name": "spine.query",
+                            "description": "Query the spine graph. Ask who calls a symbol, who imports a module, or where a symbol is defined.",
+                            "inputSchema": { "type": "object", "properties": {
+                                "kind": { "type": "string", "enum": ["callers", "imports", "definition", "calls"] },
+                                "name": { "type": "string" }
+                            }, "required": ["kind", "name"] }
+                        },
+                        {
+                            "name": "harmony.check",
+                            "description": "Run every guard on the workspace and return findings with evidence.",
+                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" } } }
+                        },
+                        {
+                            "name": "harmony.staged",
+                            "description": "Check a unified diff before applying it. Blocks conflicts and signature breaks.",
+                            "inputSchema": { "type": "object", "properties": {
+                                "patch": { "type": "string" },
+                                "root": { "type": "string" }
+                            }, "required": ["patch"] }
+                        },
+                        {
+                            "name": "grounding.plan",
+                            "description": "Evaluate a plan against the codebase. Confirms symbols, flags missing ones, checks paths.",
+                            "inputSchema": { "type": "object", "properties": { "plan": { "type": "string" } }, "required": ["plan"] }
+                        },
+                        {
+                            "name": "grounding.scaffold",
+                            "description": "Scaffold a new project from a plan and index it immediately.",
+                            "inputSchema": { "type": "object", "properties": { "plan": { "type": "string" }, "dir": { "type": "string" } }, "required": ["plan"] }
+                        },
+                        {
+                            "name": "deps.check",
+                            "description": "Check dependencies for known vulnerabilities and outdated versions.",
+                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" } } }
+                        },
+                        {
+                            "name": "web.confirm",
+                            "description": "Confirm a fact against package registries on the web.",
+                            "inputSchema": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }
+                        }
+                    ]
+                }),
+            );
         }
         "tools/call" => {
             let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-            let root = args.get("root").and_then(|v| v.as_str()).unwrap_or(".").to_string();
+            let args = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            let root = args
+                .get("root")
+                .and_then(|v| v.as_str())
+                .unwrap_or(".")
+                .to_string();
             match name {
                 "spine.scan" => {
-                    let (graph, _count) = indexer::build_graph(&std::path::PathBuf::from(&root));
+                    let mut graph = spine::load(&std::path::PathBuf::from(&root))
+                        .unwrap_or_else(|_| spine::CodeGraph::new());
+                    let touched =
+                        indexer::update_graph(&std::path::PathBuf::from(&root), &mut graph);
                     match spine::save(&graph, &std::path::PathBuf::from(&root)) {
-                        Ok(()) => ok(id, text_result(format!(
-                            "spine indexed {} files, {} symbols, {} call edges, {} imports",
-                            graph.files.len(), graph.symbols.len(), graph.calls.len(), graph.imports.len()
-                        ))),
+                        Ok(()) => ok(
+                            id,
+                            text_result(format!(
+                                "spine indexed {} files, {} symbols, {} call edges, {} imports ({} touched)",
+                                graph.files.len(),
+                                graph.symbols.len(),
+                                graph.calls.len(),
+                                graph.imports.len(),
+                                touched
+                            )),
+                        ),
                         Err(e) => err(id, 1, &format!("save failed. {}", e)),
                     }
                 }
@@ -138,7 +164,10 @@ fn handle(id: &Value, method: &str, params: &Value) {
                     let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
                     let graph = match load_graph(&root) {
                         Ok(g) => g,
-                        Err(e) => { err(id, 1, &e); return; }
+                        Err(e) => {
+                            err(id, 1, &e);
+                            return;
+                        }
                     };
                     let out = match kind {
                         "callers" => {
@@ -146,7 +175,15 @@ fn handle(id: &Value, method: &str, params: &Value) {
                             if callers.is_empty() {
                                 format!("no recorded callers for {}", name)
                             } else {
-                                let mut lines: Vec<String> = callers.iter().map(|c| format!("{} calls {} at {}:{}", c.caller, c.callee, c.file, c.line)).collect();
+                                let mut lines: Vec<String> = callers
+                                    .iter()
+                                    .map(|c| {
+                                        format!(
+                                            "{} calls {} at {}:{}",
+                                            c.caller, c.callee, c.file, c.line
+                                        )
+                                    })
+                                    .collect();
                                 lines.insert(0, format!("{} call site(s)", callers.len()));
                                 lines.join("\n")
                             }
@@ -156,7 +193,15 @@ fn handle(id: &Value, method: &str, params: &Value) {
                             if importers.is_empty() {
                                 format!("no recorded imports of {}", name)
                             } else {
-                                let mut lines: Vec<String> = importers.iter().map(|i| format!("{} imports {} at {}:{}", i.file, i.imported, i.file, i.line)).collect();
+                                let mut lines: Vec<String> = importers
+                                    .iter()
+                                    .map(|i| {
+                                        format!(
+                                            "{} imports {} at {}:{}",
+                                            i.file, i.imported, i.file, i.line
+                                        )
+                                    })
+                                    .collect();
                                 lines.insert(0, format!("{} importer(s)", importers.len()));
                                 lines.join("\n")
                             }
@@ -166,7 +211,15 @@ fn handle(id: &Value, method: &str, params: &Value) {
                             if symbols.is_empty() {
                                 format!("no definition for {} in the spine", name)
                             } else {
-                                let lines: Vec<String> = symbols.iter().map(|s| format!("{} defined at {}:{} (kind {})", s.name, s.file, s.line, s.kind)).collect();
+                                let lines: Vec<String> = symbols
+                                    .iter()
+                                    .map(|s| {
+                                        format!(
+                                            "{} defined at {}:{} (kind {})",
+                                            s.name, s.file, s.line, s.kind
+                                        )
+                                    })
+                                    .collect();
                                 lines.join("\n")
                             }
                         }
@@ -175,28 +228,44 @@ fn handle(id: &Value, method: &str, params: &Value) {
                             if calls.is_empty() {
                                 format!("{} makes no recorded calls", name)
                             } else {
-                                let mut lines: Vec<String> = calls.iter().map(|c| format!("{} calls {} at {}:{}", c.caller, c.callee, c.file, c.line)).collect();
+                                let mut lines: Vec<String> = calls
+                                    .iter()
+                                    .map(|c| {
+                                        format!(
+                                            "{} calls {} at {}:{}",
+                                            c.caller, c.callee, c.file, c.line
+                                        )
+                                    })
+                                    .collect();
                                 lines.insert(0, format!("{} call(s)", calls.len()));
                                 lines.join("\n")
                             }
                         }
-                        _ => "unknown query kind. use callers, imports, definition or calls".to_string(),
+                        _ => "unknown query kind. use callers, imports, definition or calls"
+                            .to_string(),
                     };
                     ok(id, text_result(out));
                 }
                 "harmony.check" => {
                     let graph = match load_graph(&root) {
                         Ok(g) => g,
-                        Err(e) => { err(id, 1, &e); return; }
+                        Err(e) => {
+                            err(id, 1, &e);
+                            return;
+                        }
                     };
-                    let reports = harmony::check_workspace(&std::path::PathBuf::from(&root), &graph);
+                    let reports =
+                        harmony::check_workspace(&std::path::PathBuf::from(&root), &graph);
                     ok(id, text_result(report_lines(&reports)));
                 }
                 "harmony.staged" => {
                     let patch = args.get("patch").and_then(|v| v.as_str()).unwrap_or("");
                     let graph = match load_graph(&root) {
                         Ok(g) => g,
-                        Err(e) => { err(id, 1, &e); return; }
+                        Err(e) => {
+                            err(id, 1, &e);
+                            return;
+                        }
                     };
                     match harmony::check_staged(&std::path::PathBuf::from(&root), &graph, patch) {
                         Ok(reports) => ok(id, text_result(report_lines(&reports))),
@@ -207,10 +276,17 @@ fn handle(id: &Value, method: &str, params: &Value) {
                     let plan = args.get("plan").and_then(|v| v.as_str()).unwrap_or("");
                     let graph = match load_graph(&root) {
                         Ok(g) => g,
-                        Err(e) => { err(id, 1, &e); return; }
+                        Err(e) => {
+                            err(id, 1, &e);
+                            return;
+                        }
                     };
-                    let verdict = grounding::evaluate(plan, &graph, &std::path::PathBuf::from(&root));
-                    ok(id, json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&verdict).unwrap_or_default() }] }));
+                    let verdict =
+                        grounding::evaluate(plan, &graph, &std::path::PathBuf::from(&root));
+                    ok(
+                        id,
+                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&verdict).unwrap_or_default() }] }),
+                    );
                 }
                 "grounding.scaffold" => {
                     let plan = args.get("plan").and_then(|v| v.as_str()).unwrap_or("");
@@ -225,7 +301,10 @@ fn handle(id: &Value, method: &str, params: &Value) {
                     if reports.is_empty() {
                         ok(id, text_result("no dependency findings".to_string()));
                     } else {
-                        let lines: Vec<String> = reports.iter().map(|r| format!("[{}] {}", r.severity, r.message)).collect();
+                        let lines: Vec<String> = reports
+                            .iter()
+                            .map(|r| format!("[{}] {}", r.severity, r.message))
+                            .collect();
                         ok(id, text_result(lines.join("\n")));
                     }
                 }

@@ -104,7 +104,11 @@ fn name_of(node: Node, content: &str) -> Option<String> {
 }
 
 fn last_segment(full: &str) -> String {
-    full.rsplit(['.', ':']).next().unwrap_or(full).trim().to_string()
+    full.rsplit(['.', ':'])
+        .next()
+        .unwrap_or(full)
+        .trim()
+        .to_string()
 }
 
 /// Extract the quoted string path from a Go import spec text.
@@ -119,9 +123,12 @@ fn quoted_path(spec: &str) -> Option<String> {
 fn signature_of(node: Node, content: &str) -> String {
     let raw = text(node, content);
     let cut = raw.find('{').or_else(|| {
-        raw.find(':').and_then(|i| raw[i..].find('\n').map(|j| i + j))
+        raw.find(':')
+            .and_then(|i| raw[i..].find('\n').map(|j| i + j))
     });
-    let end = cut.map(|c| c.min(160)).unwrap_or_else(|| raw.len().min(160));
+    let end = cut
+        .map(|c| c.min(160))
+        .unwrap_or_else(|| raw.len().min(160));
     raw.get(..end).unwrap_or(&raw).trim().to_string()
 }
 
@@ -131,14 +138,14 @@ fn enclosing_function(node: Node, content: &str) -> Option<String> {
     while let Some(n) = cur {
         let kind = n.kind();
         if kind == "function_item"
-                || kind == "function_declaration"
-                || kind == "generator_function_declaration"
-                || kind == "method_definition"
-                || kind == "function_definition"
-                || kind == "method_declaration"
-                || kind == "constructor_declaration"
-                || kind == "local_function_statement"
-                || kind == "arrow_function"
+            || kind == "function_declaration"
+            || kind == "generator_function_declaration"
+            || kind == "method_definition"
+            || kind == "function_definition"
+            || kind == "method_declaration"
+            || kind == "constructor_declaration"
+            || kind == "local_function_statement"
+            || kind == "arrow_function"
         {
             return name_of(n, content);
         }
@@ -232,7 +239,8 @@ fn walk(node: Node, content: &str, path: &Path, out: &mut ParsedFile, _current: 
         };
         if let Some(callee) = callee_field {
             if !callee.is_empty() && !callee.contains('"') && !callee.contains('(') {
-                let caller = enclosing_function(node, content).unwrap_or_else(|| "module level".to_string());
+                let caller =
+                    enclosing_function(node, content).unwrap_or_else(|| "module level".to_string());
                 out.calls.push(CallEdge {
                     caller,
                     callee: last_segment(&callee),
@@ -246,7 +254,8 @@ fn walk(node: Node, content: &str, path: &Path, out: &mut ParsedFile, _current: 
     // Rust macro invocations behave like calls (println!, vec!, panic!).
     if out.lang == "rust" && kind == "macro_invocation" {
         if let Some(macro_name) = field_text(node, content, "macro") {
-            let caller = enclosing_function(node, content).unwrap_or_else(|| "module level".to_string());
+            let caller =
+                enclosing_function(node, content).unwrap_or_else(|| "module level".to_string());
             out.calls.push(CallEdge {
                 caller,
                 callee: macro_name.trim_end_matches('!').to_string(),
@@ -282,8 +291,8 @@ fn walk(node: Node, content: &str, path: &Path, out: &mut ParsedFile, _current: 
             });
         }
         "import_from_statement" => {
-            let imp = field_text(node, content, "module_name")
-                .unwrap_or_else(|| "unknown".to_string());
+            let imp =
+                field_text(node, content, "module_name").unwrap_or_else(|| "unknown".to_string());
             out.imports.push(ImportEdge {
                 file: path.display().to_string(),
                 imported: imp,
@@ -427,7 +436,12 @@ fn main() {
         let names: Vec<&str> = parsed.symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"add"));
         assert!(names.contains(&"main"));
-        assert!(parsed.calls.iter().any(|c| c.callee == "add" && c.caller == "main"));
+        assert!(
+            parsed
+                .calls
+                .iter()
+                .any(|c| c.callee == "add" && c.caller == "main")
+        );
         assert!(parsed.calls.iter().any(|c| c.callee == "println"));
     }
 
@@ -449,9 +463,24 @@ fn main() {
         assert!(parsed.symbols.iter().any(|s| s.name == "greet"));
         assert!(parsed.symbols.iter().any(|s| s.name == "App"));
         assert!(parsed.symbols.iter().any(|s| s.name == "run"));
-        assert!(parsed.imports.iter().any(|i| i.imported == "Vendor\\Package\\Thing"));
-        assert!(parsed.calls.iter().any(|c| c.callee == "helper" && c.caller == "greet"));
-        assert!(parsed.calls.iter().any(|c| c.callee == "greet" && c.caller == "run"));
+        assert!(
+            parsed
+                .imports
+                .iter()
+                .any(|i| i.imported == "Vendor\\Package\\Thing")
+        );
+        assert!(
+            parsed
+                .calls
+                .iter()
+                .any(|c| c.callee == "helper" && c.caller == "greet")
+        );
+        assert!(
+            parsed
+                .calls
+                .iter()
+                .any(|c| c.callee == "greet" && c.caller == "run")
+        );
     }
 
     #[test]
@@ -462,7 +491,12 @@ fn main() {
         assert!(parsed.symbols.iter().any(|s| s.name == "add"));
         assert!(parsed.symbols.iter().any(|s| s.name == "main"));
         assert!(parsed.imports.iter().any(|i| i.imported == "fmt"));
-        assert!(parsed.calls.iter().any(|c| c.callee == "add" && c.caller == "main"));
+        assert!(
+            parsed
+                .calls
+                .iter()
+                .any(|c| c.callee == "add" && c.caller == "main")
+        );
         assert!(parsed.calls.iter().any(|c| c.callee == "Println"));
     }
 
@@ -473,9 +507,24 @@ fn main() {
         let parsed = parse_file(p, src).unwrap();
         assert!(parsed.symbols.iter().any(|s| s.name == "App"));
         assert!(parsed.symbols.iter().any(|s| s.name == "load"));
-        assert!(parsed.imports.iter().any(|i| i.imported == "java.util.List"));
-        assert!(parsed.calls.iter().any(|c| c.callee == "getParameter" && c.caller == "load"));
-        assert!(parsed.calls.iter().any(|c| c.callee == "run" && c.caller == "load"));
+        assert!(
+            parsed
+                .imports
+                .iter()
+                .any(|i| i.imported == "java.util.List")
+        );
+        assert!(
+            parsed
+                .calls
+                .iter()
+                .any(|c| c.callee == "getParameter" && c.caller == "load")
+        );
+        assert!(
+            parsed
+                .calls
+                .iter()
+                .any(|c| c.callee == "run" && c.caller == "load")
+        );
     }
 
     #[test]
@@ -485,8 +534,17 @@ fn main() {
         let parsed = parse_file(p, src).unwrap();
         assert!(parsed.symbols.iter().any(|s| s.name == "App"));
         assert!(parsed.symbols.iter().any(|s| s.name == "Load"));
-        assert!(parsed.imports.iter().any(|i| i.imported == "System.Collections.Generic"));
-        assert!(parsed.calls.iter().any(|c| c.callee == "helper" && c.caller == "Load"));
+        assert!(
+            parsed
+                .imports
+                .iter()
+                .any(|i| i.imported == "System.Collections.Generic")
+        );
+        assert!(
+            parsed
+                .calls
+                .iter()
+                .any(|c| c.callee == "helper" && c.caller == "Load")
+        );
     }
-
 }

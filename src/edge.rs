@@ -34,9 +34,19 @@ pub fn scan_file(path: &Path, content: &str) -> Vec<EdgeReport> {
         match lang.as_str() {
             "rust" => {
                 if trimmed.contains(".unwrap()") {
-                    reports.push(rep(path, line_no, "warning", "unwrap can panic when the value is not present. handle the case instead."));
+                    reports.push(rep(
+                        path,
+                        line_no,
+                        "warning",
+                        "unwrap can panic when the value is not present. handle the case instead.",
+                    ));
                 } else if trimmed.contains("panic!(") {
-                    reports.push(rep(path, line_no, "info", "panic macro present. make sure this path is truly unreachable."));
+                    reports.push(rep(
+                        path,
+                        line_no,
+                        "info",
+                        "panic macro present. make sure this path is truly unreachable.",
+                    ));
                 }
             }
             "javascript" | "typescript" => {
@@ -44,12 +54,17 @@ pub fn scan_file(path: &Path, content: &str) -> Vec<EdgeReport> {
                     let (s, e) = enclosing_block(&lines, &brace_blocks, i, &lang);
                     let body: String = lines[s..=e].join("\n");
                     if !body.contains("try") {
-                        reports.push(rep(path, line_no, "warning", "JSON.parse can throw on bad input. wrap it in try or validate first."));
+                        reports.push(rep(
+                            path,
+                            line_no,
+                            "warning",
+                            "JSON.parse can throw on bad input. wrap it in try or validate first.",
+                        ));
                     }
                 }
                 if trimmed.contains("getItem(") {
                     if let Some(var) = storage_var(trimmed) {
-                        let (s, e) = enclosing_block(&lines, &brace_blocks, i, &lang);
+                        let (_s, e) = enclosing_block(&lines, &brace_blocks, i, &lang);
                         let mut usages = 0usize;
                         let mut guarded = false;
                         for j in (i + 1)..=e {
@@ -73,15 +88,37 @@ pub fn scan_file(path: &Path, content: &str) -> Vec<EdgeReport> {
                     }
                 }
                 if trimmed.contains("parseInt(") && !trimmed.contains(",") {
-                    reports.push(rep(path, line_no, "info", "parseInt without a radix can misread strings. pass a radix."));
+                    reports.push(rep(
+                        path,
+                        line_no,
+                        "info",
+                        "parseInt without a radix can misread strings. pass a radix.",
+                    ));
                 }
-                if trimmed.contains("==") && !trimmed.contains("===") && !trimmed.contains("=>") && !trimmed.contains("== null") && !trimmed.contains("== undefined") {
-                    reports.push(rep(path, line_no, "info", "loose equality can coerce types. prefer strict equality."));
+                if trimmed.contains("==")
+                    && !trimmed.contains("===")
+                    && !trimmed.contains("=>")
+                    && !trimmed.contains("== null")
+                    && !trimmed.contains("== undefined")
+                {
+                    reports.push(rep(
+                        path,
+                        line_no,
+                        "info",
+                        "loose equality can coerce types. prefer strict equality.",
+                    ));
                 }
             }
             "python" => {
-                if trimmed.starts_with("def ") && (trimmed.contains("=[]") || trimmed.contains("={}")) {
-                    reports.push(rep(path, line_no, "warning", "mutable default arguments are evaluated once and can leak state."));
+                if trimmed.starts_with("def ")
+                    && (trimmed.contains("=[]") || trimmed.contains("={}"))
+                {
+                    reports.push(rep(
+                        path,
+                        line_no,
+                        "warning",
+                        "mutable default arguments are evaluated once and can leak state.",
+                    ));
                 }
                 if trimmed.starts_with("except:") {
                     reports.push(rep(path, line_no, "warning", "bare except swallows every error including interrupts. name the exception."));
@@ -90,7 +127,12 @@ pub fn scan_file(path: &Path, content: &str) -> Vec<EdgeReport> {
                     let (s, e) = enclosing_block(&lines, &brace_blocks, i, &lang);
                     let body: String = lines[s..=e].join("\n");
                     if !body.contains("with ") {
-                        reports.push(rep(path, line_no, "warning", "file handle is opened outside a with block and may leak."));
+                        reports.push(rep(
+                            path,
+                            line_no,
+                            "warning",
+                            "file handle is opened outside a with block and may leak.",
+                        ));
                     }
                 }
             }
@@ -141,11 +183,7 @@ fn storage_var(line: &str) -> Option<String> {
             break;
         }
     }
-    if ident.is_empty() {
-        None
-    } else {
-        Some(ident)
-    }
+    if ident.is_empty() { None } else { Some(ident) }
 }
 
 /// Exact brace block map for brace languages. Each entry is an inclusive
@@ -177,7 +215,12 @@ fn build_brace_blocks(lines: &[&str]) -> Vec<(usize, usize)> {
 /// The innermost block containing the line. Brace languages use the exact
 /// map. Python uses the indentation suite. Never panics, always returns a
 /// valid range inside the file.
-fn enclosing_block(lines: &[&str], brace_blocks: &[(usize, usize)], at: usize, lang: &str) -> (usize, usize) {
+fn enclosing_block(
+    lines: &[&str],
+    brace_blocks: &[(usize, usize)],
+    at: usize,
+    lang: &str,
+) -> (usize, usize) {
     let last = lines.len().saturating_sub(1);
     if lang == "python" {
         let indent = leading_spaces(lines[at]);
@@ -244,7 +287,11 @@ mod tests {
         let src = "fn maybe() -> Option<i32> {\n    Some(1)\n}\n\nfn main() {\n    let v = maybe().unwrap_or(0);\n    println!(\"{}\", v);\n}\n";
         let p = std::path::Path::new("clean.rs");
         let reports = scan_file(p, src);
-        assert!(reports.is_empty(), "clean rust must be silent, got {:?}", reports);
+        assert!(
+            reports.is_empty(),
+            "clean rust must be silent, got {:?}",
+            reports
+        );
     }
 
     #[test]
@@ -257,7 +304,8 @@ mod tests {
 
     #[test]
     fn json_parse_with_try_is_silent() {
-        let src = "function load() {\n  try {\n    const data = JSON.parse(raw);\n  } catch (e) {}\n}\n";
+        let src =
+            "function load() {\n  try {\n    const data = JSON.parse(raw);\n  } catch (e) {}\n}\n";
         let p = std::path::Path::new("a.js");
         let reports = scan_file(p, src);
         assert!(!reports.iter().any(|r| r.message.contains("JSON.parse")));

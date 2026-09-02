@@ -74,7 +74,10 @@ pub fn evaluate(plan: &str, graph: &CodeGraph, root: &Path) -> PlanVerdict {
             if target.exists() {
                 notes.push(format!("path {} exists.", clean));
             } else if !clean.contains('.') || clean.ends_with('/') {
-                notes.push(format!("path {} does not exist yet. it will be created.", clean));
+                notes.push(format!(
+                    "path {} does not exist yet. it will be created.",
+                    clean
+                ));
             }
         }
     }
@@ -108,17 +111,25 @@ pub fn scaffold(plan: &str, dir: &Path) -> Result<Vec<String>, String> {
     let mut created = Vec::new();
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
 
-    let (files, _content): (Vec<(&str, String)>, ()) = if plan.contains("rust") || plan.contains("cargo") {
+    let (files, _content): (Vec<(&str, String)>, ()) = if plan.contains("rust")
+        || plan.contains("cargo")
+    {
         (
             vec![
-                ("Cargo.toml", r#"name = "app"
+                (
+                    "Cargo.toml",
+                    r#"name = "app"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 "#
-                .to_string()),
-                ("src/main.rs", "fn main() {\n    println!(\"hello from the scaffold\");\n}\n".to_string()),
+                    .to_string(),
+                ),
+                (
+                    "src/main.rs",
+                    "fn main() {\n    println!(\"hello from the scaffold\");\n}\n".to_string(),
+                ),
             ],
             (),
         )
@@ -153,7 +164,9 @@ edition = "2021"
     } else {
         (
             vec![
-                ("package.json", r#"{
+                (
+                    "package.json",
+                    r#"{
   "name": "app",
   "version": "0.1.0",
   "scripts": {
@@ -161,8 +174,12 @@ edition = "2021"
   }
 }
 "#
-                .to_string()),
-                ("index.js", "console.log(\"hello from the scaffold\");\n".to_string()),
+                    .to_string(),
+                ),
+                (
+                    "index.js",
+                    "console.log(\"hello from the scaffold\");\n".to_string(),
+                ),
             ],
             (),
         )
@@ -243,9 +260,7 @@ fn urlencode(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         match b {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' => {
-                out.push(b as char)
-            }
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' => out.push(b as char),
             b' ' => out.push('+'),
             _ => out.push_str(&format!("%{:02X}", b)),
         }
@@ -261,7 +276,11 @@ mod tests {
     fn flags_missing_symbols() {
         let graph = CodeGraph::new();
         let root = std::path::PathBuf::from("/tmp");
-        let v = evaluate("refactor the checkout_flow to use the new pricing_engine", &graph, &root);
+        let v = evaluate(
+            "refactor the checkout_flow to use the new pricing_engine",
+            &graph,
+            &root,
+        );
         assert!(v.notes.iter().any(|n| n.contains("checkout_flow")));
         assert!(v.notes.iter().any(|n| n.contains("pricing_engine")));
     }

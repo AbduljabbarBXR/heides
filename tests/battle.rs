@@ -7,6 +7,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::Instant;
 
 const BIN: &str = env!("CARGO_BIN_EXE_heides");
 
@@ -47,7 +48,12 @@ impl Battle {
         let total = self.checks.len();
         let passed = self.checks.iter().filter(|(_, ok)| *ok).count();
         println!();
-        println!("BATTLE SCORE: {}/{} ({}%)", passed, total, passed * 100 / total.max(1));
+        println!(
+            "BATTLE SCORE: {}/{} ({}%)",
+            passed,
+            total,
+            passed * 100 / total.max(1)
+        );
         assert_eq!(passed, total, "{} battle check(s) failed", total - passed);
     }
 }
@@ -97,7 +103,8 @@ fn fixture_php() -> String {
 }
 
 fn fixture_go() -> String {
-    "package main\n\nfunc load() {\n    q := r.URL.Query().Get(\"id\")\n    db.Query(q)\n}\n".to_string()
+    "package main\n\nfunc load() {\n    q := r.URL.Query().Get(\"id\")\n    db.Query(q)\n}\n"
+        .to_string()
 }
 
 fn fixture_java() -> String {
@@ -134,29 +141,50 @@ fn battle_serial() {
 
     // 1. Version
     let (out, _, ok) = b.cli(&["version"]);
-    b.check("version command exits clean and prints a version", ok && out.contains("0.3"));
+    b.check(
+        "version command exits clean and prints a version",
+        ok && out.contains("0.4"),
+    );
 
     // 2. Scan builds the spine
     let (out, _, ok) = b.cli(&["scan"]);
     b.check("scan exits clean", ok);
-    b.check("scan reports symbols and call edges", out.contains("symbols") && out.contains("call edges"));
-    b.check("scan writes the persistent index", b.fixture.join(".heides/index.json").exists());
+    b.check(
+        "scan reports symbols and call edges",
+        out.contains("symbols") && out.contains("call edges"),
+    );
+    b.check(
+        "scan writes the persistent index",
+        b.fixture.join(".heides/index.bin").exists(),
+    );
 
     // 3. Status reads the index back
     let (out, _, ok) = b.cli(&["status"]);
-    b.check("status reads the persisted index", ok && out.contains("spine index present"));
+    b.check(
+        "status reads the persisted index",
+        ok && out.contains("spine index present"),
+    );
 
     // 4. Query: who calls add
     let (out, _, _) = b.cli(&["query", "callers", "add"]);
-    b.check("query callers finds main calling add", out.contains("main") && out.contains("add"));
+    b.check(
+        "query callers finds main calling add",
+        out.contains("main") && out.contains("add"),
+    );
 
     // 5. Query: definition of greet
     let (out, _, _) = b.cli(&["query", "definition", "greet"]);
-    b.check("query definition locates greet in lib.rs", out.contains("lib.rs") && out.contains("greet"));
+    b.check(
+        "query definition locates greet in lib.rs",
+        out.contains("lib.rs") && out.contains("greet"),
+    );
 
     // 6. Query: calls from main
     let (out, _, _) = b.cli(&["query", "calls", "main"]);
-    b.check("query calls lists add and println from main", out.contains("add") && out.contains("println"));
+    b.check(
+        "query calls lists add and println from main",
+        out.contains("add") && out.contains("println"),
+    );
 
     // 7. Full check catches every planted bug class
     let (out, _, ok) = b.cli(&["check"]);
@@ -178,25 +206,37 @@ fn battle_serial() {
     b.write("bad.patch", sig_patch);
     let (out, _, ok) = b.cli(&["staged", "bad.patch"]);
     b.check("staged exits clean on a bad patch", ok);
-    b.check("staged blocks a signature change with callers", out.contains("blocker") && out.contains("signature"));
+    b.check(
+        "staged blocks a signature change with callers",
+        out.contains("blocker") && out.contains("signature"),
+    );
 
     // 9. Staged apply: safe body change passes
     let safe_patch = "diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -2,2 +2,2 @@\n-    println!(\"{}\", x);\n+    println!(\"value {}\", x);\n";
     b.write("safe.patch", safe_patch);
     let (out, _, _) = b.cli(&["staged", "safe.patch"]);
-    b.check("staged allows a body only change", out.contains("safe to apply"));
+    b.check(
+        "staged allows a body only change",
+        out.contains("safe to apply"),
+    );
 
     // 10. Staged apply: deleting a called file must be blocked
     let del_patch = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,4 +0,0 @@\n-pub fn add(a: i32, b: i32) -> i32 { a + b }\n-pub fn greet(name: &str) -> String {\n-    let v = maybe().unwrap();\n-    format!(\"hi {}\", name)\n";
     b.write("del.patch", del_patch);
     let (out, _, _) = b.cli(&["staged", "del.patch"]);
-    b.check("staged blocks deletion of a file with callers", out.contains("deleted") || out.contains("removed"));
+    b.check(
+        "staged blocks deletion of a file with callers",
+        out.contains("deleted") || out.contains("removed"),
+    );
 
     // 11. Staged apply: new file is accepted
     let new_patch = "diff --git a/src/fresh.rs b/src/fresh.rs\n--- /dev/null\n+++ b/src/fresh.rs\n@@ -0,0 +1,2 @@\n+pub fn fresh() -> i32 { 7 }\n+pub fn fresh2() -> i32 { 8 }\n";
     b.write("new.patch", new_patch);
     let (out, _, _) = b.cli(&["staged", "new.patch"]);
-    b.check("staged accepts a brand new file", out.contains("safe to apply") || out.contains("no conflicts"));
+    b.check(
+        "staged accepts a brand new file",
+        out.contains("safe to apply") || out.contains("no conflicts"),
+    );
 
     // 12. Staged apply: bad diff is rejected
     let (_, _, ok) = b.cli(&["staged", "missing.patch"]);
@@ -205,25 +245,47 @@ fn battle_serial() {
     // 13. Grounding: plan refinement flags missing symbols
     let (out, _, ok) = b.cli(&["plan", "refactor the checkout_flow and the pricing_engine"]);
     b.check("plan exits clean", ok);
-    b.check("plan flags checkout_flow as missing", out.contains("checkout_flow"));
-    b.check("plan flags pricing_engine as missing", out.contains("pricing_engine"));
+    b.check(
+        "plan flags checkout_flow as missing",
+        out.contains("checkout_flow"),
+    );
+    b.check(
+        "plan flags pricing_engine as missing",
+        out.contains("pricing_engine"),
+    );
 
     // 14. Grounding: plan confirms real symbols
     let (out, _, _) = b.cli(&["plan", "change the signature of add to return a sum"]);
     b.check("plan confirms add exists in the spine", out.contains("add"));
 
     // 15. Scaffold: new project from a plan
-    let scaffold_dir = std::env::temp_dir().join(format!("heides_scaffold_battle_{}", std::process::id()));
+    let scaffold_dir =
+        std::env::temp_dir().join(format!("heides_scaffold_battle_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&scaffold_dir);
     let (out, _, ok) = Command::new(BIN)
         .args(["scaffold", "rust cli tool", scaffold_dir.to_str().unwrap()])
         .output()
-        .map(|o| (String::from_utf8_lossy(&o.stdout).to_string(), String::from_utf8_lossy(&o.stderr).to_string(), o.status.success()))
+        .map(|o| {
+            (
+                String::from_utf8_lossy(&o.stdout).to_string(),
+                String::from_utf8_lossy(&o.stderr).to_string(),
+                o.status.success(),
+            )
+        })
         .unwrap();
     b.check("scaffold exits clean", ok);
-    b.check("scaffold creates Cargo.toml", scaffold_dir.join("Cargo.toml").exists());
-    b.check("scaffold creates src/main.rs", scaffold_dir.join("src/main.rs").exists());
-    b.check("scaffold indexes the new project", out.contains("spine index"));
+    b.check(
+        "scaffold creates Cargo.toml",
+        scaffold_dir.join("Cargo.toml").exists(),
+    );
+    b.check(
+        "scaffold creates src/main.rs",
+        scaffold_dir.join("src/main.rs").exists(),
+    );
+    b.check(
+        "scaffold indexes the new project",
+        out.contains("spine index"),
+    );
     let _ = std::fs::remove_dir_all(&scaffold_dir);
 
     // 16. Watch: detects a file change and reindexes
@@ -244,7 +306,10 @@ fn battle_serial() {
         let _ = child.stdout.take().unwrap().read_to_string(&mut stdout);
     }
     let _ = child.wait();
-    b.check("watch notices the change and reindexes", stdout.contains("spine reindexed"));
+    b.check(
+        "watch notices the change and reindexes",
+        stdout.contains("spine reindexed"),
+    );
 
     // 17. MCP: full protocol round trip
     let mut mcp = Command::new(BIN)
@@ -268,16 +333,25 @@ fn battle_serial() {
     }
     let _ = mcp.wait();
     b.check("mcp answers initialize", mcp_out.contains("\"serverInfo\""));
-    b.check("mcp lists all eight tools", mcp_out.contains("spine.scan")
-        && mcp_out.contains("spine.query")
-        && mcp_out.contains("harmony.check")
-        && mcp_out.contains("harmony.staged")
-        && mcp_out.contains("grounding.plan")
-        && mcp_out.contains("grounding.scaffold")
-        && mcp_out.contains("deps.check")
-        && mcp_out.contains("web.confirm"));
-    b.check("mcp answers a spine.query call", mcp_out.contains("main calls add"));
-    b.check("mcp answers harmony.check with taint findings", mcp_out.contains("SQL"));
+    b.check(
+        "mcp lists all eight tools",
+        mcp_out.contains("spine.scan")
+            && mcp_out.contains("spine.query")
+            && mcp_out.contains("harmony.check")
+            && mcp_out.contains("harmony.staged")
+            && mcp_out.contains("grounding.plan")
+            && mcp_out.contains("grounding.scaffold")
+            && mcp_out.contains("deps.check")
+            && mcp_out.contains("web.confirm"),
+    );
+    b.check(
+        "mcp answers a spine.query call",
+        mcp_out.contains("main calls add"),
+    );
+    b.check(
+        "mcp answers harmony.check with taint findings",
+        mcp_out.contains("SQL"),
+    );
 
     // 18. Dash free enforcement on local CLI output
     for (name, args) in [
@@ -299,7 +373,10 @@ fn battle_serial() {
         .spawn()
         .and_then(|mut c| {
             let mut s = c.stdin.take().unwrap();
-            s.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}\n").unwrap();
+            s.write_all(
+                b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}\n",
+            )
+            .unwrap();
             drop(s);
             c.wait_with_output()
         })
@@ -309,7 +386,10 @@ fn battle_serial() {
 
     // 19. Dependency guard talks to the registries
     let (out, _, _) = b.cli(&["deps"]);
-    b.check("deps reports serde from the manifest", out.contains("serde"));
+    b.check(
+        "deps reports serde from the manifest",
+        out.contains("serde"),
+    );
 
     // 20. Anti cosmetic: a caret range must never be called outdated
     let cosmetic_dir = b.fixture.join("caret_ok");
@@ -334,6 +414,122 @@ fn battle_serial() {
     b.check(
         "caret range serde 1 is not reported outdated",
         !out.contains("outdated") && !out.contains("falls outside"),
+    );
+
+    // 21. Scale phase. A synthetic workspace of about a hundred thousand
+    // lines proves the spine works on a massive codebase, then proves the
+    // incremental diff on the very same tree.
+    let scale_dir = b.fixture.join("scale");
+    let scale_src = scale_dir.join("src");
+    std::fs::create_dir_all(&scale_src).unwrap();
+    let rust_files = 2200usize;
+    let js_files = 200usize;
+    for i in 0..rust_files {
+        let mut code = String::new();
+        code.push_str(&format!(
+            "use std::process::Command;\n\npub fn handler_{}(input: &str) -> u32 {{\n",
+            i
+        ));
+        for j in 0..36 {
+            code.push_str(&format!("    let v{}: u32 = {};\n", j, (j * 7) % 101));
+        }
+        code.push_str("    let sum = v0 + v1 + v2 + v3 + v4 + v5 + v6 + v7 + v8 + v9;\n");
+        if i % 220 == 0 {
+            code.push_str("    let out = Command::new(\"sh\").arg(\"-c\").arg(format!(\"echo {}\", input)).output();\n");
+            code.push_str("    out.unwrap();\n");
+        }
+        code.push_str(&format!(
+            "    sum\n}}\n\npub fn call_{}() -> u32 {{\n    handler_{}(\"x\")\n}}\n",
+            i, i
+        ));
+        std::fs::write(scale_src.join(format!("mod_{:04}.rs", i)), code).unwrap();
+    }
+    for i in 0..js_files {
+        let mut code = String::new();
+        code.push_str("const data = JSON.parse(raw);\n");
+        if i % 100 == 0 {
+            code.push_str("console.log(data);\n");
+        }
+        code.push_str(&format!("module.exports = {{ id: {} }};\n", i));
+        std::fs::write(scale_src.join(format!("app_{:03}.js", i)), code).unwrap();
+    }
+
+    let run_in = |args: &[&str]| {
+        Command::new(BIN)
+            .args(args)
+            .current_dir(&scale_dir)
+            .output()
+            .map(|o| {
+                (
+                    String::from_utf8_lossy(&o.stdout).to_string(),
+                    String::from_utf8_lossy(&o.stderr).to_string(),
+                    o.status.success(),
+                )
+            })
+            .unwrap()
+    };
+
+    let t0 = Instant::now();
+    let (out, _, ok) = run_in(&["scan"]);
+    let scan_secs = t0.elapsed().as_secs_f64();
+    b.check(
+        "scale scan builds the full index",
+        ok && out.contains("2400 files") && out.contains("2400 touched"),
+    );
+    b.check("scale scan finishes well inside budget", scan_secs < 60.0);
+    #[cfg(target_os = "linux")]
+    {
+        let rss_ok = out
+            .split("peak rss ")
+            .nth(1)
+            .and_then(|s| s.split(" MB").next())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .map(|mb| mb < 512)
+            .unwrap_or(false);
+        b.check("scale scan stays under the memory budget", rss_ok);
+    }
+
+    let (out, _, ok) = run_in(&["scan"]);
+    b.check(
+        "second scan is a no op diff",
+        ok && out.contains("0 touched"),
+    );
+
+    // One file changes, the diff touches exactly it and the graph survives.
+    let target = scale_src.join("mod_0000.rs");
+    let mut code = std::fs::read_to_string(&target).unwrap();
+    code.push_str("// changed once\n");
+    std::fs::write(&target, code).unwrap();
+    let (out, _, ok) = run_in(&["scan"]);
+    b.check(
+        "one changed file touches exactly one",
+        ok && out.contains("1 touched"),
+    );
+
+    let t1 = Instant::now();
+    let (out, _, _) = run_in(&["query", "callers", "handler_0"]);
+    let query_ms = t1.elapsed().as_millis();
+    b.check(
+        "query on the massive graph answers instantly",
+        out.contains("1 call site(s)") && out.contains("call_0 calls handler_0") && query_ms < 2000,
+    );
+
+    let (out, _, ok) = run_in(&["check"]);
+    let json_parse = out.matches("JSON.parse can throw").count();
+    let debug_log = out.matches("debug output left").count();
+    let unwrap = out.matches("unwrap can panic").count();
+    b.check(
+        "scale check catches every planted bug",
+        ok && json_parse == 200 && debug_log == 2 && unwrap == 10,
+    );
+    b.check("scale check output is dash free", has_no_dash(&out));
+
+    // The tiny end must still pass after all the scale work. The original
+    // fixture index was rebuilt by the earlier no op scans.
+    let (out, _, _) = b.cli(&["query", "callers", "add"]);
+    b.check(
+        "tiny workspace still answers after scale phase",
+        out.contains("main calls add"),
     );
 
     let _ = std::fs::remove_dir_all(&b.fixture);

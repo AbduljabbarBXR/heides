@@ -16,7 +16,10 @@ pub struct TaintReport {
 }
 
 const SOURCES: [(&str, &str); 15] = [
-    ("javascript", r"\b(req|request)\.(query|params|body|headers|cookies)\b"),
+    (
+        "javascript",
+        r"\b(req|request)\.(query|params|body|headers|cookies)\b",
+    ),
     ("javascript", r"\bprocess\.env\b"),
     ("javascript", r"\blocalStorage\b"),
     ("javascript", r"\bsessionStorage\b"),
@@ -28,9 +31,15 @@ const SOURCES: [(&str, &str); 15] = [
     ("python", r"\brequest\.(args|form|json|values)\b"),
     ("php", r"\b\$_(GET|POST|REQUEST|COOKIE|SERVER)\b"),
     ("go", r"\b(r\.URL\.Query|FormValue|os\.Args|os\.Getenv)\b"),
-    ("java", r"\b(request|req)\.(getParameter|getHeader|getCookies)\b"),
+    (
+        "java",
+        r"\b(request|req)\.(getParameter|getHeader|getCookies)\b",
+    ),
     ("java", r"\bSystem\.(getenv|getProperty)\b"),
-    ("csharp", r"\b(Request\.(QueryString|Form|Headers)|Console\.ReadLine|Environment\.GetEnvironmentVariable)\b"),
+    (
+        "csharp",
+        r"\b(Request\.(QueryString|Form|Headers)|Console\.ReadLine|Environment\.GetEnvironmentVariable)\b",
+    ),
 ];
 
 const SINKS: [(&str, &str, &str); 20] = [
@@ -38,22 +47,70 @@ const SINKS: [(&str, &str, &str); 20] = [
     ("javascript", r"\b(eval|Function)\s*\(", "eval"),
     ("javascript", r"\bexec\s*\(", "shell"),
     ("javascript", r"\bspawn\s*\(", "shell"),
-    ("javascript", r"\bfs\.(readFile|writeFile|unlink|rm)\s*\(", "filesystem"),
+    (
+        "javascript",
+        r"\bfs\.(readFile|writeFile|unlink|rm)\s*\(",
+        "filesystem",
+    ),
     ("python", r"\b(sql|execute|executemany)\s*\(", "SQL"),
-    ("python", r"\b(os\.system|subprocess|eval|exec)\s*\(", "shell"),
+    (
+        "python",
+        r"\b(os\.system|subprocess|eval|exec)\s*\(",
+        "shell",
+    ),
     ("python", r"\bopen\s*\(", "filesystem"),
-    ("javascript", r"\b(prompt|system_message|messages)\b", "prompt"),
+    (
+        "javascript",
+        r"\b(prompt|system_message|messages)\b",
+        "prompt",
+    ),
     ("python", r"\b(prompt|system_message|messages)\b", "prompt"),
-    ("php", r"\b(mysqli_query|query|exec|system|shell_exec|eval|include|unlink)\s*\(", "SQL"),
-    ("php", r"\b(file_get_contents|file_put_contents|fopen)\s*\(", "filesystem"),
-    ("go", r"\b(db\.Query|QueryRow|Exec|exec\.Command|sql\.Open)\s*\(", "SQL"),
-    ("go", r"\b(os\.(Create|WriteFile|Remove)|ioutil\.WriteFile)\s*\(", "filesystem"),
-    ("java", r"\b(executeQuery|executeUpdate|execute|createQuery)\s*\(", "SQL"),
-    ("java", r"\b(Runtime\.getRuntime\(\)\.exec|ProcessBuilder)\s*\(", "shell"),
-    ("java", r"\b(Files\.(write|readAllBytes)|FileWriter|FileOutputStream)\s*\(", "filesystem"),
-    ("csharp", r"\b(SqlCommand|ExecuteScalar|ExecuteNonQuery|ExecuteReader)\s*\(", "SQL"),
+    (
+        "php",
+        r"\b(mysqli_query|query|exec|system|shell_exec|eval|include|unlink)\s*\(",
+        "SQL",
+    ),
+    (
+        "php",
+        r"\b(file_get_contents|file_put_contents|fopen)\s*\(",
+        "filesystem",
+    ),
+    (
+        "go",
+        r"\b(db\.Query|QueryRow|Exec|exec\.Command|sql\.Open)\s*\(",
+        "SQL",
+    ),
+    (
+        "go",
+        r"\b(os\.(Create|WriteFile|Remove)|ioutil\.WriteFile)\s*\(",
+        "filesystem",
+    ),
+    (
+        "java",
+        r"\b(executeQuery|executeUpdate|execute|createQuery)\s*\(",
+        "SQL",
+    ),
+    (
+        "java",
+        r"\b(Runtime\.getRuntime\(\)\.exec|ProcessBuilder)\s*\(",
+        "shell",
+    ),
+    (
+        "java",
+        r"\b(Files\.(write|readAllBytes)|FileWriter|FileOutputStream)\s*\(",
+        "filesystem",
+    ),
+    (
+        "csharp",
+        r"\b(SqlCommand|ExecuteScalar|ExecuteNonQuery|ExecuteReader)\s*\(",
+        "SQL",
+    ),
     ("csharp", r"\bProcess\.Start\s*\(", "shell"),
-    ("csharp", r"\bFile\.(WriteAllText|ReadAllText|Delete|Move)\s*\(", "filesystem"),
+    (
+        "csharp",
+        r"\bFile\.(WriteAllText|ReadAllText|Delete|Move)\s*\(",
+        "filesystem",
+    ),
 ];
 
 /// Scan one source file for taint flows.
@@ -307,7 +364,13 @@ fn assigned_var(line: &str) -> Option<String> {
     }
     let lhs = &trimmed[..eq];
     let mut ident = String::new();
-    for ch in lhs.trim_end().trim_end_matches(':').trim_end().chars().rev() {
+    for ch in lhs
+        .trim_end()
+        .trim_end_matches(':')
+        .trim_end()
+        .chars()
+        .rev()
+    {
         if ch.is_alphanumeric() || ch == '_' {
             ident.insert(0, ch);
         } else {
@@ -404,7 +467,11 @@ mod tests {
         let src = "function ask() {\n  const user = req.body.text;\n  const prompt = 'tell me about ' + user;\n}\n";
         let p = std::path::Path::new("ai.js");
         let reports = scan_file(p, src);
-        assert!(reports.iter().any(|r| r.message.contains("prompt injection")));
+        assert!(
+            reports
+                .iter()
+                .any(|r| r.message.contains("prompt injection"))
+        );
     }
 
     #[test]
@@ -418,7 +485,8 @@ mod tests {
 
     #[test]
     fn detects_php_sql_taint() {
-        let src = "<?php\nfunction load() {\n    $q = $_GET['id'];\n    mysqli_query($conn, $q);\n}\n";
+        let src =
+            "<?php\nfunction load() {\n    $q = $_GET['id'];\n    mysqli_query($conn, $q);\n}\n";
         let p = std::path::Path::new("app.php");
         let reports = scan_file(p, src);
         assert!(reports.iter().any(|r| r.message.contains("SQL")));

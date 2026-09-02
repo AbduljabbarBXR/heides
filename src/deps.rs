@@ -42,7 +42,11 @@ impl Version {
         let major = parts.next()?.parse().ok()?;
         let minor = parts.next().map(|p| p.parse().unwrap_or(0)).unwrap_or(0);
         let patch = parts.next().map(|p| p.parse().unwrap_or(0)).unwrap_or(0);
-        Some(Version { major, minor, patch })
+        Some(Version {
+            major,
+            minor,
+            patch,
+        })
     }
 }
 
@@ -125,22 +129,46 @@ fn parse_clause(raw: &str) -> Option<Clause> {
     }
     // Wildcard forms like 1.x or 1.2.x
     if raw.contains('x') || raw.contains('X') || raw.contains('*') {
-        let base = raw.split(['x', 'X', '*']).next().unwrap_or("").trim_end_matches('.');
-        let parsed = Version::parse(base).unwrap_or(Version { major: 0, minor: 0, patch: 0 });
+        let base = raw
+            .split(['x', 'X', '*'])
+            .next()
+            .unwrap_or("")
+            .trim_end_matches('.');
+        let parsed = Version::parse(base).unwrap_or(Version {
+            major: 0,
+            minor: 0,
+            patch: 0,
+        });
         if base.is_empty() {
             return Some(Clause::Any);
         }
         let dots = base.matches('.').count();
         if dots == 0 {
             // 1.x means >=1.0.0 <2.0.0
-            let min = Version { major: parsed.major, minor: 0, patch: 0 };
-            let max = Version { major: parsed.major + 1, minor: 0, patch: 0 };
+            let min = Version {
+                major: parsed.major,
+                minor: 0,
+                patch: 0,
+            };
+            let max = Version {
+                major: parsed.major + 1,
+                minor: 0,
+                patch: 0,
+            };
             return Some(Clause::Wildcard(min, max));
         }
         if dots == 1 {
             // 1.2.x means >=1.2.0 <1.3.0
-            let min = Version { major: parsed.major, minor: parsed.minor, patch: 0 };
-            let max = Version { major: parsed.major, minor: parsed.minor + 1, patch: 0 };
+            let min = Version {
+                major: parsed.major,
+                minor: parsed.minor,
+                patch: 0,
+            };
+            let max = Version {
+                major: parsed.major,
+                minor: parsed.minor + 1,
+                patch: 0,
+            };
             return Some(Clause::Wildcard(min, max));
         }
         return Some(Clause::Any);
@@ -263,9 +291,16 @@ fn parse_cargo_lock(text: &str) -> Vec<Dependency> {
     for line in text.lines() {
         let t = line.trim();
         if t.starts_with("name = ") {
-            name = Some(t.trim_start_matches("name = ").trim_matches('"').to_string());
+            name = Some(
+                t.trim_start_matches("name = ")
+                    .trim_matches('"')
+                    .to_string(),
+            );
         } else if t.starts_with("version = ") && name.is_some() {
-            let version = t.trim_start_matches("version = ").trim_matches('"').to_string();
+            let version = t
+                .trim_start_matches("version = ")
+                .trim_matches('"')
+                .to_string();
             deps.push(Dependency {
                 name: name.take().unwrap(),
                 version,
@@ -312,7 +347,10 @@ fn osv_check(dep: &Dependency) -> Option<String> {
         return None;
     }
     let first = &vulns[0];
-    let id = first.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let id = first
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
     let summary = first
         .get("summary")
         .and_then(|v| v.as_str())
@@ -330,7 +368,10 @@ fn latest_version(dep: &Dependency) -> Option<String> {
     let resp = crate::web::get(&url).ok()?;
     let value: serde_json::Value = serde_json::from_str(&resp).ok()?;
     if dep.ecosystem == "npm" {
-        value.get("version").and_then(|v| v.as_str()).map(|s| s.to_string())
+        value
+            .get("version")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
     } else {
         value
             .get("crate")
@@ -347,7 +388,8 @@ pub fn check(root: &Path) -> (Vec<DepReport>, bool) {
     if deps.is_empty() {
         reports.push(DepReport {
             severity: "info".to_string(),
-            message: "no dependency manifests found (Cargo.toml, Cargo.lock, package.json)".to_string(),
+            message: "no dependency manifests found (Cargo.toml, Cargo.lock, package.json)"
+                .to_string(),
             file: root.display().to_string(),
             line: 0,
         });
@@ -369,13 +411,20 @@ pub fn check(root: &Path) -> (Vec<DepReport>, bool) {
         let dep = Dependency {
             name: name.clone(),
             version: version.clone(),
-            ecosystem: if ecosystem == "npm" { "npm" } else { "crates.io" },
+            ecosystem: if ecosystem == "npm" {
+                "npm"
+            } else {
+                "crates.io"
+            },
         };
         checked += 1;
         match osv_check(&dep) {
             Some(vuln) => reports.push(DepReport {
                 severity: "critical".to_string(),
-                message: format!("{} {} has a known vulnerability: {}", dep.name, dep.version, vuln),
+                message: format!(
+                    "{} {} has a known vulnerability: {}",
+                    dep.name, dep.version, vuln
+                ),
                 file: "manifest".to_string(),
                 line: 0,
             }),
@@ -428,7 +477,8 @@ mod tests {
 
     #[test]
     fn parses_cargo_toml() {
-        let text = "[dependencies]\nserde = \"1\"\nureq = { version = \"3\", features = [\"x\"] }\n";
+        let text =
+            "[dependencies]\nserde = \"1\"\nureq = { version = \"3\", features = [\"x\"] }\n";
         let deps = parse_cargo_toml(text);
         assert_eq!(deps.len(), 2);
         assert_eq!(deps[0].name, "serde");
@@ -457,7 +507,10 @@ mod tests {
 
     #[test]
     fn semver_exact_pin() {
-        assert_eq!(latest_satisfies("=1.0.1", "1.0.228", "crates.io"), Some(false));
+        assert_eq!(
+            latest_satisfies("=1.0.1", "1.0.228", "crates.io"),
+            Some(false)
+        );
         assert_eq!(latest_satisfies("=1.0.1", "1.0.1", "crates.io"), Some(true));
     }
 
