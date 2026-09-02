@@ -18,8 +18,6 @@ HEIDES closes that gap at the moment that matters, before the patch is applied. 
 
 HEIDES is three organs over one spine, all deterministic, all local, all explainable.
 
-![The HEIDES architecture](assets/graph.png)
-
 ### The Spine
 
 ![The Spine maps the codebase into a persistent graph](assets/spine.png)
@@ -34,6 +32,8 @@ The graph answers four questions directly.
 * What does this function call?
 
 ### Harmony
+
+![The HEIDES architecture](assets/graph.png)
 
 Judgment. Harmony runs the guard modules against the Spine graph and against proposed patches. Every guard is deterministic and reports evidence, never guesses.
 
