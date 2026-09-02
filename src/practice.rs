@@ -25,6 +25,79 @@ const SECRET_PATTERN: [&str; 6] = [
     "private_key",
 ];
 
+/// True when this line binds a secret looking name to a real string literal.
+///
+/// The name before the binding operator must contain a secret keyword, the
+/// operator must be a real assignment and not a comparison or an arrow, the
+/// name must not be a dotted config path, and the value must be a non empty
+/// quoted literal that is not an interpolated template. Labels, attributes,
+/// type declarations, env reads and config path keys stay silent.
+fn secret_assignment(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut op: Option<usize> = None;
+    let mut quote: u8 = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        if quote != 0 {
+            if b == quote && (i == 0 || bytes[i - 1] != b'\\') {
+                quote = 0;
+            }
+            continue;
+        }
+        match b {
+            b'"' | b'\'' => quote = b,
+            b'=' | b':' => {
+                op = Some(i);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let Some(at) = op else {
+        return false;
+    };
+    let prev = if at > 0 { bytes[at - 1] } else { 0 };
+    let next = bytes.get(at + 1).copied().unwrap_or(0);
+    if prev == b'=' || prev == b'!' || prev == b'<' || prev == b'>' {
+        return false;
+    }
+    if next == b'=' || next == b'>' {
+        return false;
+    }
+    let before = &line[..at];
+    let mut name = before
+        .trim_end()
+        .rsplit(|c: char| c.is_whitespace() || c == '(' || c == '[' || c == '{' || c == ',')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('.');
+    if name.len() > 1 && (name.starts_with('"') || name.starts_with('\'')) {
+        name = &name[1..name.len() - 1];
+    }
+    if name.is_empty() || name.contains('.') {
+        return false;
+    }
+    let lower_name = name.to_ascii_lowercase();
+    if !SECRET_PATTERN.iter().any(|k| lower_name.contains(k)) {
+        return false;
+    }
+    // Validation rule names like newPasswordRule are not secrets.
+    if lower_name.contains("rule") {
+        return false;
+    }
+    let value = line[at + 1..].trim_start();
+    let mut chars = value.chars();
+    let q = match chars.next() {
+        Some(q @ ('"' | '\'')) => q,
+        _ => return false,
+    };
+    let content = value[1..].split(q).next().unwrap_or("");
+    let has_non_alpha = content.chars().any(|c| !c.is_ascii_alphabetic());
+    content.len() >= 6
+        && (has_non_alpha || content.len() >= 16)
+        && !content.contains("${")
+        && !content.contains("{{")
+}
+
 /// Scan one source file for practice issues.
 pub fn scan_file(path: &Path, content: &str, lang: &str) -> Vec<PracticeReport> {
     let mut reports = Vec::new();
@@ -80,19 +153,17 @@ pub fn scan_file(path: &Path, content: &str, lang: &str) -> Vec<PracticeReport> 
                 reports.push(rep(path, line_no, "info", "print statement found at module level in a library module. remove before shipping."));
             }
         }
-        for key in SECRET_PATTERN {
-            if lower.contains(key)
-                && (line.contains('=') || line.contains(':'))
-                && (line.contains('"') || line.contains('\''))
-            {
-                reports.push(rep(
-                    path,
-                    line_no,
-                    "critical",
-                    "possible secret or credential hardcoded in source.",
-                ));
-                break;
-            }
+        if secret_assignment(line)
+            && !line.contains("process.env")
+            && !line.contains("os.environ")
+            && !lower.contains("getenv")
+        {
+            reports.push(rep(
+                path,
+                line_no,
+                "critical",
+                "possible secret or credential hardcoded in source.",
+            ));
         }
     }
     reports

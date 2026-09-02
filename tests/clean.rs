@@ -125,6 +125,44 @@ export function safeDivide(a: number, b: number): number {
 "#,
     );
 
+    // TypeScript settings form. Field labels that mention secrets, password
+    // attributes, type declarations, empty defaults, config path keys and env
+    // driven keys are all idiomatic and must stay silent. This case regressed
+    // once, when the secret rule fired on any line holding a keyword and any
+    // quote anywhere on the line.
+    check_clean(
+        "typescript settings form",
+        "settings_form.tsx",
+        r#"interface PaystackSettings {
+  secretKey: string;
+  webhookSecret: string;
+}
+
+const defaults: PaystackSettings = {
+  secretKey: "",
+  webhookSecret: "",
+};
+
+const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY;
+
+function setNested(section: string, provider: string, values: object) {}
+
+export function SettingsForm() {
+  const onKey = (value: string) => {
+    setNested("payments", "paystack", { secretKey: value });
+  };
+  return (
+    <div>
+      <Field label="Webhook secret">
+        <input type="password" placeholder="Consumer secret" value={""} />
+      </Field>
+      <label className="token-hint">Keys are stored encrypted.</label>
+    </div>
+  );
+}
+"#,
+    );
+
     // Python: named exceptions, with blocks, no mutable defaults, no prints.
     check_clean(
         "python",
@@ -171,6 +209,46 @@ final class Calculator
     public function add(int $a, int $b): int
     {
         return $a + $b;
+    }
+}
+"#,
+    );
+
+    // Blade template. CSRF tokens bound through template interpolation are
+    // idiomatic Laravel, not hardcoded secrets. This case regressed once,
+    // when a quoted value holding any template call looked like a literal.
+    check_clean(
+        "php blade template",
+        "verify.blade.php",
+        r#"<form method="post" action="{{ route('verify') }}">
+    @csrf
+    <input type="password" name="code" placeholder="Verification code">
+    <button>Verify</button>
+</form>
+<script>
+    $.post('{{ route('addons.activation') }}', {_token: '{{ csrf_token() }}', id: id}, function(data) {});
+</script>
+"#,
+    );
+
+    // PHP request validation. Rule variables that mention passwords are
+    // validation keywords, not credentials. This case regressed once on a
+    // real Laravel request class.
+    check_clean(
+        "php validation rules",
+        "request_clean.php",
+        r#"<?php
+
+namespace App\Http\Requests;
+
+class SellerProfileRequest
+{
+    public function rules()
+    {
+        $newPasswordRule = 'sometimes';
+        $confirmPasswordRule = ['min:6'];
+        $passwordConfirmation = 'confirmed';
+        return [];
     }
 }
 "#,
