@@ -2,6 +2,13 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.7.1
+
+* dependency manifests are discovered recursively under the check root, parent scans no longer skip the real manifests one level down, vendored and generated trees are never walked
+* credential rule sharpened against real world false positives, env var name placeholders, labels, chat template tokens, file names, urls, paths, i18n keys and quoted config entries stay silent, mock shaped values in test paths downgrade to warnings
+* real key structure stays critical everywhere, long prefixed keys and PEM bodies fire in tests and config maps alike, comments with example keys are prose not code
+* unit suite grown to forty eight checks covering every silent and firing shape
+
 ## 0.7.0
 
 * interprocedural taint, a summary and fixpoint engine proves flows across function boundaries with full source to sink traces

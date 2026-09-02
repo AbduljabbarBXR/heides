@@ -64,6 +64,7 @@ fn secret_assignment(line: &str) -> bool {
         return false;
     }
     let before = &line[..at];
+    let mut name_was_quoted = false;
     let mut name = before
         .trim_end()
         .rsplit(|c: char| c.is_whitespace() || c == '(' || c == '[' || c == '{' || c == ',')
@@ -71,6 +72,7 @@ fn secret_assignment(line: &str) -> bool {
         .unwrap_or("")
         .trim_end_matches('.');
     if name.len() > 1 && (name.starts_with('"') || name.starts_with('\'')) {
+        name_was_quoted = true;
         name = &name[1..name.len() - 1];
     }
     if name.is_empty() || name.contains('.') {
@@ -82,6 +84,10 @@ fn secret_assignment(line: &str) -> bool {
     }
     // Validation rule names like newPasswordRule are not secrets.
     if lower_name.contains("rule") {
+        return false;
+    }
+    // Tokenizer machinery names are not credentials.
+    if lower_name.contains("tokeniz") {
         return false;
     }
     let value = line[at + 1..].trim_start();
@@ -143,7 +149,7 @@ fn secret_assignment(line: &str) -> bool {
     }
     // Quoted env references, chat template tokens and file names are
     // references, not credentials.
-    if content.starts_with("{env") || content.contains("<|") {
+    if content.starts_with("{env") || content.contains("<|") || content.contains("[REDACTED]") {
         return false;
     }
     if content.ends_with(".json")
@@ -180,6 +186,16 @@ fn secret_assignment(line: &str) -> bool {
         .any(|c| c.is_ascii_digit() || c.is_ascii_uppercase())
         && !credential_prefix.iter().any(|p| lower.starts_with(p))
     {
+        return false;
+    }
+    // i18n keys and namespaced identifiers carry dots, credentials do not.
+    // JWT and Google OAuth tokens keep their prefixes and still fire.
+    if content.contains('.') && !content.starts_with("eyJ") && !content.starts_with("ya29") {
+        return false;
+    }
+    // A quoted map key with a short value is a config entry, not a leak.
+    // Strong credential shaped values fire regardless of the key position.
+    if name_was_quoted && content.len() < 20 {
         return false;
     }
     let has_non_alpha = content.chars().any(|c| !c.is_ascii_alphabetic());
@@ -245,6 +261,7 @@ pub fn scan_file(path: &Path, content: &str, lang: &str) -> Vec<PracticeReport> 
             }
         }
         if secret_assignment(line)
+            && !is_comment_line(line)
             && !line.contains("process.env")
             && !line.contains("os.environ")
             && !lower.contains("getenv")
@@ -265,6 +282,19 @@ pub fn scan_file(path: &Path, content: &str, lang: &str) -> Vec<PracticeReport> 
         }
     }
     reports
+}
+
+/// True when the line is a comment in any supported dialect. Example keys
+/// and config sketches inside comments are prose, not code.
+fn is_comment_line(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with('#')
+        || t.starts_with("//")
+        || t.starts_with("/*")
+        || t.starts_with("* ")
+        || t.starts_with('%')
+        || t.starts_with("--")
+        || t.starts_with("<!--")
 }
 
 /// True when the path marks test code: a test directory segment or a test
@@ -499,6 +529,11 @@ mod tests {
             "const tokenizer_file = \"tokenizer.json\";\n",
             "const chat_eos_token = \"<|im_end|>\";\n",
             "const providerUrl = \"https://bots.qq.com/app/getAppAccessToken\";\n",
+            "\"tencent-tokenhub\": \"hy3-preview\",\n",
+            "const apiKeyRequired = \"error.apiKeyRequired\";\n",
+            "// api_key: \"sk-live-1234567890abcdef1234567890abcdef\"\n",
+            "//     secret: \"-----BEGIN RSA PRIVATE KEY-----MIIEowIBAAKCAQEA5XyZ\"\n",
+            "const token: string = \"[REDACTED]\";\n",
         );
         let p = std::path::Path::new("clean.js");
         let reports = scan_file(p, src, "javascript");
