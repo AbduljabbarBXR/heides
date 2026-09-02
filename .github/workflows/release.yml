@@ -1,0 +1,70 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: heides-x86_64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+            asset: heides-aarch64-apple-darwin
+          - os: macos-14
+            target: x86_64-apple-darwin
+            asset: heides-x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: heides-x86_64-pc-windows-msvc.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: build release
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: stage asset
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/heides${{ matrix.os == 'windows-latest' && '.exe' || '' }} dist/${{ matrix.asset }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asset-${{ matrix.target }}
+          path: dist/${{ matrix.asset }}
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: checksums
+        run: |
+          cd assets
+          sha256sum * > SHA256SUMS
+      - name: create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" assets/* \
+            --title "HEIDES $VERSION" \
+            --notes "The code nervous system. Deterministic pre apply gating for AI coding agents, see the CHANGELOG and RULES files in the repo for the full story."

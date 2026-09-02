@@ -115,7 +115,15 @@ Deep analysis with taint, dataflow and call graphs targets eight languages. Rust
 
 ## Install
 
-Requirements are a Rust toolchain to build from source, or a prebuilt binary from releases.
+One line installer, downloads the prebuilt binary for your platform, linux, macos, windows and Termux Android.
+
+    curl -fsSL https://raw.githubusercontent.com/AbduljabbarBXR/heides/main/scripts/install.sh | bash
+
+Pin a version with HEIDES_VERSION.
+
+    HEIDES_VERSION=0.6.0 curl -fsSL https://raw.githubusercontent.com/AbduljabbarBXR/heides/main/scripts/install.sh | bash
+
+Or build from source with a Rust toolchain, or take a prebuilt binary from the releases page.
 
     git clone git@github.com:AbduljabbarBXR/heides.git
     cd heides
