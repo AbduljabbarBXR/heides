@@ -51,6 +51,8 @@ Here is what a finding looks like.
 
 ### Grounding
 
+![Grounding refines plans against the spine and the web](assets/grounding.png)
+
 Refinement. Grounding takes an objective or a plan and checks it against the Spine and against the outside world. It confirms feasibility, surfaces missing prerequisites, and returns a bounded specification that the agent then builds against. For new projects it turns a plan into a scaffold, confirms security and best practices, and hands a clean foundation back to the agent. For facts that change over time it can consult the web and update its own knowledge.
 
 ## How it works
