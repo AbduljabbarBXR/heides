@@ -249,14 +249,13 @@ fn param_name_of(node: Node, content: &str) -> Option<String> {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         let kind = child.kind();
-        if kind == "identifier"
+        if (kind == "identifier"
             || kind == "name"
             || kind == "variable_name"
-            || kind == "property_identifier"
+            || kind == "property_identifier")
+            && let Some(name) = clean_param_name(&text(child, content))
         {
-            if let Some(name) = clean_param_name(&text(child, content)) {
-                return Some(name);
-            }
+            return Some(name);
         }
         // Python typed parameters and csharp pointers nest the identifier
         // one level down (typed_parameter, spread forms), look one level
@@ -273,10 +272,10 @@ fn first_identifier_descendant(node: Node, content: &str) -> Option<String> {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         let kind = child.kind();
-        if kind == "identifier" || kind == "name" || kind == "variable_name" {
-            if let Some(name) = clean_param_name(&text(child, content)) {
-                return Some(name);
-            }
+        if (kind == "identifier" || kind == "name" || kind == "variable_name")
+            && let Some(name) = clean_param_name(&text(child, content))
+        {
+            return Some(name);
         }
     }
     None
@@ -288,22 +287,20 @@ fn first_identifier_descendant(node: Node, content: &str) -> Option<String> {
 /// defensive fallback. Self and receiver parameters carry no name and are
 /// skipped, which keeps their position from shifting later arguments.
 fn params_of(node: Node, content: &str) -> Vec<String> {
-    let params_node = node
-        .child_by_field_name("parameters")
-        .or_else(|| {
-            let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                let kind = child.kind();
-                if kind == "parameters"
-                    || kind == "formal_parameters"
-                    || kind == "parameter_list"
-                    || (kind.contains("parameter") && kind != "type_parameters")
-                {
-                    return Some(child);
-                }
+    let params_node = node.child_by_field_name("parameters").or_else(|| {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            let kind = child.kind();
+            if kind == "parameters"
+                || kind == "formal_parameters"
+                || kind == "parameter_list"
+                || (kind.contains("parameter") && kind != "type_parameters")
+            {
+                return Some(child);
             }
-            None
-        });
+        }
+        None
+    });
     let Some(pn) = params_node else {
         return Vec::new();
     };
