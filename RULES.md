@@ -49,13 +49,13 @@ Manifest based checks over Cargo.toml, Cargo.lock and package.json.
 
 ## staged.apply
 
-A unified diff is checked against the spine graph before anything touches disk. The patch is applied in memory, the affected files are reparsed, and the proposed graph is diffed against the current one.
+A unified diff is checked against the spine graph before anything touches disk. The patch is applied in memory, the affected files are reparsed, and the proposed graph is diffed against the current one. A caller file the patch itself rewrites is judged on its proposed content, so a patch that renames a function and updates every caller in one move passes clean.
 
-- Deleted file with live callers. Severity blocker. Trigger, a patch deletes a file whose symbols are still called from the graph. Message, file {file} is deleted but {symbol} is still called from {n} call site(s).
-- Removed function still called. Severity blocker. Trigger, a patch removes a function that has recorded callers. Message, function {name} is removed by the patch but still called at {file}.
-- Removed function with no callers. Severity warning. Trigger, a patch removes a function with no recorded callers. Message, function {name} is removed by the patch and has no recorded callers.
-- Duplicate declaration. Severity blocker. Trigger, the patch declares a symbol that already exists elsewhere in the graph. Message, {file} declares {symbol} which already exists at {file}:{line}.
-- Signature change. Severity blocker when callers exist, warning when none are recorded. Trigger, the normalized signature of a kept function differs after the patch. Message, signature of {name} changed ({n} caller(s) may break: {caller}).
+- Deleted file with live callers. Severity blocker. Trigger, a patch deletes a file whose symbols are still called from any file the patch does not rewrite, or from a rewritten file whose proposed content still calls them. Message, file {file} is deleted but {symbol} is still called from {n} call site(s).
+- Removed function still called. Severity blocker. Trigger, a patch removes a function and a surviving call site remains, either in a file the patch does not touch or in a rewritten file that still calls it. Message, function {name} is removed by the patch but still called at {file}.
+- Removed function with no callers. Severity warning. Trigger, a patch removes a function that has no recorded callers. Message, function {name} is removed by the patch and has no recorded callers.
+- Duplicate definition. Severity blocker. Trigger, the new content of one file declares the same name twice with the same signature. Cross file collisions stay silent, modules, classes and route handlers routinely export the same method name as other files, and overloads differ in signature. Message, {file} declares {name} more than once in the same file.
+- Signature change. Severity blocker when a stale call remains in a file the patch does not touch, warning when the patch rewrote the callers or none are recorded. Trigger, the normalized signature of a kept function differs after the patch. Argument compatibility of rewritten calls cannot be proven without type checking, so they surface as a warning, never a false blocker. Message, signature of {name} changed ({n} caller(s) may break: {caller}).
 
 ## grounding.plan and scaffold
 

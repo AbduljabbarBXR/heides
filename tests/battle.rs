@@ -138,6 +138,16 @@ fn battle_serial() {
     b.write("app.go", &fixture_go());
     b.write("app.java", &fixture_java());
     b.write("app.cs", &fixture_cs());
+    // Two Next.js style route files, each exporting POST. Cross file method
+    // name collisions are idiomatic and must never block a staged patch.
+    b.write(
+        "routes/a.ts",
+        "export async function POST(request: Request) {\n  return new Response(\"a\");\n}\n",
+    );
+    b.write(
+        "routes/b.ts",
+        "export async function POST(request: Request) {\n  return new Response(\"b\");\n}\n",
+    );
 
     // 1. Version
     let (out, _, ok) = b.cli(&["version"]);
@@ -236,6 +246,36 @@ fn battle_serial() {
     b.check(
         "staged accepts a brand new file",
         out.contains("safe to apply") || out.contains("no conflicts"),
+    );
+
+    // 11b. Staged apply: a rename that updates every caller inside the same
+    // patch is safe. A real agent produced exactly this shape on a real
+    // codebase and was wrongly blocked before the in patch caller fix.
+    let rename_patch = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,1 +1,1 @@\n-pub fn add(a: i32, b: i32) -> i32 { a + b }\n+pub fn compute(a: i32, b: i32) -> i32 { a + b }\ndiff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -2,1 +2,1 @@\n-    let x = add(1, 2);\n+    let x = compute(1, 2);\n";
+    b.write("rename.patch", rename_patch);
+    let (out, _, _) = b.cli(&["staged", "rename.patch"]);
+    b.check(
+        "staged allows a rename with every caller updated in one patch",
+        out.contains("safe to apply"),
+    );
+
+    // 11c. The same rename without the caller update must block.
+    let miss_patch = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,1 +1,1 @@\n-pub fn add(a: i32, b: i32) -> i32 { a + b }\n+pub fn compute(a: i32, b: i32) -> i32 { a + b }\n";
+    b.write("miss.patch", miss_patch);
+    let (out, _, _) = b.cli(&["staged", "miss.patch"]);
+    b.check(
+        "staged blocks a rename that misses a caller",
+        out.contains("removed by the patch but still called"),
+    );
+
+    // 11d. Editing one Next.js route must not collide with the POST that a
+    // sibling route file exports.
+    let route_patch = "diff --git a/routes/b.ts b/routes/b.ts\n--- a/routes/b.ts\n+++ b/routes/b.ts\n@@ -2,1 +2,1 @@\n-  return new Response(\"b\");\n+  return new Response(\"beta\");\n";
+    b.write("route.patch", route_patch);
+    let (out, _, _) = b.cli(&["staged", "route.patch"]);
+    b.check(
+        "staged allows editing a route next to sibling POST exports",
+        out.contains("safe to apply"),
     );
 
     // 12. Staged apply: bad diff is rejected
