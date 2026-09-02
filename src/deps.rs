@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct DepReport {
@@ -222,26 +223,88 @@ pub fn latest_satisfies(requirement: &str, latest: &str, ecosystem: &str) -> Opt
 }
 
 /// Extract dependencies from Cargo.toml, Cargo.lock and package.json.
-pub fn read_manifests(root: &Path) -> Vec<Dependency> {
-    let mut deps = Vec::new();
-    let cargo_toml = root.join("Cargo.toml");
-    let cargo_lock = root.join("Cargo.lock");
-    let package_json = root.join("package.json");
+/// Directories never walked when hunting for nested manifests. A project
+/// tree stops at vendored and generated roots so that parent scans find the
+/// real manifests without drowning in dependencies.
+const MANIFEST_SKIP_DIRS: &[&str] = &[
+    "node_modules",
+    "vendor",
+    ".git",
+    ".heides",
+    "target",
+    "dist",
+    "build",
+    ".next",
+    ".output",
+    ".netlify",
+    ".vercel",
+    "venv",
+    ".venv",
+    ".tox",
+    "__pycache__",
+    "coverage",
+];
 
-    if cargo_toml.exists() {
-        if let Ok(text) = std::fs::read_to_string(&cargo_toml) {
-            deps.extend(parse_cargo_toml(&text));
-        }
-    } else if cargo_lock.exists()
-        && let Ok(text) = std::fs::read_to_string(&cargo_lock)
-    {
-        deps.extend(parse_cargo_lock(&text));
+fn collect_manifests(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    if !dir.is_dir() {
+        return;
     }
+    let lock = dir.join("Cargo.lock");
+    let toml = dir.join("Cargo.toml");
+    if lock.exists() {
+        out.push(lock);
+    } else if toml.exists() {
+        out.push(toml);
+    }
+    let pkg = dir.join("package.json");
+    if pkg.exists() {
+        out.push(pkg);
+    }
+    if depth == 0 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if MANIFEST_SKIP_DIRS.contains(&name) {
+            continue;
+        }
+        collect_manifests(&path, depth - 1, out);
+    }
+}
 
-    if package_json.exists()
-        && let Ok(text) = std::fs::read_to_string(&package_json)
-    {
-        deps.extend(parse_package_json(&text));
+/// Reads every manifest reachable from the root, root first then bounded
+/// subdirectories, so a check on a project parent does not silently skip the
+/// real manifests one level down. Duplicate packages collapse to one entry.
+pub fn read_manifests(root: &Path) -> Vec<Dependency> {
+    let mut files = Vec::new();
+    collect_manifests(root, 6, &mut files);
+    let mut deps = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for file in files {
+        let parsed: Vec<Dependency> = match file.file_name().and_then(|n| n.to_str()) {
+            Some("Cargo.toml") => std::fs::read_to_string(&file)
+                .map(|t| parse_cargo_toml(&t))
+                .unwrap_or_default(),
+            Some("Cargo.lock") => std::fs::read_to_string(&file)
+                .map(|t| parse_cargo_lock(&t))
+                .unwrap_or_default(),
+            Some("package.json") => std::fs::read_to_string(&file)
+                .map(|t| parse_package_json(&t))
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        for dep in parsed {
+            if seen.insert(format!("{}@{}@{}", dep.name, dep.version, dep.ecosystem)) {
+                deps.push(dep);
+            }
+        }
     }
     deps
 }
@@ -536,5 +599,57 @@ mod tests {
         let deps = parse_package_json(text);
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].name, "express");
+    }
+
+    #[test]
+    fn nested_manifests_are_discovered_but_vendored_are_skipped() {
+        let base = std::env::temp_dir().join(format!(
+            "heides_deps_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // project root with no manifest, real manifest one level down
+        let sub = base.join("app");
+        std::fs::create_dir_all(sub.join("node_modules").join("left-pad")).unwrap();
+        std::fs::create_dir_all(sub.join("subdir")).unwrap();
+        std::fs::write(
+            sub.join("package.json"),
+            r#"{"dependencies": {"express": "^4.18.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            sub.join("subdir").join("package.json"),
+            r#"{"dependencies": {"left-pad": "1.3.0"}}"#,
+        )
+        .unwrap();
+        // vendored manifest must never surface
+        std::fs::write(
+            sub.join("node_modules")
+                .join("left-pad")
+                .join("package.json"),
+            r#"{"dependencies": {"evil-pkg": "9.9.9"}}"#,
+        )
+        .unwrap();
+        let deps = read_manifests(&base);
+        let _ = std::fs::remove_dir_all(&base);
+        let names: Vec<_> = deps.iter().map(|d| d.name.as_str()).collect();
+        assert!(
+            names.contains(&"express"),
+            "root child manifest missed: {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"left-pad"),
+            "nested manifest missed: {:?}",
+            names
+        );
+        assert!(
+            !names.contains(&"evil-pkg"),
+            "vendored manifest surfaced: {:?}",
+            names
+        );
     }
 }
