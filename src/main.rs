@@ -42,18 +42,17 @@ fn main() -> ExitCode {
             let touched = indexer::update_graph(&root, &mut graph);
             match spine::save(&graph, &root) {
                 Ok(()) => {
-                    let rss = indexer::peak_rss_mb()
-                        .map(|mb| format!(", peak rss {} MB", mb))
-                        .unwrap_or_default();
                     println!(
-                        "spine indexed {} files, {} symbols, {} call edges, {} imports ({} touched){}",
+                        "spine indexed {} files, {} symbols, {} call edges, {} imports ({} touched)",
                         graph.files.len(),
                         graph.symbols.len(),
                         graph.calls.len(),
                         graph.imports.len(),
-                        touched,
-                        rss
+                        touched
                     );
+                    if let Some(mb) = indexer::peak_rss_mb() {
+                        eprintln!("peak rss {} MB", mb);
+                    }
                     ExitCode::SUCCESS
                 }
                 Err(e) => {

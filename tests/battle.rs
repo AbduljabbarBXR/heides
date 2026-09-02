@@ -143,7 +143,7 @@ fn battle_serial() {
     let (out, _, ok) = b.cli(&["version"]);
     b.check(
         "version command exits clean and prints a version",
-        ok && out.contains("0.5"),
+        ok && out.contains("0.6"),
     );
 
     // 2. Scan builds the spine
@@ -470,7 +470,7 @@ fn battle_serial() {
     };
 
     let t0 = Instant::now();
-    let (out, _, ok) = run_in(&["scan"]);
+    let (out, err, ok) = run_in(&["scan"]);
     let scan_secs = t0.elapsed().as_secs_f64();
     b.check(
         "scale scan builds the full index",
@@ -479,7 +479,7 @@ fn battle_serial() {
     b.check("scale scan finishes well inside budget", scan_secs < 60.0);
     #[cfg(target_os = "linux")]
     {
-        let rss_ok = out
+        let rss_ok = err
             .split("peak rss ")
             .nth(1)
             .and_then(|s| s.split(" MB").next())
