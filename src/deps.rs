@@ -208,14 +208,10 @@ pub fn latest_satisfies(requirement: &str, latest: &str, ecosystem: &str) -> Opt
             } else {
                 parse_clause(clause_raw)
             };
-            match clause {
-                Some(c) => {
-                    if !c.matches(&latest) {
-                        all = false;
-                        break;
-                    }
-                }
-                None => return None,
+            let c = clause?;
+            if !c.matches(&latest) {
+                all = false;
+                break;
             }
         }
         if all {
