@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gate:
+    name: full gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: format
+        run: cargo fmt --check
+      - name: lint
+        run: cargo clippy --all-targets -- -D warnings
+      - name: build
+        run: cargo build --release
+      - name: unit, battle, hostile and determinism suites
+        run: cargo test
