@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-pub const INDEX_VERSION: u32 = 3;
+pub const INDEX_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Symbol {
@@ -19,6 +19,10 @@ pub struct Symbol {
     pub line: u64,
     pub lang: String,
     pub signature: String,
+    /// Parameter names of a function symbol, in source order. Empty for
+    /// every non function symbol kind. Feeds the interprocedural taint
+    /// summaries, so a schema change on this field is a version bump.
+    pub params: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

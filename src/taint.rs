@@ -15,7 +15,10 @@ pub struct TaintReport {
     pub line: u64,
 }
 
-const SOURCES: [(&str, &str); 15] = [
+/// Source patterns per language, user input entry points. Shared with the
+/// interprocedural engine, which reads the same rows so the two layers can
+/// never disagree about what a source is.
+pub(crate) const SOURCES: [(&str, &str); 14] = [
     (
         "javascript",
         r"\b(req|request)\.(query|params|body|headers|cookies)\b",
@@ -27,10 +30,9 @@ const SOURCES: [(&str, &str); 15] = [
     ("javascript", r"\binput\.value\b"),
     ("python", r"\binput\s*\("),
     ("python", r"\bos\.environ\b"),
-    ("python", r"\bsys\.argv\b"),
     ("python", r"\brequest\.(args|form|json|values)\b"),
-    ("php", r"\b\$_(GET|POST|REQUEST|COOKIE|SERVER)\b"),
-    ("go", r"\b(r\.URL\.Query|FormValue|os\.Args|os\.Getenv)\b"),
+    ("php", r"\b\$_\(GET|POST|REQUEST|COOKIE|SERVER)\b"),
+    ("go", r"\b(r\.URL\.Query|FormValue|os\.Getenv)\b"),
     (
         "java",
         r"\b(request|req)\.(getParameter|getHeader|getCookies)\b",
@@ -42,7 +44,7 @@ const SOURCES: [(&str, &str); 15] = [
     ),
 ];
 
-const SINKS: [(&str, &str, &str); 20] = [
+pub(crate) const SINKS: [(&str, &str, &str); 20] = [
     ("javascript", r"\b(query|execute|exec)\s*\(", "SQL"),
     ("javascript", r"\b(eval|Function)\s*\(", "eval"),
     ("javascript", r"\bexec\s*\(", "shell"),
@@ -175,7 +177,7 @@ pub fn scan_file(path: &Path, content: &str) -> Vec<TaintReport> {
     reports
 }
 
-fn make_report(path: &Path, line: u64, message: String) -> TaintReport {
+pub(crate) fn make_report(path: &Path, line: u64, message: String) -> TaintReport {
     TaintReport {
         severity: "critical".to_string(),
         message,
@@ -189,7 +191,7 @@ fn is_word_char(c: char) -> bool {
 }
 
 /// Match a rule pattern against a line with word boundary support.
-fn regex_hit(pattern: &str, line: &str) -> bool {
+pub(crate) fn regex_hit(pattern: &str, line: &str) -> bool {
     let mut pat = pattern
         .replace(r"\b", "\u{1}")
         .replace(r"\s", " ")
@@ -348,11 +350,11 @@ fn expand(pattern: &str) -> Vec<String> {
     candidates
 }
 
-fn leading_spaces(line: &str) -> usize {
+pub(crate) fn leading_spaces(line: &str) -> usize {
     line.chars().take_while(|c| *c == ' ' || *c == '\t').count()
 }
 
-fn assigned_var(line: &str) -> Option<String> {
+pub(crate) fn assigned_var(line: &str) -> Option<String> {
     let trimmed = line.trim();
     let eq = trimmed.find('=')?;
     if trimmed[eq..].starts_with("==")
@@ -392,7 +394,7 @@ fn assigned_var(line: &str) -> Option<String> {
 
 /// Split file lines into function blocks. Returns (start, end, indent) per
 /// block for brace languages, or per indented suite for python.
-fn function_blocks(lines: &[&str], lang: &str) -> Vec<(usize, usize, usize)> {
+pub(crate) fn function_blocks(lines: &[&str], lang: &str) -> Vec<(usize, usize, usize)> {
     let mut blocks = Vec::new();
     if lang == "python" {
         let mut i = 0;

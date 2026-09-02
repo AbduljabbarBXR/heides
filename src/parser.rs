@@ -217,6 +217,106 @@ fn last_segment(full: &str) -> String {
         .to_string()
 }
 
+/// A name is a real parameter name only when it is a plain identifier.
+/// PHP variable names keep their dollar sign in the tree, strip it here so
+/// parameter names line up with the name based taint tracking.
+fn clean_param_name(raw: &str) -> Option<String> {
+    let t = raw.trim().trim_start_matches('$').trim();
+    if t.is_empty() {
+        return None;
+    }
+    if t.chars().all(|c| c.is_alphanumeric() || c == '_')
+        && !t.chars().next().is_some_and(|c| c.is_ascii_digit())
+    {
+        Some(t.to_string())
+    } else {
+        None
+    }
+}
+
+/// Extract the name of one parameter child node, defensively across the
+/// eight grammars. Tries the name field, then the pattern field (rust
+/// patterns, js assignment patterns), then the first identifier shaped
+/// child in source order. Returns None when nothing looks like a name.
+fn param_name_of(node: Node, content: &str) -> Option<String> {
+    for field in ["name", "pattern"] {
+        if let Some(n) = node.child_by_field_name(field)
+            && let Some(name) = clean_param_name(&text(n, content))
+        {
+            return Some(name);
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        let kind = child.kind();
+        if kind == "identifier"
+            || kind == "name"
+            || kind == "variable_name"
+            || kind == "property_identifier"
+        {
+            if let Some(name) = clean_param_name(&text(child, content)) {
+                return Some(name);
+            }
+        }
+        // Python typed parameters and csharp pointers nest the identifier
+        // one level down (typed_parameter, spread forms), look one level
+        // into the child before giving up on it.
+        if let Some(name) = first_identifier_descendant(child, content) {
+            return Some(name);
+        }
+    }
+    None
+}
+
+/// First identifier shaped leaf one level below a parameter child.
+fn first_identifier_descendant(node: Node, content: &str) -> Option<String> {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        let kind = child.kind();
+        if kind == "identifier" || kind == "name" || kind == "variable_name" {
+            if let Some(name) = clean_param_name(&text(child, content)) {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+/// Parameter names of a function node in source order. The parameters
+/// child is a field on every function kind in the eight grammars, so the
+/// field lookup is the primary path and a kind based search is the
+/// defensive fallback. Self and receiver parameters carry no name and are
+/// skipped, which keeps their position from shifting later arguments.
+fn params_of(node: Node, content: &str) -> Vec<String> {
+    let params_node = node
+        .child_by_field_name("parameters")
+        .or_else(|| {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                let kind = child.kind();
+                if kind == "parameters"
+                    || kind == "formal_parameters"
+                    || kind == "parameter_list"
+                    || (kind.contains("parameter") && kind != "type_parameters")
+                {
+                    return Some(child);
+                }
+            }
+            None
+        });
+    let Some(pn) = params_node else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut cursor = pn.walk();
+    for child in pn.children(&mut cursor) {
+        if let Some(name) = param_name_of(child, content) {
+            out.push(name);
+        }
+    }
+    out
+}
+
 /// Extract the quoted string path from a Go import spec text.
 fn quoted_path(spec: &str) -> Option<String> {
     let start = spec.find('"')? + 1;
@@ -322,6 +422,7 @@ fn walk(
             line,
             lang: out.lang.clone(),
             signature: sig,
+            params: params_of(node, content),
         });
     }
 
@@ -339,6 +440,7 @@ fn walk(
             line,
             lang: out.lang.clone(),
             signature: signature_of(node, content),
+            params: params_of(node, content),
         });
     }
 
