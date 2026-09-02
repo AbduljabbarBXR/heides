@@ -184,6 +184,49 @@ Example VS Code settings fragment.
       }
     }
 
+## Setup for agents
+
+HEIDES is designed to sit in front of any agent. The same binary serves every surface, one static file on PATH as heides.
+
+MCP clients. Claude Code and Cursor read a .mcp.json at the repo root.
+
+    {
+      "mcpServers": {
+        "heides": {
+          "command": "heides",
+          "args": ["mcp"]
+        }
+      }
+    }
+
+Hermes registers the server once.
+
+    hermes mcp add heides --command heides --args mcp
+
+Opencode reads the mcp block in opencode.json.
+
+    {
+      "mcp": {
+        "heides": {
+          "type": "local",
+          "command": ["heides", "mcp"],
+          "enabled": true
+        }
+      }
+    }
+
+The server exposes the spine and harmony tools, spine.scan, spine.query, harmony.check, grounding.plan, so the agent sees the code graph as tools instead of guessing.
+
+Agent gate files. Add AGENTS.md to the repo so every agent knows the rule.
+
+    # Edit rules
+    Before applying any change run heides staged on the diff.
+    Push only when heides staged says safe and heides check shows no blocker.
+
+CLI summon. heides and sum point at the same binary. sum is the summon word, scan once then gate every patch.
+
+Hermes sessions. The skill named heides teaches the session when to summon, and the Hermes memory entry points at it. A session that is about to edit code runs heides staged on its own diff before apply, the same discipline the harness enforces on every other agent.
+
 ## Design principles
 
 * Deterministic first. A rule that is provable beats a model that is plausible. Models are reserved for the parts that need them.
