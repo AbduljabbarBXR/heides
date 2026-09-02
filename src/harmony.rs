@@ -4,6 +4,7 @@
 // and normalizes the results into one report shape. Guards are deterministic
 // and explainable. A guard never guesses: it reports evidence.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::spine::CodeGraph;
@@ -21,12 +22,23 @@ pub struct GuardReport {
 pub fn check_workspace(root: &Path, graph: &CodeGraph) -> Vec<GuardReport> {
     let mut reports = Vec::new();
 
+    // Read every indexed file once. The intra guards and the interprocedural
+    // taint pass share the same contents so nothing is parsed twice.
+    let mut contents: HashMap<String, String> = HashMap::new();
     for f in &graph.files {
         let path = Path::new(&f.path);
-        let Ok(content) = std::fs::read_to_string(path) else {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            contents.insert(f.path.trim_start_matches("./").replace('\\', "/"), content);
+        }
+    }
+
+    for f in &graph.files {
+        let path = Path::new(&f.path);
+        let key = f.path.trim_start_matches("./").replace('\\', "/");
+        let Some(content) = contents.get(&key) else {
             continue;
         };
-        for r in crate::taint::scan_file(path, &content) {
+        for r in crate::taint::scan_file(path, content) {
             reports.push(GuardReport {
                 guard: "security.taint".to_string(),
                 severity: r.severity,
@@ -35,7 +47,7 @@ pub fn check_workspace(root: &Path, graph: &CodeGraph) -> Vec<GuardReport> {
                 line: r.line,
             });
         }
-        for r in crate::edge::scan_file(path, &content) {
+        for r in crate::edge::scan_file(path, content) {
             reports.push(GuardReport {
                 guard: "edge.cases".to_string(),
                 severity: r.severity,
@@ -44,7 +56,7 @@ pub fn check_workspace(root: &Path, graph: &CodeGraph) -> Vec<GuardReport> {
                 line: r.line,
             });
         }
-        for r in crate::practice::scan_file(path, &content, &f.lang) {
+        for r in crate::practice::scan_file(path, content, &f.lang) {
             reports.push(GuardReport {
                 guard: "best.practice".to_string(),
                 severity: r.severity,
@@ -58,6 +70,16 @@ pub fn check_workspace(root: &Path, graph: &CodeGraph) -> Vec<GuardReport> {
     for r in crate::practice::long_functions(graph) {
         reports.push(GuardReport {
             guard: "best.practice".to_string(),
+            severity: r.severity,
+            message: r.message,
+            file: r.file,
+            line: r.line,
+        });
+    }
+
+    for r in crate::interproc::run_workspace(graph, &contents) {
+        reports.push(GuardReport {
+            guard: "security.taint".to_string(),
             severity: r.severity,
             message: r.message,
             file: r.file,

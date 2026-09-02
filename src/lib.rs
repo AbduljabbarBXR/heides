@@ -9,6 +9,7 @@ pub mod edge;
 pub mod grounding;
 pub mod harmony;
 pub mod indexer;
+pub mod interproc;
 pub mod parser;
 pub mod practice;
 pub mod server;
