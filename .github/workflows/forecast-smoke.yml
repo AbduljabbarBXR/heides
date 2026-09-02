@@ -16,7 +16,7 @@ jobs:
           python-version: "3.11"
       - name: Install timesfm on CPU
         run: |
-          pip install --quiet --no-cache-dir timesfm
+          pip install --quiet --no-cache-dir "timesfm==2.0.2"
           pip install --quiet --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
       - name: Run the zero shot forecast
         run: python research/timesfm_forecast.py
