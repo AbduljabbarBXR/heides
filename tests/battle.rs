@@ -180,7 +180,7 @@ fn battle_serial() {
     );
     b.check(
         "scan writes the persistent index",
-        b.fixture.join(".heides/index.bin").exists(),
+        b.fixture.join(".heides/index.db").exists(),
     );
 
     // 3. Status reads the index back

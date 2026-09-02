@@ -40,7 +40,7 @@ fn write_fixture(dir: &std::path::Path) {
 }
 
 fn fresh_scan(dir: &std::path::Path) -> (String, Vec<u8>) {
-    let index = dir.join(".heides/index.bin");
+    let index = dir.join(".heides/index.db");
     if index.exists() {
         std::fs::remove_file(&index).unwrap();
     }
