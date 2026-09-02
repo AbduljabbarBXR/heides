@@ -1,6 +1,6 @@
 # HEIDES
 
-![HEIDES the code nervous system](assets/heides_web.svg)
+![HEIDES, the code nervous system](assets/banner.png)
 
 ## The code nervous system
 
