@@ -148,12 +148,27 @@ fn battle_serial() {
         "routes/b.ts",
         "export async function POST(request: Request) {\n  return new Response(\"b\");\n}\n",
     );
+    // Cross function taint fixtures. A caller reads a source and passes it
+    // into a helper that sinks it, a wrapper hands a source read back and a
+    // pass through helper forwards it, and a clean file stays silent.
+    b.write(
+        "cross.php",
+        "<?php\nfunction sink_sql($q) {\n    mysqli_query($conn, $q);\n}\nfunction entry() {\n    $id = $_GET['id'];\n    sink_sql($id);\n}\n",
+    );
+    b.write(
+        "wrapper.php",
+        "<?php\nfunction grab() {\n    return $_GET['x'];\n}\nfunction pass($v) { return $v; }\nfunction sink_sql2($q) {\n    mysqli_query($conn, $q);\n}\nfunction use_it() {\n    $v = grab();\n    $w = pass($v);\n    sink_sql2($w);\n}\n",
+    );
+    b.write(
+        "cross_clean.php",
+        "<?php\nfunction harmless($x) {\n    echo htmlspecialchars($x);\n}\nfunction ok() {\n    harmless('literal');\n}\n",
+    );
 
     // 1. Version
     let (out, _, ok) = b.cli(&["version"]);
     b.check(
         "version command exits clean and prints a version",
-        ok && out.contains("0.6"),
+        ok && out.contains("0.7"),
     );
 
     // 2. Scan builds the spine
@@ -205,6 +220,18 @@ fn battle_serial() {
     b.check("check catches Go SQL taint", out.contains("app.go"));
     b.check("check catches Java SQL taint", out.contains("app.java"));
     b.check("check catches C# SQL taint", out.contains("app.cs"));
+    b.check(
+        "cross function taint reaches a helper sink",
+        out.contains("reaches a SQL sink in sink_sql on line"),
+    );
+    b.check(
+        "source wrapper and pass through chains are traced",
+        out.contains("reaches a SQL sink in sink_sql2 on line"),
+    );
+    b.check(
+        "clean cross function file stays silent",
+        !out.contains("cross_clean.php"),
+    );
     b.check("check catches unwrap panic risk", out.contains("unwrap"));
     b.check("check catches hardcoded secret", out.contains("secret"));
     b.check("check catches debug output", out.contains("debug output"));

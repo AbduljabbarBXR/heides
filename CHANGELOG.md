@@ -2,6 +2,15 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.7.0
+
+* interprocedural taint, a summary and fixpoint engine proves flows across function boundaries with full source to sink traces
+* function summaries per call, parameter to sink, parameter to return, source wrapper detection
+* argv sources removed, operator input is not attacker input, documented in the rules file
+* compiled pattern cache for the taint matcher, real workspace checks ran minutes faster
+* schema v4, function symbols carry structured parameter names, old indexes rescan once
+* battle suite grown to sixty five checks with cross function fixtures, clean files stay silent
+
 ## 0.6.0
 
 * GitHub Actions CI gate, format check, clippy at deny warnings, release build and every test suite on every push and pull request
