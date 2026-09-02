@@ -20,7 +20,14 @@ HEIDES is three organs over one spine, all deterministic, all local, all explain
 
 ### The Spine
 
-Perception and memory. The Spine walks the codebase and builds a compact persistent graph of symbols, files, callers, callees, imports and dataflow. The index lives on disk in the workspace and is updated incrementally as files change. Every later query, from Harmony guards to Grounding plans to the agent itself, reads the same map. No model is involved. This layer is pure analysis.
+Perception and memory. The Spine walks the codebase and builds a compact persistent graph of symbols, files, callers, callees, imports and signatures. The index lives on disk in the workspace and is updated incrementally as files change. Every later query, from Harmony guards to Grounding plans to the agent itself, reads the same map. No model is involved. This layer is pure analysis.
+
+The graph answers four questions directly.
+
+* Who calls this symbol?
+* Who imports this module?
+* Where is this symbol defined?
+* What does this function call?
 
 ### Harmony
 
@@ -33,6 +40,10 @@ Judgment. Harmony runs the guard modules against the Spine graph and against pro
 * Practices. Surfaces violations of project conventions.
 
 Warnings are delivered the way a senior reviewer would deliver them. A file, a line, a severity, and the reason.
+
+Here is what a finding looks like.
+
+    [critical] user controlled input reaches a SQL sink on this line. source at line 3 (security.taint) at ./app.js:12
 
 ### Grounding
 
@@ -49,6 +60,14 @@ HEIDES is event driven. It wakes when a session starts or a file changes, works,
 5. The agent builds against the grounded spec while HEIDES guards every proposed patch.
 6. The job ends. HEIDES goes dormant until the next trigger.
 
+## How the guards work
+
+* Staged apply. An agent proposes a patch that changes add(a, b) into add(a, b, c). HEIDES applies the patch in memory, parses the changed file again, compares signatures against the spine, finds that main still calls add with two arguments, and reports a blocker with the exact call site. Nothing has been written to disk.
+* Security taint. A line assigns from req.query. A later line passes that variable into db.query. HEIDES reports the sink line and names the source line. SQL, shell, filesystem and prompt injection sinks are covered across every deep language.
+* Edge cases. unwrap calls, JSON.parse without try, bare except blocks, mutable python defaults and unguarded storage reads are flagged with a severity.
+* Best practices. Leftover debug output, unfinished markers, hardcoded secrets and overlong functions are reported as info or warnings.
+* Dependencies. Manifests are read, every pinned package is checked against the OSV vulnerability database, and the latest published version is fetched for comparison.
+
 ## Connectivity
 
 One core, every shell. The same binary speaks to everything.
@@ -62,9 +81,37 @@ One core, every shell. The same binary speaks to everything.
 
 No ports, no daemon protocol, no cloud account. Just one process on stdio.
 
-## Supported languages
+## MCP tool reference
 
-Deep analysis (taint, dataflow, call graph) targets the primary set of JavaScript, TypeScript, Python, Java, C#, Go, Rust, PHP, Ruby, C, C++, Kotlin and Swift. Every other language is covered by structural analysis through tree sitter for conflict checks, imports and practices. AI system files are first class, agent configs, MCP server manifests, prompt files, notebooks and dependency manifests are modeled as their own file kinds.
+The server exposes eight tools.
+
+* spine.scan. Map the current codebase into the persistent spine index.
+* spine.query. Ask who calls a symbol, who imports a module, where a definition lives, and what a function calls.
+* harmony.check. Run every guard on the workspace and return findings with evidence.
+* harmony.staged. Check a unified diff before applying it. Blocks conflicts and signature breaks.
+* grounding.plan. Evaluate a plan against the codebase. Confirms symbols, flags missing ones, checks paths.
+* grounding.scaffold. Scaffold a new project from a plan and index it immediately.
+* deps.check. Check dependencies for known vulnerabilities and outdated versions.
+* web.confirm. Confirm a fact against the package registries on the web.
+
+## Language support
+
+Deep analysis with taint, dataflow and call graphs targets eight languages. Rust, JavaScript, TypeScript, Python, PHP, Go, Java and C#. Structural analysis for everything else is on the roadmap, together with Ruby, Kotlin, Swift and Shell in the deep set. AI system files are first class, agent configs, MCP server manifests, prompt files, notebooks and dependency manifests are modeled as their own file kinds.
+
+## Security model
+
+* Deterministic by design. Findings carry a file, a line and a reason. No black boxes.
+* Local by default. Nothing leaves the machine except explicit web calls for dependency checks and grounding.
+* No telemetry, no analytics, no account.
+* One static binary, no runtime dependencies.
+
+## Use cases
+
+* Guardrail for agentic coding sessions in the terminal.
+* Pre merge review for AI generated pull requests.
+* Onboarding a new agent to an unfamiliar codebase.
+* Security review of agent applications, especially prompt injection.
+* Dependency hygiene for older projects.
 
 ## Install
 
@@ -148,26 +195,20 @@ Example VS Code settings fragment.
 
 ## Project status
 
-This is milestone two, a working deterministic harness. The Spine parses
-Rust, JavaScript, TypeScript and Python with tree sitter and builds symbols,
-call edges, import edges and signatures into a persistent index. Harmony runs
-the staged apply guard, edge case checks, security taint tracking (SQL,
-shell, filesystem and prompt injection), best practice rules and the OSV
-dependency check. Grounding evaluates plans against the graph, scaffolds new
-projects, and confirms facts against the package registries on the web. The
-MCP server exposes every capability as a tool, and the watch loop keeps the
-index fresh. The whole harness ships as one binary that runs on desktop,
-server, CI and Termux.
+This is milestone three. The Spine parses eight languages with tree sitter and builds symbols, call edges, import edges and signatures into a persistent index. Harmony runs the staged apply guard, edge case checks, security taint tracking for SQL, shell, filesystem and prompt injection, best practice rules and the OSV dependency check. Grounding evaluates plans against the graph, scaffolds new projects, and confirms facts against the package registries on the web. The MCP server exposes every capability as a tool, and the watch loop keeps the index fresh. The whole harness ships as one binary that runs on desktop, server, CI and Termux.
 
-Every change lands behind the same gate, lint, build, the unit suite, and the
-serial battle suite of forty three end to end checks run against a real
-fixture workspace, including MCP round trips and dash free output
-enforcement.
+Every change lands behind the same gate, lint, build, the unit suite, and the serial battle suite of forty seven end to end checks run against a real fixture workspace, including MCP round trips and taint scenarios in all eight languages.
 
-The roadmap covers more languages in the deep set (Go, PHP, Java, C#),
-incremental index updates, interprocedural taint flow, upgrade breakage
-analysis against the graph, and a TUI panel for reviewing guard output while
-the agent works.
+## FAQ
+
+* Which models does HEIDES need? None. The core is pure analysis. The agent that consumes it can be any model.
+* Does HEIDES send code anywhere? Only the dependency and web grounding tools make network calls, and only package names and versions.
+* How is HEIDES different from a linter? Linters check syntax and style of the current file. HEIDES checks proposed changes against the whole graph of callers and imports before apply.
+* Can I use it with my editor? Yes. Point any MCP aware client at heides mcp. VS Code supports MCP natively.
+
+## Contributing
+
+Contributions are welcome. Read the CONTRIBUTING file before opening a pull request. The project is open to issues, pull requests and discussion.
 
 ## Development
 

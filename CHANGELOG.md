@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0
+
+* PHP, Go, Java and C# in the deep spine set
+* taint rules for SQL, shell and filesystem sinks in all four new languages
+* deeper README with guard walkthroughs, MCP tool reference and FAQ
+* contributing guide
+* battle suite extended to forty seven checks, all passing
+
 ## 0.2.0
 
 * tree sitter spine for Rust, JavaScript, TypeScript and Python
