@@ -18,7 +18,11 @@ HEIDES closes that gap at the moment that matters, before the patch is applied. 
 
 HEIDES is three organs over one spine, all deterministic, all local, all explainable.
 
+![The HEIDES architecture](assets/graph.png)
+
 ### The Spine
+
+![The Spine maps the codebase into a persistent graph](assets/spine.png)
 
 Perception and memory. The Spine walks the codebase and builds a compact persistent graph of symbols, files, callers, callees, imports and signatures. The index lives on disk in the workspace and is updated incrementally as files change. Every later query, from Harmony guards to Grounding plans to the agent itself, reads the same map. No model is involved. This layer is pure analysis.
 
@@ -94,9 +98,41 @@ The server exposes eight tools.
 * deps.check. Check dependencies for known vulnerabilities and outdated versions.
 * web.confirm. Confirm a fact against the package registries on the web.
 
-## Language support
+## Compatibility
 
-Deep analysis with taint, dataflow and call graphs targets eight languages. Rust, JavaScript, TypeScript, Python, PHP, Go, Java and C#. Structural analysis for everything else is on the roadmap, together with Ruby, Kotlin, Swift and Shell in the deep set. AI system files are first class, agent configs, MCP server manifests, prompt files, notebooks and dependency manifests are modeled as their own file kinds.
+Model agnostic is the design, not a slogan. HEIDES guards the code, never the model. Whatever drives the agent, frontier API, open weights, local, it speaks MCP or runs the CLI and the same binary gates the same way. The logos below are the front doors, the harness itself has no model dependency at all.
+
+[![Claude](https://img.shields.io/badge/-Claude-D97757?style=for-the-badge&logo=anthropic&logoColor=white)](https://www.anthropic.com/claude)
+[![OpenAI GPT](https://img.shields.io/badge/-OpenAI%20GPT-000000?style=for-the-badge)](https://openai.com)
+[![Gemini](https://img.shields.io/badge/-Gemini-886FDF?style=for-the-badge&logo=googlegemini&logoColor=white)](https://gemini.google.com)
+[![DeepSeek](https://img.shields.io/badge/-DeepSeek-4D6BFE?style=for-the-badge&logo=deepseek&logoColor=white)](https://deepseek.com)
+[![Llama](https://img.shields.io/badge/-Llama-0467DF?style=for-the-badge&logo=meta&logoColor=white)](https://llama.com)
+[![Mistral](https://img.shields.io/badge/-Mistral-FA5000?style=for-the-badge&logo=mistralai&logoColor=white)](https://mistral.ai)
+[![Qwen](https://img.shields.io/badge/-Qwen-6136F2?style=for-the-badge&logo=qwen&logoColor=white)](https://qwenlm.github.io)
+[![Grok](https://img.shields.io/badge/-Grok-000000?style=for-the-badge&logo=x&logoColor=white)](https://x.ai)
+[![Ollama](https://img.shields.io/badge/-Ollama-000000?style=for-the-badge&logo=ollama&logoColor=white)](https://ollama.com)
+[![OpenRouter](https://img.shields.io/badge/-OpenRouter-8439F4?style=for-the-badge&logo=openrouter&logoColor=white)](https://openrouter.ai)
+
+One static binary with no runtime dependencies runs on every platform HEIDES claims, desktop, server, CI and phone. The Android build runs under Termux on the same filesystem as the desktop builds, byte for byte the same analysis.
+
+[![Linux](https://img.shields.io/badge/-Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://www.kernel.org)
+[![macOS](https://img.shields.io/badge/-macOS-000000?style=for-the-badge&logo=apple&logoColor=white)](https://www.apple.com/macos)
+[![Windows](https://img.shields.io/badge/-Windows-0078D6?style=for-the-badge)](https://www.microsoft.com/windows)
+[![Android](https://img.shields.io/badge/-Android-3DDC84?style=for-the-badge&logo=android&logoColor=black)](https://www.android.com)
+[![Termux](https://img.shields.io/badge/-Termux-000000?style=for-the-badge)](https://termux.dev)
+
+Deep analysis, taint, dataflow and the call graph, targets eight languages. Rust, JavaScript, TypeScript, Python, PHP, Go, Java and C#. Every language in the deep set gets the same symbols, signatures, call edges, parameter names and interprocedural taint summaries, so the guarantees do not change when the language does.
+
+[![Rust](https://img.shields.io/badge/-Rust-000000?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![JavaScript](https://img.shields.io/badge/-JavaScript-F7DF1E?style=for-the-badge&logo=javascript&logoColor=black)](https://developer.mozilla.org/en-US/docs/Web/JavaScript)
+[![TypeScript](https://img.shields.io/badge/-TypeScript-3178C6?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org)
+[![Python](https://img.shields.io/badge/-Python-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org)
+[![PHP](https://img.shields.io/badge/-PHP-777BB4?style=for-the-badge&logo=php&logoColor=white)](https://www.php.net)
+[![Go](https://img.shields.io/badge/-Go-00ADD8?style=for-the-badge&logo=go&logoColor=white)](https://go.dev)
+[![Java](https://img.shields.io/badge/-Java-E76F00?style=for-the-badge&logo=openjdk&logoColor=white)](https://openjdk.org)
+[![C#](https://img.shields.io/badge/-C%23-512BD4?style=for-the-badge&logo=dotnet&logoColor=white)](https://dotnet.microsoft.com)
+
+Structural analysis for everything else is on the roadmap, together with Ruby, Kotlin, Swift and Shell in the deep set. AI system files are first class, agent configs, MCP server manifests, prompt files, notebooks and dependency manifests are modeled as their own file kinds.
 
 ## Security model
 
