@@ -85,7 +85,7 @@ HEIDES is event driven. It wakes when a session starts or a file changes, works,
 One core, every shell. The same binary speaks to everything.
 
 * CLI. Native commands are scan, status, query, check, staged, plan, scaffold, deps, watch and mcp.
-* MCP. A Model Context Protocol server over stdio. Any MCP aware agent, editor or harness attaches directly.
+* MCP. A Model Context Protocol server over stdio. Any MCP aware agent, editor or harness attaches directly. Also listed in the official MCP registry as io.github.AbduljabbarBXR/heides, installable by name from registry aware clients.
 * Agent systems. Claude Code, Codex, Cursor, OpenCode, Hermes and custom builds via MCP.
 * Skills. HEIDES exposes its capabilities as MCP tools and resources, so skill systems can compose it.
 * VS Code. Native MCP support in VS Code attaches to the same server. An extension is planned.
