@@ -301,6 +301,12 @@ fn main() -> ExitCode {
                 }
             } else {
                 println!("{}", harmony::summarize(&reports));
+                let heavy = reports
+                    .iter()
+                    .any(|r| r.severity == "blocker" || r.severity == "critical");
+                if heavy {
+                    println!();
+                }
                 for r in &reports {
                     let loc = if r.file.is_empty() {
                         String::new()
