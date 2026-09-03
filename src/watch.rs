@@ -18,6 +18,7 @@ pub fn watch(root: &Path, max_checks: Option<u64>, delay_secs: u64, ui: &crate::
     println!("watch started on {}", root.display());
     if ui.progress {
         eprintln!("watching, local guards run on every change");
+        eprint!("\x1b]2;heides watch\x07");
     }
     let mut changes = 0u64;
     let mut checks = 0u64;
@@ -58,6 +59,9 @@ pub fn watch(root: &Path, max_checks: Option<u64>, delay_secs: u64, ui: &crate::
             }
             last = current;
         }
+    }
+    if ui.progress {
+        eprint!("\x1b]2;\x07");
     }
     changes
 }

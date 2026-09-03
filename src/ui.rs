@@ -121,6 +121,7 @@ impl Stopwatch {
             return None;
         }
         eprintln!("{} running", what);
+        eprint!("\x1b]2;heides {}\x07", what);
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop2 = std::sync::Arc::clone(&stop);
         let started = std::time::Instant::now();
@@ -144,13 +145,19 @@ impl Stopwatch {
         })
     }
 
-    /// Stop the pulse and report the elapsed time on stderr when the
-    /// operation took at least a second.
+    /// Stop the pulse, restore the terminal title and report the elapsed
+    /// time on stderr when the operation took at least a second. A bell
+    /// rings when the operation ran past ten seconds so a task finished
+    /// behind another window announces itself.
     pub fn finish(mut self) {
         let secs = self.start.elapsed().as_secs_f64();
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(t) = self.ticker.take() {
             let _ = t.join();
+        }
+        eprint!("\x1b]2;\x07");
+        if secs >= 10.0 {
+            eprint!("\x07");
         }
         let clear = if self.ui.progress { "\r\x1b[2K" } else { "" };
         if secs >= 1.0 {
@@ -174,6 +181,7 @@ impl Drop for Stopwatch {
         if let Some(t) = self.ticker.take() {
             let _ = t.join();
         }
+        eprint!("\x1b]2;\x07");
     }
 }
 
