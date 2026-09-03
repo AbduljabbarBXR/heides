@@ -128,7 +128,8 @@ edition = "2021"
                 ),
                 (
                     "src/main.rs",
-                    "fn main() {\n    println!(\"hello from the scaffold\");\n}\n".to_string(),
+                    "// Entry point. Prints the scaffold greeting.\nfn main() {\n    println!(\"hello from the scaffold\");\n}\n"
+                        .to_string(),
                 ),
             ],
             (),
@@ -136,7 +137,7 @@ edition = "2021"
     } else if plan.contains("python") || plan.contains("flask") || plan.contains("fastapi") {
         (
             vec![
-                ("app.py", "def main():\n    print(\"hello from the scaffold\")\n\n\nif __name__ == \"__main__\":\n    main()\n".to_string()),
+                ("app.py", "# Entry point. Runs the greeting.\ndef main():\n    print(\"hello from the scaffold\")\n\n\nif __name__ == \"__main__\":\n    main()\n".to_string()),
                 ("requirements.txt", String::new()),
             ],
             (),
@@ -157,7 +158,7 @@ edition = "2021"
 }
 "#
                 .to_string()),
-                ("app/page.js", "export default function Page() {\n  return <main>hello from the scaffold</main>;\n}\n".to_string()),
+                ("app/page.js", "// Home page. Renders the scaffold greeting.\nexport default function Page() {\n  return <main>hello from the scaffold</main>;\n}\n".to_string()),
             ],
             (),
         )
@@ -178,7 +179,7 @@ edition = "2021"
                 ),
                 (
                     "index.js",
-                    "console.log(\"hello from the scaffold\");\n".to_string(),
+                    "// App entry. Prints the scaffold greeting.\nconsole.log(\"hello from the scaffold\");\n".to_string(),
                 ),
             ],
             (),
@@ -291,6 +292,28 @@ mod tests {
         let files = scaffold("build a rust cli tool", &dir).unwrap();
         assert!(files.iter().any(|f| f.ends_with("Cargo.toml")));
         assert!(files.iter().any(|f| f.ends_with("main.rs")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scaffolded_code_is_documented_from_birth() {
+        let dir = std::env::temp_dir().join(format!("heides_scaffold_doc_{}", std::process::id()));
+        scaffold("a python cli tool", &dir).unwrap();
+        let graph = crate::spine::load(&dir).expect("scaffold must index itself");
+        let main = graph.symbols_named("main");
+        let documented = main
+            .iter()
+            .any(|s| s.lang == "python" && s.doc.contains("Entry point"));
+        assert!(documented, "scaffold main must carry its doc comment");
+        let undocumented_fns: Vec<_> = graph
+            .symbols
+            .iter()
+            .filter(|s| s.lang == "python" && s.kind.contains("function") && s.doc.is_empty())
+            .collect();
+        assert!(
+            undocumented_fns.is_empty(),
+            "newborn code must not ship undocumented functions"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

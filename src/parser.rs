@@ -412,9 +412,11 @@ fn comment_line(t: &str) -> bool {
 
 /// Capture the doc comment directly above a declaration line. Blank lines
 /// between the comment and the declaration are allowed and skipped, code
-/// between them ends the capture. Rust attributes are not comments, so a
-/// derive line above a symbol never leaks into its doc.
-fn doc_above(content: &str, line: u64) -> String {
+/// between them ends the capture. Attribute and decorator lines are
+/// transparent, the comment above them documents the declaration they
+/// decorate, and Rust attributes are not comments, so a derive line never
+/// leaks into its own doc.
+fn doc_above(content: &str, line: u64, lang: &str) -> String {
     if line < 2 {
         return String::new();
     }
@@ -423,9 +425,19 @@ fn doc_above(content: &str, line: u64) -> String {
     if i > lines.len() {
         return String::new();
     }
-    // Skip blank lines directly above the declaration.
-    while i > 0 && lines[i - 1].trim().is_empty() {
-        i -= 1;
+    // Blank lines and transparent attribute or decorator lines directly
+    // above the declaration are skipped, in any order. The walk stops at
+    // the first comment line or code line, whichever sits higher.
+    loop {
+        if i == 0 {
+            break;
+        }
+        let t = lines[i - 1].trim_start();
+        if t.is_empty() || transparent_decor(t, lang) {
+            i -= 1;
+        } else {
+            break;
+        }
     }
     let mut raw: Vec<&str> = Vec::new();
     while i > 0 {
@@ -462,11 +474,23 @@ fn doc_above(content: &str, line: u64) -> String {
         }
     }
     let joined = doc.join(" ");
-    let mut out: String = joined.chars().take(400).collect();
+    let mut out: String = joined.chars().take(1200).collect();
     if out.len() < joined.len() {
         out.push('…');
     }
     out
+}
+
+/// True when the trimmed line is an attribute or decorator, per language.
+/// Rust and PHP 8 attributes open with #[, python and java decorators
+/// open with @, C# attributes open with a bracket.
+fn transparent_decor(t: &str, lang: &str) -> bool {
+    match lang {
+        "rust" | "php" => t.starts_with("#["),
+        "python" | "java" => t.starts_with('@'),
+        "csharp" => t.starts_with('['),
+        _ => false,
+    }
 }
 
 fn walk(
@@ -513,7 +537,7 @@ fn walk(
             lang: out.lang.clone(),
             signature: sig,
             params: params_of(node, content),
-            doc: doc_above(content, line),
+            doc: doc_above(content, line, &out.lang),
         });
     }
 
@@ -532,7 +556,7 @@ fn walk(
             lang: out.lang.clone(),
             signature: signature_of(node, content),
             params: params_of(node, content),
-            doc: doc_above(content, line),
+            doc: doc_above(content, line, &out.lang),
         });
     }
 
@@ -863,6 +887,29 @@ fn main() {
                 .iter()
                 .any(|c| c.callee == "helper" && c.caller == "Load")
         );
+    }
+
+    #[test]
+    fn doc_passes_through_attributes_and_decorators() {
+        // Rust attribute above the fn, comment above the attribute.
+        let src = "// A documented endpoint.\n#[derive(Clone)]\nfn serve() {}\n";
+        let p = std::path::Path::new("probe.rs");
+        let parsed = parse_file(p, src).unwrap();
+        let serve = parsed.symbols.iter().find(|s| s.name == "serve").unwrap();
+        assert_eq!(serve.doc, "A documented endpoint.");
+        // Python decorator above the def, comment above the decorator.
+        let py = "def route(fn):\n    return fn\n\n# Handles the index page.\n@app.route(\"/\")\ndef index():\n    return \"ok\"\n";
+        let p = std::path::Path::new("probe.py");
+        let parsed = parse_file(p, py).unwrap();
+        let index = parsed.symbols.iter().find(|s| s.name == "index").unwrap();
+        assert_eq!(index.doc, "Handles the index page.");
+        // No comment above the attribute means no doc, the attribute does
+        // not become one.
+        let src = "#[derive(Clone)]\nfn plain() {}\n";
+        let p = std::path::Path::new("probe.rs");
+        let parsed = parse_file(p, src).unwrap();
+        let plain = parsed.symbols.iter().find(|s| s.name == "plain").unwrap();
+        assert_eq!(plain.doc, "");
     }
 
     #[test]

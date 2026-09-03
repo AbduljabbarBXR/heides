@@ -385,6 +385,53 @@ fn describe_workspace(graph: &spine::CodeGraph) {
     langs.dedup();
     println!("languages {}", langs.join(", "));
 
+    // Doc coverage per language. How many symbols in each language carry a
+    // captured comment, so gaps in the eyes are visible and measurable.
+    let mut per_lang: Vec<(&str, usize, usize)> = Vec::new();
+    for lang in &langs {
+        let total = graph.symbols.iter().filter(|s| s.lang == *lang).count();
+        let documented = graph
+            .symbols
+            .iter()
+            .filter(|s| s.lang == *lang && !s.doc.is_empty())
+            .count();
+        per_lang.push((lang, documented, total));
+    }
+    for (lang, documented, total) in &per_lang {
+        let pct = if *total > 0 {
+            documented * 100 / total
+        } else {
+            0
+        };
+        println!("doc coverage {} {}/{} ({}%)", lang, documented, total, pct);
+    }
+    let mut undocumented: Vec<(&str, &str, usize, &str)> = Vec::new();
+    for s in &graph.symbols {
+        if !s.doc.is_empty() {
+            continue;
+        }
+        if !is_fn_kind(&s.kind) && !s.kind.contains("field") && !s.kind.contains("constant") {
+            continue;
+        }
+        undocumented.push((
+            s.name.as_str(),
+            s.file.as_str(),
+            s.line as usize,
+            s.kind.as_str(),
+        ));
+    }
+    undocumented.sort_by(|a, b| a.1.cmp(b.1).then(a.2.cmp(&b.2)));
+    if !undocumented.is_empty() {
+        println!(
+            "undocumented symbols, first {} of {}",
+            15,
+            undocumented.len()
+        );
+        for (name, file, line, kind) in undocumented.iter().take(15) {
+            println!("  {} at {}:{} ({})", name, file, line, kind);
+        }
+    }
+
     // Entrypoints. A function nobody calls in the workspace is a root of
     // the call graph. Files with module level calls are script entry
     // points, their own top level code starts the run.
