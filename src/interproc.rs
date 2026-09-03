@@ -15,7 +15,7 @@
 // a source class at all. Provenance chains cap at eight hops, deeper flows
 // stay silent rather than guess.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::spine::CodeGraph;
 use crate::taint::{
@@ -347,6 +347,33 @@ fn build_index(
                 returns_source: false,
             });
         }
+        // Module scope complement. Every line outside a function body is
+        // analyzed as one implicit function named after the caller label
+        // the parser already attaches to top level calls. This is what
+        // closes the launch gap, module level code now propagates taint
+        // through the same call machinery as function bodies.
+        let mut blocked: Vec<bool> = vec![false; lines.len()];
+        for &(bs, be, _) in &blocks {
+            for b in blocked
+                .iter_mut()
+                .take(be.min(lines.len().saturating_sub(1)) + 1)
+                .skip(bs)
+            {
+                *b = true;
+            }
+        }
+        let module_body: Vec<usize> = (0..lines.len()).filter(|&i| !blocked[i]).collect();
+        if !module_body.is_empty() {
+            fns.push(FnInfo {
+                key: (fpath.clone(), "module level".to_string()),
+                lang: f.lang.clone(),
+                params: Vec::new(),
+                body: module_body,
+                sink_param: Vec::new(),
+                param_to_return: Vec::new(),
+                returns_source: false,
+            });
+        }
         // Sorted by start line for module region complement.
         fns.sort_by(|a, b| a.body[0].cmp(&b.body[0]));
     }
@@ -542,34 +569,93 @@ pub fn run_workspace(graph: &CodeGraph, contents: &HashMap<String, String>) -> V
         None
     };
 
+    // Module scope sink reports, first pass wins per file, line and kind.
+    let mut dyn_out: Vec<(String, usize, String, Prov)> = Vec::new();
+    let mut seen_dyn: HashSet<String> = HashSet::new();
     // A caller scan walks one body, resolves local calls, and adds callee
     // entries. Returns newly added callee keys.
-    let process =
-        |key: Key, entries: &mut HashMap<Key, Vec<Option<Prov>>>, queue: &mut VecDeque<Key>| {
-            let Some(&fidx) = by_key.get(&key) else {
-                return;
-            };
-            let fi = &fns[fidx];
-            let ls = line_ref(&fi.key.0);
-            let mut tainted: HashMap<String, Prov> = HashMap::new();
-            for (i, p) in fi.params.iter().enumerate() {
-                if let Some(Some(prov)) = entries.get(&key).and_then(|e| e.get(i)) {
-                    tainted.insert(p.clone(), prov.clone());
+    let process = |key: Key,
+                   entries: &mut HashMap<Key, Vec<Option<Prov>>>,
+                   queue: &mut VecDeque<Key>,
+                   dyn_out: &mut Vec<(String, usize, String, Prov)>,
+                   seen: &mut HashSet<String>| {
+        let Some(&fidx) = by_key.get(&key) else {
+            return;
+        };
+        let fi = &fns[fidx];
+        let module_scope = fi.params.is_empty() && fi.key.1 == "module level";
+        let ls = line_ref(&fi.key.0);
+        let mut tainted: HashMap<String, Prov> = HashMap::new();
+        for (i, p) in fi.params.iter().enumerate() {
+            if let Some(Some(prov)) = entries.get(&key).and_then(|e| e.get(i)) {
+                tainted.insert(p.clone(), prov.clone());
+            }
+        }
+        let mut new_keys: Vec<Key> = Vec::new();
+        for &li in &fi.body {
+            let line = ls.get(li).copied().unwrap_or("");
+            let lno = li + 1;
+            // A source read on this line makes its assigned variable tainted.
+            if line_is_source(line, &fi.lang)
+                && let Some(v) = assigned_var(line)
+            {
+                tainted
+                    .entry(v.clone())
+                    .or_insert_with(|| prov_source(&fi.key.0, lno));
+            }
+            // Resolve local calls on this line and propagate.
+            let callees_here: Vec<String> = calls_by_line
+                .get(&fi.key.0)
+                .and_then(|m| m.get(&lno))
+                .map(|v| {
+                    v.iter()
+                        .filter(|(caller, _)| *caller == fi.key.1)
+                        .map(|(_, callee)| callee.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            for callee in callees_here {
+                let Some(cfn) = resolve(&fi.key.0, &callee) else {
+                    continue;
+                };
+                let Some(&cidx) = by_key.get(&cfn) else {
+                    continue;
+                };
+                let args = call_args(line, &callee);
+                if args.is_empty() {
+                    continue;
+                }
+                for (j, arg) in args.iter().enumerate() {
+                    if j >= fns[cidx].params.len() {
+                        continue;
+                    }
+                    let prov: Option<Prov> = if is_identifier(arg) {
+                        let an = arg.trim_start_matches('$').trim();
+                        tainted.get(an).cloned()
+                    } else if line_is_source(arg, &fns[cidx].lang) {
+                        Some(prov_source(&fi.key.0, lno))
+                    } else {
+                        None
+                    };
+                    if let Some(p) = prov {
+                        let slot = entries
+                            .entry(cfn.clone())
+                            .or_insert_with(|| vec![None; fns[cidx].params.len()]);
+                        if slot[j].is_none()
+                            && let Some(chained) = prov_call(&p, &fi.key.1, &fi.key.0, lno)
+                        {
+                            slot[j] = Some(chained);
+                            // Requeue only callers whose body makes calls,
+                            // a body with no calls cannot forward taint.
+                            if has_call[cidx] {
+                                new_keys.push(cfn.clone());
+                            }
+                        }
+                    }
                 }
             }
-            let mut new_keys: Vec<Key> = Vec::new();
-            for &li in &fi.body {
-                let line = ls.get(li).copied().unwrap_or("");
-                let lno = li + 1;
-                // A source read on this line makes its assigned variable tainted.
-                if line_is_source(line, &fi.lang)
-                    && let Some(v) = assigned_var(line)
-                {
-                    tainted
-                        .entry(v.clone())
-                        .or_insert_with(|| prov_source(&fi.key.0, lno));
-                }
-                // Resolve local calls on this line and propagate.
+            // Call result taint: lhs of this line, callee return behavior.
+            if let Some(v) = assigned_var(line) {
                 let callees_here: Vec<String> = calls_by_line
                     .get(&fi.key.0)
                     .and_then(|m| m.get(&lno))
@@ -588,88 +674,65 @@ pub fn run_workspace(graph: &CodeGraph, contents: &HashMap<String, String>) -> V
                         continue;
                     };
                     let args = call_args(line, &callee);
-                    if args.is_empty() {
+                    if fns[cidx].returns_source {
+                        tainted.entry(v.clone()).or_insert_with(|| Prov {
+                            hops: vec![Hop {
+                                text: format!("source wrapper {} ({}:{})", callee, cfn.0, lno),
+                            }],
+                        });
                         continue;
                     }
                     for (j, arg) in args.iter().enumerate() {
-                        if j >= fns[cidx].params.len() {
-                            continue;
-                        }
-                        let prov: Option<Prov> = if is_identifier(arg) {
+                        if j < fns[cidx].param_to_return.len()
+                            && fns[cidx].param_to_return[j]
+                            && is_identifier(arg)
+                        {
                             let an = arg.trim_start_matches('$').trim();
-                            tainted.get(an).cloned()
-                        } else if line_is_source(arg, &fns[cidx].lang) {
-                            Some(prov_source(&fi.key.0, lno))
-                        } else {
-                            None
-                        };
-                        if let Some(p) = prov {
-                            let slot = entries
-                                .entry(cfn.clone())
-                                .or_insert_with(|| vec![None; fns[cidx].params.len()]);
-                            if slot[j].is_none()
+                            if let Some(p) = tainted.get(an).cloned()
                                 && let Some(chained) = prov_call(&p, &fi.key.1, &fi.key.0, lno)
                             {
-                                slot[j] = Some(chained);
-                                // Requeue only callers whose body makes calls,
-                                // a body with no calls cannot forward taint.
-                                if has_call[cidx] {
-                                    new_keys.push(cfn.clone());
-                                }
-                            }
-                        }
-                    }
-                }
-                // Call result taint: lhs of this line, callee return behavior.
-                if let Some(v) = assigned_var(line) {
-                    let callees_here: Vec<String> = calls_by_line
-                        .get(&fi.key.0)
-                        .and_then(|m| m.get(&lno))
-                        .map(|v| {
-                            v.iter()
-                                .filter(|(caller, _)| *caller == fi.key.1)
-                                .map(|(_, callee)| callee.clone())
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    for callee in callees_here {
-                        let Some(cfn) = resolve(&fi.key.0, &callee) else {
-                            continue;
-                        };
-                        let Some(&cidx) = by_key.get(&cfn) else {
-                            continue;
-                        };
-                        let args = call_args(line, &callee);
-                        if fns[cidx].returns_source {
-                            tainted.entry(v.clone()).or_insert_with(|| Prov {
-                                hops: vec![Hop {
-                                    text: format!("source wrapper {} ({}:{})", callee, cfn.0, lno),
-                                }],
-                            });
-                            continue;
-                        }
-                        for (j, arg) in args.iter().enumerate() {
-                            if j < fns[cidx].param_to_return.len()
-                                && fns[cidx].param_to_return[j]
-                                && is_identifier(arg)
-                            {
-                                let an = arg.trim_start_matches('$').trim();
-                                if let Some(p) = tainted.get(an).cloned()
-                                    && let Some(chained) = prov_call(&p, &fi.key.1, &fi.key.0, lno)
-                                {
-                                    tainted.entry(v.clone()).or_insert(chained);
-                                }
+                                tainted.entry(v.clone()).or_insert(chained);
                             }
                         }
                     }
                 }
             }
-            for k in new_keys {
-                if !queue.iter().any(|q| *q == k) {
-                    queue.push_back(k);
+            // Module scope sinks are reported dynamically because the
+            // module function carries no parameters, so the static
+            // sink_param table has nothing to hang them on. A module line
+            // that reaches a sink with a tainted name, or sinks a source
+            // read on the same line, is a real flow and gets the same
+            // evidence chain as a function flow. First pass wins per
+            // file, line and sink kind.
+            if module_scope {
+                for (l, pat, kind) in SINKS {
+                    if *l != fi.lang || !regex_hit(pat, line) {
+                        continue;
+                    }
+                    let mut prov: Option<Prov> = None;
+                    for (name, p) in tainted.iter() {
+                        if line.contains(name.as_str()) {
+                            prov = Some(p.clone());
+                            break;
+                        }
+                    }
+                    if prov.is_none() && line_is_source(line, &fi.lang) {
+                        prov = Some(prov_source(&fi.key.0, lno));
+                    }
+                    if let Some(p) = prov
+                        && seen.insert(format!("{}:{}:{}", fi.key.0, lno, kind))
+                    {
+                        dyn_out.push((fi.key.0.clone(), lno, kind.to_string(), p));
+                    }
                 }
             }
-        };
+        }
+        for k in new_keys {
+            if !queue.iter().any(|q| *q == k) {
+                queue.push_back(k);
+            }
+        }
+    };
 
     // Seed set. A function starts the pass when it reads a source itself,
     // or when it calls a source wrapper whose return is tainted, because the
@@ -703,10 +766,16 @@ pub fn run_workspace(graph: &CodeGraph, contents: &HashMap<String, String>) -> V
         .map(|(_, k)| k.clone())
         .collect();
     for k in initial {
-        process(k.clone(), &mut entries, &mut queue);
+        process(
+            k.clone(),
+            &mut entries,
+            &mut queue,
+            &mut dyn_out,
+            &mut seen_dyn,
+        );
     }
     while let Some(k) = queue.pop_front() {
-        process(k, &mut entries, &mut queue);
+        process(k, &mut entries, &mut queue, &mut dyn_out, &mut seen_dyn);
     }
 
     // Reports at end sinks.
@@ -729,6 +798,19 @@ pub fn run_workspace(graph: &CodeGraph, contents: &HashMap<String, String>) -> V
                 reports.push(make_report(&path, *sink_line as u64, msg));
             }
         }
+    }
+    // Module scope sink findings. The message names the file, the trace
+    // carries the same source evidence as any function flow.
+    for (file, line, kind, prov) in dyn_out {
+        let path = std::path::PathBuf::from(&file);
+        let msg = format!(
+            "user controlled input reaches a {} sink in {} on line {}. trace: {}",
+            kind,
+            file,
+            line,
+            render(&prov)
+        );
+        reports.push(make_report(&path, line as u64, msg));
     }
     reports.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
     reports

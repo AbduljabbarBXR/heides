@@ -163,6 +163,18 @@ fn battle_serial() {
         "cross_clean.php",
         "<?php\nfunction harmless($x) {\n    echo htmlspecialchars($x);\n}\nfunction ok() {\n    harmless('literal');\n}\n",
     );
+    // Module level taint fixtures. Top level code is analyzed as its own
+    // scope, a source wrapper feeding a sink call at module level traces
+    // through, a direct module source read into a module sink reports, and
+    // inert top level code stays silent.
+    b.write(
+        "module.php",
+        "<?php\nfunction grab() {\n    return $_GET['x'];\n}\nfunction sink_sql3($q) {\n    mysqli_query($conn, $q);\n}\n$term = grab();\nsink_sql3($term);\n$direct = $_GET['d'];\nmysqli_query($conn, $direct);\n",
+    );
+    b.write(
+        "module_clean.php",
+        "<?php\nfunction harmless2($x) {\n    echo htmlspecialchars($x);\n}\nharmless2('literal');\n$name = 'config value';\necho $name;\n",
+    );
 
     // 1. Version
     let (out, _, ok) = b.cli(&["version"]);
@@ -231,6 +243,19 @@ fn battle_serial() {
     b.check(
         "clean cross function file stays silent",
         !out.contains("cross_clean.php"),
+    );
+    b.check(
+        "module level flow through a function is traced",
+        out.contains("reaches a SQL sink in sink_sql3 on line 6")
+            && out.contains("via module level (module.php:9)"),
+    );
+    b.check(
+        "direct module level source to sink reports",
+        out.contains("reaches a SQL sink in module.php on line 11"),
+    );
+    b.check(
+        "inert module level code stays silent",
+        !out.contains("module_clean.php"),
     );
     b.check("check catches unwrap panic risk", out.contains("unwrap"));
     b.check("check catches hardcoded secret", out.contains("secret"));
