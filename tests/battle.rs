@@ -175,6 +175,12 @@ fn battle_serial() {
         "module_clean.php",
         "<?php\nfunction harmless2($x) {\n    echo htmlspecialchars($x);\n}\nharmless2('literal');\n$name = 'config value';\necho $name;\n",
     );
+    b.write("dup_a.py", "def handle(x):\n    os.system(x)\n");
+    b.write("dup_b.py", "def handle(x):\n    os.system(x)\n");
+    b.write(
+        "dup_caller.py",
+        "def go():\n    q = input()\n    handle(q)\n",
+    );
     b.write(
         "named.py",
         "import os\n\ndef run_shell(cmd, silent=False):\n    os.system(cmd)\n\ndef entry():\n    q = input()\n    run_shell(silent=True, cmd=q)\n",
@@ -269,6 +275,14 @@ fn battle_serial() {
         "module level flow through a function is traced",
         out.contains("reaches a SQL sink in sink_sql3 on line 6")
             && out.contains("via module level (module.php:9)"),
+    );
+    b.check(
+        "duplicate definitions merge when every shape agrees",
+        out.contains("reaches a shell sink in handle on line 2") && out.contains("via go"),
+    );
+    b.check(
+        "named arguments bind by name not position",
+        out.contains("reaches a shell sink in run_shell on line 4") && out.contains("via entry"),
     );
     b.check(
         "direct module level source to sink reports",

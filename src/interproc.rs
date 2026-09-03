@@ -655,13 +655,39 @@ pub fn run_workspace(graph: &CodeGraph, contents: &HashMap<String, String>) -> V
     let resolve = |caller_file: &str, name: &str| -> Option<Key> {
         let defs = defs_by_name.get(name)?;
         let same: Vec<&(String, String)> = defs.iter().filter(|(f, _)| f == caller_file).collect();
-        if same.len() == 1 {
-            return Some(same[0].clone());
+        let pool: Vec<&(String, String)> = if !same.is_empty() {
+            same
+        } else {
+            defs.iter().collect()
+        };
+        let mut idxs: Vec<usize> = pool
+            .iter()
+            .filter_map(|(f, _)| by_key.get(&(f.clone(), name.to_string())))
+            .copied()
+            .collect();
+        idxs.dedup();
+        let &first = idxs.first()?;
+        if idxs.len() == 1 {
+            return Some(fns[first].key.clone());
         }
-        if defs.len() == 1 {
-            return Some(defs[0].clone());
+        // Several definitions share the name. Propagate only when every
+        // candidate binds the flow identically, same language, same
+        // parameters, same sink and return disposition, so whichever
+        // definition the runtime picks the report stays true. Any shape
+        // difference stays silent, a guess is worse than no answer.
+        let a = &fns[first];
+        for &i in &idxs[1..] {
+            let b = &fns[i];
+            if a.lang != b.lang
+                || a.returns_source != b.returns_source
+                || a.params != b.params
+                || a.param_to_return != b.param_to_return
+                || a.sink_param != b.sink_param
+            {
+                return None;
+            }
         }
-        None
+        Some(a.key.clone())
     };
 
     // Module scope sink reports, first pass wins per file, line and kind.
