@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="240" viewBox="0 0 760 240" font-family="Helvetica, Arial, sans-serif">
+  <rect width="760" height="240" fill="#ffffff"/>
+  <text x="16" y="28" font-size="15" font-weight="bold" fill="#263238">One core, every shell</text>
+
+  <circle cx="380" cy="125" r="52" fill="#263238"/>
+  <text x="380" y="115" font-size="15" font-weight="bold" fill="#ffffff" text-anchor="middle">heides</text>
+  <text x="380" y="133" font-size="12" fill="#cfd8dc" text-anchor="middle">one binary</text>
+  <text x="380" y="149" font-size="10" fill="#90a4ae" text-anchor="middle">no ports</text>
+
+  <circle cx="120" cy="55" r="30" fill="#e3f2fd"/>
+  <text x="120" y="59" font-size="12" fill="#1565c0" text-anchor="middle">CLI</text>
+  <circle cx="640" cy="55" r="30" fill="#f3e5f5"/>
+  <text x="640" y="59" font-size="12" fill="#6a1b9a" text-anchor="middle">MCP</text>
+  <circle cx="70" cy="140" r="30" fill="#e8f5e9"/>
+  <text x="70" y="136" font-size="10" fill="#2e7d32" text-anchor="middle">Claude</text>
+  <text x="70" y="148" font-size="10" fill="#2e7d32" text-anchor="middle">Codex</text>
+  <circle cx="690" cy="140" r="30" fill="#e8f5e9"/>
+  <text x="690" y="136" font-size="10" fill="#2e7d32" text-anchor="middle">Cursor</text>
+  <text x="690" y="148" font-size="10" fill="#2e7d32" text-anchor="middle">Hermes</text>
+  <circle cx="120" cy="205" r="27" fill="#fff3e0"/>
+  <text x="120" y="202" font-size="10" fill="#e65100" text-anchor="middle">Android</text>
+  <text x="120" y="214" font-size="10" fill="#e65100" text-anchor="middle">Termux</text>
+  <circle cx="640" cy="205" r="27" fill="#eceff1"/>
+  <text x="640" y="202" font-size="10" fill="#455a64" text-anchor="middle">registry</text>
+  <text x="640" y="214" font-size="10" fill="#455a64" text-anchor="middle">listed</text>
+
+  <line x1="150" y1="70" x2="330" y2="100" stroke="#90a4ae" stroke-width="2"/>
+  <line x1="610" y1="70" x2="430" y2="100" stroke="#90a4ae" stroke-width="2"/>
+  <line x1="100" y1="123" x2="328" y2="120" stroke="#90a4ae" stroke-width="2"/>
+  <line x1="660" y1="123" x2="432" y2="120" stroke="#90a4ae" stroke-width="2"/>
+  <line x1="145" y1="188" x2="338" y2="143" stroke="#90a4ae" stroke-width="2"/>
+  <line x1="615" y1="188" x2="422" y2="143" stroke="#90a4ae" stroke-width="2"/>
+
+  <text x="380" y="228" font-size="11" fill="#546e7a" text-anchor="middle">scan, status, query, describe, check, staged, plan, scaffold, deps, watch</text>
+</svg>

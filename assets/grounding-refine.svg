@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="200" viewBox="0 0 760 200" font-family="Helvetica, Arial, sans-serif">
+  <rect width="760" height="200" fill="#ffffff"/>
+  <text x="16" y="28" font-size="15" font-weight="bold" fill="#263238">Grounding refines plans against the map and the world</text>
+
+  <rect x="30" y="60" width="120" height="110" rx="12" fill="#eceff1"/>
+  <text x="90" y="98" font-size="13" font-weight="bold" fill="#455a64" text-anchor="middle">objective</text>
+  <text x="90" y="116" font-size="12" fill="#78909c" text-anchor="middle">or plan text</text>
+  <circle cx="60" cy="142" r="6" fill="#546e7a"/>
+  <circle cx="82" cy="142" r="6" fill="#546e7a"/>
+  <circle cx="104" cy="142" r="6" fill="#546e7a"/>
+
+  <path d="M150 115 L210 115" stroke="#90a4ae" stroke-width="2"/>
+  <polygon points="206,110 218,115 206,120" fill="#90a4ae"/>
+
+  <rect x="220" y="55" width="310" height="120" rx="12" fill="#e3f2fd"/>
+  <text x="375" y="78" font-size="13" font-weight="bold" fill="#1565c0" text-anchor="middle">checks the plan against</text>
+  <rect x="240" y="92" width="270" height="24" rx="12" fill="#bbdefb"/>
+  <text x="375" y="108" font-size="12" fill="#0d47a1" text-anchor="middle">the spine, do the symbols exist</text>
+  <rect x="240" y="122" width="270" height="24" rx="12" fill="#bbdefb"/>
+  <text x="375" y="138" font-size="12" fill="#0d47a1" text-anchor="middle">the web, do the versions exist</text>
+  <text x="375" y="162" font-size="10" fill="#78909c" text-anchor="middle">returns a bounded spec, no guessing</text>
+
+  <path d="M530 115 L588 115" stroke="#90a4ae" stroke-width="2"/>
+  <polygon points="584,110 596,115 584,120" fill="#90a4ae"/>
+
+  <rect x="598" y="55" width="140" height="120" rx="12" fill="#e8f5e9"/>
+  <text x="668" y="82" font-size="13" font-weight="bold" fill="#2e7d32" text-anchor="middle">scaffold</text>
+  <rect x="616" y="94" width="104" height="20" rx="10" fill="#c8e6c9"/>
+  <text x="668" y="108" font-size="10" fill="#1b5e20" text-anchor="middle">creates the files</text>
+  <text x="668" y="132" font-size="11" fill="#455a64" text-anchor="middle">then indexes the</text>
+  <text x="668" y="146" font-size="11" fill="#455a64" text-anchor="middle">newborn workspace</text>
+  <text x="668" y="166" font-size="10" fill="#78909c" text-anchor="middle">ready to describe</text>
+</svg>

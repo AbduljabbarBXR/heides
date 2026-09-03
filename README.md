@@ -20,20 +20,24 @@ HEIDES is three organs over one spine, all deterministic, all local, all explain
 
 ### The Spine
 
-![The Spine maps the codebase into a persistent graph](assets/spine.webp)
+![The Spine maps code into a sqlite store](assets/spine-map.svg)
 
-Perception and memory. The Spine walks the codebase and builds a compact persistent graph of symbols, files, callers, callees, imports and signatures. The index lives on disk in the workspace and is updated incrementally as files change. Every later query, from Harmony guards to Grounding plans to the agent itself, reads the same map. No model is involved. This layer is pure analysis.
+Perception and memory. The Spine walks the codebase and builds a compact persistent graph of symbols, files, callers, callees, imports, signatures, docs, constants, fields and enum variants, with module level code first class. The index lives in a sqlite database at .heides/index.db in the workspace and is updated incrementally as files change. Every later query, from Harmony guards to Grounding plans to the agent itself, reads the same map. No model is involved. This layer is pure analysis.
 
-The graph answers four questions directly.
+The graph answers these questions directly.
 
 * Who calls this symbol?
 * Who imports this module?
 * Where is this symbol defined?
 * What does this function call?
+* What does this file talk to?
+* What is this symbol for, from its own doc comment?
+
+One command, describe, prints the whole map as a workspace manifest. Entrypoints, files that run module level code, the most connected symbols, call cycles and which files talk to which. An agent reads the manifest and the neighbors of one symbol instead of walking the tree, kilobytes instead of megabytes.
 
 ### Harmony
 
-![The HEIDES architecture](assets/graph.webp)
+![Harmony turns code into findings with evidence](assets/harmony-guards.svg)
 
 Judgment. Harmony runs the guard modules against the Spine graph and against proposed patches. Every guard is deterministic and reports evidence, never guesses.
 
@@ -51,13 +55,13 @@ Here is what a finding looks like.
 
 ### Grounding
 
-![Grounding refines plans against the spine and the web](assets/grounding.webp)
+![Grounding refines plans against the map and the world](assets/grounding-refine.svg)
 
-Refinement. Grounding takes an objective or a plan and checks it against the Spine and against the outside world. It confirms feasibility, surfaces missing prerequisites, and returns a bounded specification that the agent then builds against. For new projects it turns a plan into a scaffold, confirms security and best practices, and hands a clean foundation back to the agent. For facts that change over time it can consult the web and update its own knowledge.
+Refinement. Grounding takes an objective or a plan and checks it against the Spine and against the outside world. It confirms feasibility, surfaces missing prerequisites, and returns a bounded specification that the agent then builds against. For new projects it turns a plan into a scaffold, indexes the newborn workspace immediately so it reads back through the same map, and hands a clean foundation back to the agent. For facts that change over time it can consult the web and update its own knowledge.
 
 ## How it works
 
-![How HEIDES works, the event driven flow](assets/how-it-works.webp)
+![The agent reads the map instead of burning tokens on code](assets/agent-eyes.svg)
 
 HEIDES is event driven. It wakes when a session starts or a file changes, works, and sleeps when the job is done. Nothing is stale because everything recomputes on demand against the persistent index.
 
@@ -70,7 +74,7 @@ HEIDES is event driven. It wakes when a session starts or a file changes, works,
 
 ## How the guards work
 
-![How the HEIDES guards run](assets/guards.webp)
+![A proposed patch is judged in memory before any write](assets/staged-gate.svg)
 
 * Staged apply. An agent proposes a patch that changes add(a, b) into add(a, b, c). HEIDES applies the patch in memory, parses the changed file again, compares signatures against the spine, finds that main still calls add with two arguments, and reports a blocker with the exact call site. Nothing has been written to disk.
 * Security taint. A line assigns from req.query. A later line passes that variable into db.query. HEIDES reports the sink line and names the source line. SQL, shell, filesystem and prompt injection sinks are covered across every deep language.
@@ -80,11 +84,11 @@ HEIDES is event driven. It wakes when a session starts or a file changes, works,
 
 ## Connectivity
 
-![Every shell HEIDES connects to](assets/connectivity.webp)
+![One core, every shell](assets/one-core.svg)
 
 One core, every shell. The same binary speaks to everything.
 
-* CLI. Native commands are scan, status, query, check, staged, plan, scaffold, deps, watch and mcp.
+* CLI. Native commands are scan, status, query, describe, check, staged, plan, scaffold, deps, watch, mcp and version. Query reads callers, imports, definition, calls and neighbors for one symbol. Describe prints the workspace manifest in one read.
 * MCP. A Model Context Protocol server over stdio. Any MCP aware agent, editor or harness attaches directly. Also listed in the official MCP registry as io.github.AbduljabbarBXR/heides, installable by name from registry aware clients.
 * Agent systems. Claude Code, Codex, Cursor, OpenCode, Hermes and custom builds via MCP.
 * Skills. HEIDES exposes its capabilities as MCP tools and resources, so skill systems can compose it.
@@ -283,16 +287,16 @@ Hermes sessions. The skill named heides teaches the session when to summon, and 
 
 * Deterministic first. A rule that is provable beats a model that is plausible. Models are reserved for the parts that need them.
 * Explainable always. Every warning carries a file, a line and a reason. No black boxes.
-* Local and small. One binary, a compact binary index, low memory. No cloud dependency, no telemetry by default.
+* Local and small. One binary, a compact sqlite index, low memory. No cloud dependency, no telemetry by default.
 * Model agnostic. HEIDES does not care which model drives the agent. It guards the code, not the model.
 * Agent agnostic. Any tool that can run a process and read stdio can use it.
 * Alive, not stale. Event driven wakeups, incremental index updates, on demand recompute.
 
 ## Project status
 
-This is milestone seven. The Spine parses eight languages with tree sitter and builds symbols, call edges, import edges and signatures into a persistent index. A fresh scan parses files on every core and merges in file order so output is deterministic. Every later scan diffs the file table against disk and reparses only the files that changed, so repeated scans and watch mode stay cheap no matter how large the tree grows. The index is a compact binary file written atomically, and every query runs through hash indexes by symbol, callee and file name, so lookups stay constant time at any size. The parser is hardened against adversarial input, the tree walker is depth capped, every parse runs on a grown stack, and a lexical pre check refuses files nested deep enough to crash the C parser itself. Harmony runs the staged apply guard, edge case checks, interprocedural security taint, best practice rules and the OSV dependency check. The taint engine now proves flows across function boundaries, a summary and fixpoint pass over the call graph reports each flow with a source to sink trace, covering SQL, shell, filesystem and prompt injection sinks. Grounding evaluates plans against the graph, scaffolds new projects, and confirms facts against the package registries on the web. The MCP server exposes every capability as a tool, reads raw bytes so binary junk can never kill it, caps message size, and stays alive through hostile clients. The watch loop keeps the index fresh, and the whole harness ships as one binary that runs on desktop, server, CI and Termux. Every rule the harness runs is specified in the RULES file with its exact trigger, severity and guarantee, so the behavior is a reviewable contract, not an accident.
+This is milestone eight. The index is the agent's eyes. The Spine parses eight languages with tree sitter and builds symbols, call edges, import edges, signatures, doc comments, constants, fields, enum variants and module level code into a sqlite database at .heides/index.db. Every symbol carries the comment written above it, cleaned and capped, so what a function is for is answerable without opening the file. Module level code is first class, top level statements are analyzed as their own scope and taint flows through them with the same source to sink traces as function flows. A fresh scan parses files on every core and merges in file order so output is deterministic. Every later scan diffs the file table against disk and reparses only the files that changed, so repeated scans and watch mode stay cheap no matter how large the tree grows. Every query runs through hash indexes by symbol, callee and file name, so lookups stay constant time at any size. One command, describe, prints the workspace manifest, entrypoints, files that run module level code, the most connected symbols, call cycles and which files talk to which. The parser is hardened against adversarial input, the tree walker is depth capped, every parse runs on a grown stack, and a lexical pre check refuses files nested deep enough to crash the C parser itself. Harmony runs the staged apply guard, edge case checks, interprocedural security taint, best practice rules and the OSV dependency check. The taint engine proves flows across function boundaries and across module level code, a summary and fixpoint pass over the call graph reports each flow with a source to sink trace, covering SQL, shell, filesystem and prompt injection sinks. Grounding evaluates plans against the graph, scaffolds new projects and indexes the newborn workspace immediately, and confirms facts against the package registries on the web. The MCP server exposes every capability as a tool, reads raw bytes so binary junk can never kill it, caps message size, and stays alive through hostile clients. The watch loop keeps the index fresh, and the whole harness ships as one binary that runs on desktop, server, CI and Termux. Every rule the harness runs is specified in the RULES file with its exact trigger, severity and guarantee, so the behavior is a reviewable contract, not an accident.
 
-Every change lands behind the same gate, lint, build, the unit suite, the hostility suite, the serial battle suite of sixty five end to end checks and the byte identical determinism test, all run against a real fixture workspace, including MCP round trips, taint scenarios in all eight languages, cross function taint chains, a scale phase and a hostile phase. The scale phase generates a synthetic workspace of about one hundred thousand lines, plants known bugs, and asserts the scan time budget, the memory budget and the exact finding counts, then proves the incremental diff on the same tree. The hostility suite feeds random bytes, code soup, truncated real code and brace storms to the parser and every guard in every language, and asserts no panic, no crash and no hang. A clean corpus gate asserts zero findings on idiomatic code in all eight languages, so a rule that fires on clean code fails the build. The determinism test scans the same tree twice from a clean index and asserts byte identical stdout and a byte identical index file. The same gate runs on GitHub Actions for every push and pull request.
+Every change lands behind the same gate, lint, build, the unit suite, the hostility suite, the serial battle suite of seventy end to end checks and the byte identical determinism test, all run against a real fixture workspace, including MCP round trips, taint scenarios in all eight languages, cross function and module level taint chains, a scale phase and a hostile phase. The scale phase generates a synthetic workspace of about one hundred thousand lines, plants known bugs, and asserts the scan time budget, the memory budget and the exact finding counts, then proves the incremental diff on the same tree. The hostility suite feeds random bytes, code soup, truncated real code and brace storms to the parser and every guard in every language, and asserts no panic, no crash and no hang. A clean corpus gate asserts zero findings on idiomatic code in all eight languages, so a rule that fires on clean code fails the build. The determinism test scans the same tree twice from a clean index and asserts byte identical stdout and an identical sqlite store. The same gate runs on GitHub Actions for every push and pull request.
 
 Measured on a phone running Termux. A synthetic workspace of 101622 lines across 2400 files scans in 1.6 seconds and indexes in 0.95 megabytes, about 9.6 bytes per line of code. Peak memory during the fresh scan is 16 megabytes. A query over the full graph answers in 39 milliseconds. Changing a single file rescans in 82 milliseconds and touches exactly one file. These are the numbers from the release binary on an Android device, so desktop and server builds are at least as fast.
 

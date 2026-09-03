@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="210" viewBox="0 0 760 210" font-family="Helvetica, Arial, sans-serif">
+  <rect width="760" height="210" fill="#ffffff"/>
+  <text x="16" y="28" font-size="15" font-weight="bold" fill="#263238">A proposed patch is judged in memory before anything is written</text>
+
+  <rect x="30" y="55" width="140" height="130" rx="12" fill="#eceff1"/>
+  <text x="100" y="90" font-size="13" font-weight="bold" fill="#455a64" text-anchor="middle">patch</text>
+  <text x="100" y="108" font-size="11" fill="#78909c" text-anchor="middle">add(a, b) becomes</text>
+  <text x="100" y="122" font-size="11" fill="#78909c" text-anchor="middle">add(a, b, c)</text>
+  <circle cx="60" cy="150" r="6" fill="#546e7a"/>
+  <circle cx="82" cy="150" r="6" fill="#546e7a"/>
+  <circle cx="104" cy="150" r="6" fill="#546e7a"/>
+  <circle cx="126" cy="150" r="6" fill="#546e7a"/>
+
+  <path d="M170 120 L230 120" stroke="#90a4ae" stroke-width="2"/>
+  <polygon points="226,115 238,120 226,125" fill="#90a4ae"/>
+
+  <rect x="240" y="55" width="140" height="130" rx="12" fill="#e3f2fd"/>
+  <text x="310" y="92" font-size="13" font-weight="bold" fill="#1565c0" text-anchor="middle">apply and</text>
+  <text x="310" y="108" font-size="13" font-weight="bold" fill="#1565c0" text-anchor="middle">reparse</text>
+  <text x="310" y="132" font-size="11" fill="#455a64" text-anchor="middle">new content is</text>
+  <text x="310" y="146" font-size="11" fill="#455a64" text-anchor="middle">parsed in memory</text>
+  <text x="310" y="166" font-size="10" fill="#78909c" text-anchor="middle">no disk write</text>
+
+  <path d="M380 120 L440 120" stroke="#90a4ae" stroke-width="2"/>
+  <polygon points="436,115 448,120 436,125" fill="#90a4ae"/>
+
+  <rect x="450" y="55" width="140" height="130" rx="12" fill="#e8f5e9"/>
+  <text x="520" y="90" font-size="13" font-weight="bold" fill="#2e7d32" text-anchor="middle">compare</text>
+  <text x="520" y="110" font-size="11" fill="#455a64" text-anchor="middle">does any caller</text>
+  <text x="520" y="124" font-size="11" fill="#455a64" text-anchor="middle">still call the</text>
+  <text x="520" y="138" font-size="11" fill="#455a64" text-anchor="middle">old shape</text>
+  <text x="520" y="162" font-size="10" fill="#78909c" text-anchor="middle">the spine knows</text>
+
+  <path d="M590 120 L640 120" stroke="#90a4ae" stroke-width="2"/>
+  <polygon points="636,115 648,120 636,125" fill="#90a4ae"/>
+
+  <rect x="650" y="55" width="90" height="130" rx="12" fill="#ffebee"/>
+  <text x="695" y="95" font-size="13" font-weight="bold" fill="#c62828" text-anchor="middle">block</text>
+  <text x="695" y="115" font-size="11" fill="#455a64" text-anchor="middle">with the</text>
+  <text x="695" y="129" font-size="11" fill="#455a64" text-anchor="middle">exact call</text>
+  <text x="695" y="143" font-size="11" fill="#455a64" text-anchor="middle">site named</text>
+  <text x="695" y="166" font-size="10" fill="#78909c" text-anchor="middle">or safe</text>
+</svg>

@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="220" viewBox="0 0 760 220" font-family="Helvetica, Arial, sans-serif">
+  <rect width="760" height="220" fill="#ffffff"/>
+  <text x="16" y="30" font-size="15" font-weight="bold" fill="#263238">The Spine maps code into a store the agent can read</text>
+
+  <rect x="30" y="60" width="120" height="120" rx="12" fill="#eceff1"/>
+  <text x="90" y="105" font-size="12" fill="#455a64" text-anchor="middle">source</text>
+  <text x="90" y="121" font-size="12" fill="#455a64" text-anchor="middle">files</text>
+  <circle cx="50" cy="150" r="6" fill="#546e7a"/>
+  <circle cx="72" cy="150" r="6" fill="#546e7a"/>
+  <circle cx="94" cy="150" r="6" fill="#546e7a"/>
+  <circle cx="116" cy="150" r="6" fill="#546e7a"/>
+  <text x="90" y="172" font-size="10" fill="#78909c" text-anchor="middle">eight languages</text>
+
+  <path d="M150 120 L210 120" stroke="#90a4ae" stroke-width="2"/>
+  <polygon points="206,115 218,120 206,125" fill="#90a4ae"/>
+
+  <rect x="220" y="55" width="150" height="130" rx="12" fill="#e3f2fd"/>
+  <text x="295" y="80" font-size="13" font-weight="bold" fill="#1565c0" text-anchor="middle">deterministic</text>
+  <text x="295" y="96" font-size="13" font-weight="bold" fill="#1565c0" text-anchor="middle">parser</text>
+  <text x="295" y="118" font-size="11" fill="#455a64" text-anchor="middle">symbols, calls,</text>
+  <text x="295" y="132" font-size="11" fill="#455a64" text-anchor="middle">imports, signatures</text>
+  <text x="295" y="152" font-size="11" fill="#455a64" text-anchor="middle">docs, constants,</text>
+  <text x="295" y="166" font-size="11" fill="#455a64" text-anchor="middle">fields, module scope</text>
+
+  <path d="M370 120 L430 120" stroke="#90a4ae" stroke-width="2"/>
+  <polygon points="426,115 438,120 426,125" fill="#90a4ae"/>
+
+  <rect x="440" y="55" width="150" height="130" rx="12" fill="#e8f5e9"/>
+  <text x="515" y="80" font-size="13" font-weight="bold" fill="#2e7d32" text-anchor="middle">index.db</text>
+  <text x="515" y="98" font-size="11" fill="#455a64" text-anchor="middle">sqlite in .heides</text>
+  <text x="515" y="116" font-size="11" fill="#455a64" text-anchor="middle">incremental rescans</text>
+  <text x="515" y="134" font-size="11" fill="#455a64" text-anchor="middle">agents and guards</text>
+  <text x="515" y="152" font-size="11" fill="#455a64" text-anchor="middle">read the same map</text>
+  <text x="515" y="170" font-size="11" fill="#455a64" text-anchor="middle">no model involved</text>
+
+  <path d="M590 120 L650 120" stroke="#90a4ae" stroke-width="2"/>
+  <polygon points="646,115 658,120 646,125" fill="#90a4ae"/>
+
+  <rect x="660" y="55" width="90" height="130" rx="12" fill="#fff3e0"/>
+  <text x="705" y="92" font-size="12" font-weight="bold" fill="#e65100" text-anchor="middle">describe</text>
+  <text x="705" y="110" font-size="12" font-weight="bold" fill="#e65100" text-anchor="middle">query</text>
+  <text x="705" y="140" font-size="10" fill="#455a64" text-anchor="middle">one read</text>
+  <text x="705" y="154" font-size="10" fill="#455a64" text-anchor="middle">answers who</text>
+  <text x="705" y="168" font-size="10" fill="#455a64" text-anchor="middle">talks to who</text>
+</svg>
