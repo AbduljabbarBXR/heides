@@ -22,6 +22,8 @@ pub fn detect_language(path: &Path) -> Option<String> {
         "go" => "go",
         "java" => "java",
         "cs" => "csharp",
+        "html" | "htm" => "html",
+        "css" => "css",
         _ => return None,
     };
     Some(lang.to_string())
@@ -44,6 +46,8 @@ fn language_for(lang: &str) -> Option<tree_sitter::Language> {
         "go" => Some(tree_sitter_go::LANGUAGE.into()),
         "java" => Some(tree_sitter_java::LANGUAGE.into()),
         "csharp" => Some(tree_sitter_c_sharp::LANGUAGE.into()),
+        "html" => Some(tree_sitter_html::LANGUAGE.into()),
+        "css" => Some(tree_sitter_css::LANGUAGE.into()),
         _ => None,
     }
 }
@@ -171,12 +175,191 @@ fn parse_inner(path: &Path, content: &str) -> Option<ParsedFile> {
     let root = tree.root_node();
 
     let mut parsed = ParsedFile {
-        lang,
+        lang: lang.clone(),
         symbols: Vec::new(),
         calls: Vec::new(),
         imports: Vec::new(),
     };
 
+    walk(root, content, path, &mut parsed, None, 0);
+    if lang == "html" {
+        let file = path.display().to_string();
+        web_imports(&mut parsed, root, content, &file);
+        inline_scripts(&mut parsed, root, content, path);
+    } else if lang == "css" {
+        css_imports(&mut parsed, root, content, &path.display().to_string());
+    }
+    Some(parsed)
+}
+
+/// Import edges from a css file, at import rules and url references.
+/// Line based over the grammar tree leaves, deterministic, one edge per
+/// distinct target per line.
+fn css_imports(parsed: &mut ParsedFile, root: Node, content: &str, file: &str) {
+    let mut cursor = root.walk();
+    let mut seen: std::collections::HashSet<(usize, String)> = std::collections::HashSet::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let kind = node.kind();
+        let is_url_call = kind == "call_expression" && text(node, content).starts_with("url(");
+        if kind == "import_statement" || is_url_call {
+            let line = node.start_position().row + 1;
+            let t = text(node, content);
+            let mut target: Option<String> = None;
+            for (q, m) in [('"', '"'), ('\'', '\'')] {
+                if let Some(a) = t.find(q) {
+                    if let Some(b) = t[a + 1..].find(m) {
+                        target = Some(t[a + 1..a + 1 + b].to_string());
+                        break;
+                    }
+                }
+            }
+            if let Some(target) = target
+                && !target.is_empty()
+                && seen.insert((line, target.clone()))
+            {
+                parsed.imports.push(ImportEdge {
+                    file: file.to_string(),
+                    imported: target,
+                    line: line as u64,
+                });
+            }
+        }
+        cursor.reset(node);
+        for child in node.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+}
+
+/// Import edges from an html file, stylesheet link hrefs and script src
+/// attributes, from the start tag text of each element. Inline script
+/// bodies carry no src and are parsed separately, not imported.
+fn web_imports(parsed: &mut ParsedFile, root: Node, content: &str, file: &str) {
+    let mut cursor = root.walk();
+    let mut seen: std::collections::HashSet<(usize, String)> = std::collections::HashSet::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if matches!(node.kind(), "element" | "script_element") {
+            let line = node.start_position().row + 1;
+            let t = text(node, content);
+            let lower = t.to_ascii_lowercase();
+            let mut target: Option<String> = None;
+            if lower.starts_with("<script")
+                && let Some(a) = t.find("src")
+            {
+                let rest = &t[a + 3..];
+                for (q, m) in [('"', '"'), ('\'', '\'')] {
+                    if let Some(x) = rest.find(q) {
+                        if let Some(y) = rest[x + 1..].find(m) {
+                            target = Some(rest[x + 1..x + 1 + y].to_string());
+                            break;
+                        }
+                    }
+                }
+            } else if lower.starts_with("<link") && lower.contains("stylesheet") {
+                if let Some(a) = lower.find("href") {
+                    let rest = &t[a + 4..];
+                    for (q, m) in [('"', '"'), ('\'', '\'')] {
+                        if let Some(x) = rest.find(q) {
+                            if let Some(y) = rest[x + 1..].find(m) {
+                                target = Some(rest[x + 1..x + 1 + y].to_string());
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(target) = target
+                && !target.is_empty()
+                && seen.insert((line, target.clone()))
+            {
+                parsed.imports.push(ImportEdge {
+                    file: file.to_string(),
+                    imported: target,
+                    line: line as u64,
+                });
+            }
+        }
+        cursor.reset(node);
+        for child in node.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+}
+
+/// Parse every inline script body as javascript and merge its symbols,
+/// calls and imports into the html file records, with line numbers
+/// offset to the real html rows so the map points at the page.
+fn inline_scripts(parsed: &mut ParsedFile, root: Node, content: &str, path: &Path) {
+    let mut cursor = root.walk();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if matches!(node.kind(), "element" | "script_element") {
+            let t = text(node, content);
+            let lower = t.to_ascii_lowercase();
+            if lower.starts_with("<script")
+                && !lower[..lower.find('>').unwrap_or(0)].contains("src")
+            {
+                // Inner body between the end of the start tag and the
+                // start of the closing tag.
+                let mut inner = String::new();
+                let mut base_byte = 0usize;
+                let mut child = node.walk();
+                let children: Vec<_> = node.children(&mut child).collect();
+                for c in &children {
+                    if c.kind() == "start_tag" {
+                        base_byte = c.end_byte();
+                    }
+                }
+                if base_byte > 0 && base_byte < content.len() {
+                    let mut end = content.len();
+                    for c in &children {
+                        if c.kind() == "end_tag" {
+                            end = c.start_byte();
+                            break;
+                        }
+                    }
+                    inner = content[base_byte..end].to_string();
+                }
+                if !inner.trim().is_empty() {
+                    let base_row = content[..base_byte].matches('\n').count() as u64;
+                    if let Some(js) = parse_region(&inner, "javascript", path) {
+                        for mut s in js.symbols {
+                            s.line += base_row;
+                            parsed.symbols.push(s);
+                        }
+                        for c in js.calls {
+                            parsed.calls.push(c);
+                        }
+                        for im in js.imports {
+                            parsed.imports.push(im);
+                        }
+                    }
+                }
+            }
+        }
+        cursor.reset(node);
+        for child in node.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+}
+
+/// Parse a region of text as one language without touching the path, so
+/// inline script bodies and templates can ride the same walker.
+fn parse_region(content: &str, lang: &str, path: &Path) -> Option<ParsedFile> {
+    let grammar = language_for(lang)?;
+    let mut parser = Parser::new();
+    parser.set_language(&grammar).ok()?;
+    let tree = parser.parse(content.as_bytes(), None)?;
+    let root = tree.root_node();
+    let mut parsed = ParsedFile {
+        lang: lang.to_string(),
+        symbols: Vec::new(),
+        calls: Vec::new(),
+        imports: Vec::new(),
+    };
     walk(root, content, path, &mut parsed, None, 0);
     Some(parsed)
 }
@@ -1094,6 +1277,33 @@ fn main() {
                 );
             }
         }
+    }
+
+    #[test]
+    fn html_imports_inline_scripts_and_css_edges_are_captured() {
+        let html = "<!doctype html>\n<html>\n<head>\n  <link rel=\"stylesheet\" href=\"/css/app.css\">\n  <script src=\"/js/vendor.js\"></script>\n</head>\n<body>\n<script>\nfunction greet() {\n  return \"hi\";\n}\n</script>\n</body>\n</html>\n";
+        let p = std::path::Path::new("index.html");
+        let parsed = parse_file(p, html).unwrap();
+        let imports: Vec<&str> = parsed.imports.iter().map(|i| i.imported.as_str()).collect();
+        assert!(imports.contains(&"/css/app.css"), "missing stylesheet edge");
+        assert!(imports.contains(&"/js/vendor.js"), "missing script edge");
+        let greet = parsed
+            .symbols
+            .iter()
+            .find(|s| s.name == "greet")
+            .expect("inline script function missing");
+        assert_eq!(greet.lang, "javascript");
+        assert_eq!(greet.line, 9, "inline symbol must point at the html row");
+        let css = "@import \"/base.css\";\nbody { background: url(\"/img/x.png\"); }\n";
+        let pc = std::path::Path::new("style.css");
+        let parsed_css = parse_file(pc, css).unwrap();
+        let cimports: Vec<&str> = parsed_css
+            .imports
+            .iter()
+            .map(|i| i.imported.as_str())
+            .collect();
+        assert!(cimports.contains(&"/base.css"), "missing at import edge");
+        assert!(cimports.contains(&"/img/x.png"), "missing url edge");
     }
 
     #[test]
