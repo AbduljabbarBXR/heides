@@ -350,11 +350,29 @@ fn arg_indices(args: &[(Option<String>, String)], params: &[String]) -> Vec<Opti
 }
 
 /// True when the line itself reads a source, used for wrappers that return
-/// a source read directly.
+/// a source read directly. Memoized per language and line content, real
+/// trees repeat the same short lines hundreds of thousands of times and
+/// the source regexes were the hottest loop. A pure cache cannot change
+/// output, the pass stays deterministic.
 fn line_is_source(line: &str, lang: &str) -> bool {
-    SOURCES
-        .iter()
-        .any(|(l, pat)| *l == lang && regex_hit(pat, line))
+    thread_local! {
+        static CACHE: std::cell::RefCell<std::collections::HashMap<(String, String), bool>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        if let Some(&v) = cache.get(&(lang.to_string(), line.to_string())) {
+            return v;
+        }
+        let v = SOURCES
+            .iter()
+            .any(|(l, pat)| *l == lang && regex_hit(pat, line));
+        if cache.len() > 500_000 {
+            cache.clear();
+        }
+        cache.insert((lang.to_string(), line.to_string()), v);
+        v
+    })
 }
 
 fn is_identifier(tok: &str) -> bool {
@@ -639,6 +657,7 @@ pub fn run_workspace(graph: &CodeGraph, contents: &HashMap<String, String>) -> V
         entries.insert(fi.key.clone(), vec![None; fi.params.len()]);
     }
     let mut queue: VecDeque<Key> = VecDeque::new();
+    let mut queued: HashSet<Key> = HashSet::new();
 
     // Function definitions per name, for constant time callee resolution.
     let mut defs_by_name: HashMap<String, Vec<(String, String)>> = HashMap::new();
@@ -698,6 +717,7 @@ pub fn run_workspace(graph: &CodeGraph, contents: &HashMap<String, String>) -> V
     let process = |key: Key,
                    entries: &mut HashMap<Key, Vec<Option<Prov>>>,
                    queue: &mut VecDeque<Key>,
+                   queued: &mut HashSet<Key>,
                    dyn_out: &mut Vec<(String, usize, String, Prov)>,
                    seen: &mut HashSet<String>| {
         let Some(&fidx) = by_key.get(&key) else {
@@ -853,7 +873,7 @@ pub fn run_workspace(graph: &CodeGraph, contents: &HashMap<String, String>) -> V
             }
         }
         for k in new_keys {
-            if !queue.iter().any(|q| *q == k) {
+            if queued.insert(k.clone()) {
                 queue.push_back(k);
             }
         }
@@ -895,12 +915,21 @@ pub fn run_workspace(graph: &CodeGraph, contents: &HashMap<String, String>) -> V
             k.clone(),
             &mut entries,
             &mut queue,
+            &mut queued,
             &mut dyn_out,
             &mut seen_dyn,
         );
     }
     while let Some(k) = queue.pop_front() {
-        process(k, &mut entries, &mut queue, &mut dyn_out, &mut seen_dyn);
+        queued.remove(&k);
+        process(
+            k,
+            &mut entries,
+            &mut queue,
+            &mut queued,
+            &mut dyn_out,
+            &mut seen_dyn,
+        );
     }
 
     // Reports at end sinks.
