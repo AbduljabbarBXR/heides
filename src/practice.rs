@@ -235,6 +235,14 @@ pub fn scan_file(path: &Path, content: &str, lang: &str) -> Vec<PracticeReport> 
     let main_guard = python_main_guard(&lines);
     let is_html = lang == "html";
     let mut form_line: Option<u64> = None;
+    // Third party assets carry their own markers, never ours to police.
+    let vendor_asset = {
+        let fname = path
+            .file_name()
+            .map(|f| f.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        fname.contains("vendor") || fname.contains(".min.")
+    };
 
     for (i, line) in lines.iter().enumerate() {
         let line_no = i as u64 + 1;
@@ -267,7 +275,9 @@ pub fn scan_file(path: &Path, content: &str, lang: &str) -> Vec<PracticeReport> 
     for (i, line) in lines.iter().enumerate() {
         let line_no = i as u64 + 1;
         let lower = line.to_ascii_lowercase();
-        if lower.contains("todo") || lower.contains("fixme") || lower.contains("hack") {
+        if (lower.contains("todo") || lower.contains("fixme") || lower.contains("hack"))
+            && !vendor_asset
+        {
             reports.push(rep(
                 path,
                 line_no,
