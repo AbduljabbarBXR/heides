@@ -276,6 +276,13 @@ fn collect_manifests(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     if pom.exists() {
         out.push(pom);
     }
+    let lock = dir.join("composer.lock");
+    let json = dir.join("composer.json");
+    if lock.exists() {
+        out.push(lock);
+    } else if json.exists() {
+        out.push(json);
+    }
     if depth == 0 {
         return;
     }
@@ -325,6 +332,12 @@ pub fn read_manifests(root: &Path) -> Vec<Dependency> {
                 .unwrap_or_default(),
             Some("pom.xml") => std::fs::read_to_string(&file)
                 .map(|t| parse_pom_xml(&t))
+                .unwrap_or_default(),
+            Some("composer.lock") => std::fs::read_to_string(&file)
+                .map(|t| parse_composer_lock(&t))
+                .unwrap_or_default(),
+            Some("composer.json") => std::fs::read_to_string(&file)
+                .map(|t| parse_composer_json(&t))
                 .unwrap_or_default(),
             _ => Vec::new(),
         };
@@ -565,6 +578,54 @@ fn parse_pom_xml(text: &str) -> Vec<Dependency> {
     deps
 }
 
+/// Parse composer.lock packages and dev packages, the lock carries the
+/// exact installed versions.
+fn parse_composer_lock(text: &str) -> Vec<Dependency> {
+    let mut deps = Vec::new();
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return deps;
+    };
+    for key in ["packages", "packages-dev"] {
+        if let Some(list) = value.get(key).and_then(|v| v.as_array()) {
+            for pkg in list {
+                let (Some(name), Some(version)) = (
+                    pkg.get("name").and_then(|v| v.as_str()),
+                    pkg.get("version").and_then(|v| v.as_str()),
+                ) else {
+                    continue;
+                };
+                deps.push(Dependency {
+                    name: name.to_string(),
+                    version: version.trim_start_matches('v').to_string(),
+                    ecosystem: "Packagist",
+                });
+            }
+        }
+    }
+    deps
+}
+
+/// Parse composer.json require and require-dev maps, ranges stay ranges
+/// and only the lock file pins exact versions.
+fn parse_composer_json(text: &str) -> Vec<Dependency> {
+    let mut deps = Vec::new();
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return deps;
+    };
+    for key in ["require", "require-dev"] {
+        if let Some(map) = value.get(key).and_then(|v| v.as_object()) {
+            for (name, spec) in map {
+                deps.push(Dependency {
+                    name: name.clone(),
+                    version: spec.as_str().unwrap_or("?").to_string(),
+                    ecosystem: "Packagist",
+                });
+            }
+        }
+    }
+    deps
+}
+
 fn parse_cargo_toml(text: &str) -> Vec<Dependency> {
     let mut deps = Vec::new();
     let mut in_deps = false;
@@ -792,7 +853,7 @@ pub fn check(root: &Path) -> (Vec<DepReport>, bool) {
     if deps.is_empty() {
         reports.push(DepReport {
             severity: "info".to_string(),
-            message: "no dependency manifests found (Cargo.toml, Cargo.lock, package.json)"
+            message: "no dependency manifests found (Cargo.toml, Cargo.lock, package.json, go.mod, requirements.txt, pyproject.toml, pom.xml, composer.lock)"
                 .to_string(),
             file: root.display().to_string(),
             line: 0,
@@ -927,6 +988,30 @@ mod tests {
         assert_eq!(deps[0].name, "com.google.guava:guava");
         assert_eq!(deps[0].version, "31.1-jre");
         assert_eq!(deps[0].ecosystem, "Maven");
+    }
+
+    #[test]
+    fn parses_composer_manifests() {
+        let lock = "{\"packages\":[{\"name\":\"laravel/framework\",\"version\":\"v10.48.4\"},{\"name\":\"guzzlehttp/guzzle\",\"version\":\"7.8.1\"}],\"packages-dev\":[{\"name\":\"phpunit/phpunit\",\"version\":\"10.5.20\"}]}";
+        let deps = parse_composer_lock(lock);
+        assert_eq!(deps.len(), 3);
+        assert_eq!(deps[0].name, "laravel/framework");
+        assert_eq!(deps[0].version, "10.48.4");
+        assert_eq!(deps[0].ecosystem, "Packagist");
+        assert_eq!(deps[2].name, "phpunit/phpunit");
+
+        let json = "{\"require\":{\"laravel/framework\":\"^10.0\",\"guzzlehttp/guzzle\":\"7.8.1\"},\"require-dev\":{\"phpunit/phpunit\":\"^10.5\"}}";
+        let deps = parse_composer_json(json);
+        assert_eq!(deps.len(), 3);
+        let laravel = deps.iter().find(|d| d.name == "laravel/framework").unwrap();
+        assert_eq!(laravel.version, "^10.0");
+        assert_eq!(
+            deps.iter()
+                .find(|d| d.name == "guzzlehttp/guzzle")
+                .unwrap()
+                .version,
+            "7.8.1"
+        );
     }
 
     #[test]

@@ -2,6 +2,12 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.10.0
+
+* the dependency guard now reads go.mod, requirements.txt, pyproject.toml, pom.xml, composer.lock and composer.json alongside cargo and npm manifests
+* OSV vulnerability queries run on pinned versions only, range requirements still compare against the latest release
+* latest version lookups are ecosystem aware, go modules via the proxy, pypi, maven central search and packagist
+
 ## 0.9.1
 
 * diagnostic console calls are no longer silent, console.debug, console.info, console.warn and console.error report as info since warn and error are sometimes deliberate logging
