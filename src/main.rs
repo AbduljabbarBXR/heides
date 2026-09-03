@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use heides::{deps, grounding, harmony, indexer, server, spine, watch};
+use heides::{deps, grounding, harmony, indexer, server, spine, ui::Ui, watch};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -30,7 +30,16 @@ fn print_usage() {
 }
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().collect();
+    let mut args: Vec<String> = std::env::args().collect();
+    let mut cleaned: Vec<String> = Vec::with_capacity(args.len());
+    cleaned.push(args[0].clone());
+    for a in args.iter().skip(1) {
+        if !Ui::consume_flag(a) {
+            cleaned.push(a.clone());
+        }
+    }
+    args = cleaned;
+    let ui = Ui::resolve();
     let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("");
     let arg2 = args.get(2).map(|s| s.as_str()).unwrap_or(".");
     let arg3 = args.get(3).map(|s| s.as_str());
@@ -256,7 +265,13 @@ fn main() -> ExitCode {
                     } else {
                         format!(" at {}:{}", r.file, r.line)
                     };
-                    println!("[{}] {} ({}){}", r.severity, r.message, r.guard, loc);
+                    println!(
+                        "{} {} ({}){}",
+                        ui.severity(&r.severity),
+                        r.message,
+                        r.guard,
+                        loc
+                    );
                 }
             }
             ExitCode::SUCCESS
@@ -289,7 +304,13 @@ fn main() -> ExitCode {
                     } else {
                         println!("{}", harmony::summarize(&reports));
                         for r in &reports {
-                            println!("[{}] {} at {}:{}", r.severity, r.message, r.file, r.line);
+                            println!(
+                                "{} {} at {}:{}",
+                                ui.severity(&r.severity),
+                                r.message,
+                                r.file,
+                                r.line
+                            );
                         }
                     }
                     ExitCode::SUCCESS
@@ -364,7 +385,7 @@ fn main() -> ExitCode {
                 println!("no dependency findings");
             } else {
                 for r in &reports {
-                    println!("[{}] {}", r.severity, r.message);
+                    println!("{} {}", ui.severity(&r.severity), r.message);
                 }
             }
             ExitCode::SUCCESS

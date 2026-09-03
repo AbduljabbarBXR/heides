@@ -16,5 +16,6 @@ pub mod server;
 pub mod spine;
 pub mod staged;
 pub mod taint;
+pub mod ui;
 pub mod watch;
 pub mod web;
