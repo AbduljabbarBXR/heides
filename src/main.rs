@@ -265,6 +265,35 @@ fn main() -> ExitCode {
             }
             if reports.is_empty() {
                 println!("no findings. the workspace is clean.");
+            } else if ui.grouped {
+                let mut groups: std::collections::BTreeMap<&str, Vec<&harmony::GuardReport>> =
+                    std::collections::BTreeMap::new();
+                for r in &reports {
+                    groups.entry(r.guard.as_str()).or_default().push(r);
+                }
+                println!("{}", harmony::summarize(&reports));
+                for (guard, items) in &groups {
+                    let b = items.iter().filter(|r| r.severity == "blocker").count();
+                    let c = items.iter().filter(|r| r.severity == "critical").count();
+                    let w = items.iter().filter(|r| r.severity == "warning").count();
+                    let i = items.iter().filter(|r| r.severity == "info").count();
+                    println!(
+                        "{}  blocker {} critical {} warning {} info {}",
+                        guard,
+                        ui.count("blocker", b),
+                        ui.count("critical", c),
+                        ui.count("warning", w),
+                        ui.count("info", i)
+                    );
+                    for r in items {
+                        let loc = if r.file.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" at {}:{}", r.file, r.line)
+                        };
+                        println!("  {} {} {}", ui.severity(&r.severity), r.message, loc);
+                    }
+                }
             } else {
                 println!("{}", harmony::summarize(&reports));
                 for r in &reports {
