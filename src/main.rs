@@ -301,6 +301,23 @@ fn main() -> ExitCode {
                     for f in &files {
                         println!("created {}", f);
                     }
+                    // The newborn workspace gets indexed immediately, so
+                    // it reads back through the same spine as any other
+                    // project and describe works from the first second.
+                    let root = PathBuf::from(dir);
+                    match indexer::load_or_build(&root) {
+                        Ok(graph) => {
+                            println!(
+                                "indexed {} files, {} symbols, {} call(s) in {}",
+                                graph.files.len(),
+                                graph.symbols.len(),
+                                graph.calls.len(),
+                                dir
+                            );
+                            let _ = spine::save(&graph, &root);
+                        }
+                        Err(e) => eprintln!("index failed: {}", e),
+                    }
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
