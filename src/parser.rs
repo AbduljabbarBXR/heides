@@ -382,6 +382,10 @@ const SYMBOL_KINDS: &[&str] = &[
     "mod_item",
     "const_item",
     "static_item",
+    // Value symbols: one node per declaration in the grammars where that
+    // holds, so names stay exact and the index stays clean.
+    "enum_variant",
+    "field_declaration",
 ];
 
 /// Never descend deeper than this into the syntax tree. Real code nests
@@ -480,7 +484,14 @@ fn walk(
     let line = node.start_position().row as u64 + 1;
 
     // Symbols
+    let value_kind = kind == "enum_variant" || kind == "field_declaration";
+    // Value symbols are only captured in grammars where the declaration
+    // node carries its name before its type. Today that is rust, where an
+    // enum variant or struct field is one node with the identifier first.
+    // Other grammars use the same node kind with the type first, so they
+    // stay out of the map until their own extraction lands.
     if SYMBOL_KINDS.contains(&kind)
+        && (!value_kind || out.lang == "rust")
         && let Some(name) = name_of(node, content)
     {
         let sig = if kind.contains("function") || kind == "method_definition" {
@@ -488,9 +499,15 @@ fn walk(
         } else {
             String::new()
         };
+        // Value symbols keep tidy kinds instead of raw grammar names so
+        // queries and practice guards read intent, never parser noise.
+        let kind_out = match kind {
+            "field_declaration" => "field",
+            _ => kind,
+        };
         out.symbols.push(Symbol {
             name: name.clone(),
-            kind: kind.to_string(),
+            kind: kind_out.to_string(),
             file: path.display().to_string(),
             line,
             lang: out.lang.clone(),
@@ -846,6 +863,32 @@ fn main() {
                 .iter()
                 .any(|c| c.callee == "helper" && c.caller == "Load")
         );
+    }
+
+    #[test]
+    fn rust_enum_variants_and_struct_fields_are_captured() {
+        let src = "// A color palette.\nenum Color {\n    Red,\n    Green = 2,\n}\n\nstruct Point {\n    // Horizontal position.\n    x: f64,\n    y: f64,\n}\n";
+        let p = std::path::Path::new("probe.rs");
+        let parsed = parse_file(p, src).unwrap();
+        let variants: Vec<_> = parsed
+            .symbols
+            .iter()
+            .filter(|s| s.kind == "enum_variant")
+            .collect();
+        let names: Vec<&str> = variants.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["Red", "Green"]);
+        let fields: Vec<_> = parsed
+            .symbols
+            .iter()
+            .filter(|s| s.kind == "field")
+            .collect();
+        let fnames: Vec<&str> = fields.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(fnames, vec!["x", "y"]);
+        let x = fields.iter().find(|s| s.name == "x").unwrap();
+        assert_eq!(x.doc, "Horizontal position.");
+        let e = parsed.symbols.iter().find(|s| s.name == "Color").unwrap();
+        assert_eq!(e.doc, "A color palette.");
+        assert!(variants.iter().all(|s| s.signature.is_empty()));
     }
 
     #[test]
