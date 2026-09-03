@@ -260,6 +260,10 @@ fn collect_manifests(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     if pkg.exists() {
         out.push(pkg);
     }
+    let gomod = dir.join("go.mod");
+    if gomod.exists() {
+        out.push(gomod);
+    }
     if depth == 0 {
         return;
     }
@@ -298,12 +302,55 @@ pub fn read_manifests(root: &Path) -> Vec<Dependency> {
             Some("package.json") => std::fs::read_to_string(&file)
                 .map(|t| parse_package_json(&t))
                 .unwrap_or_default(),
+            Some("go.mod") => std::fs::read_to_string(&file)
+                .map(|t| parse_go_mod(&t))
+                .unwrap_or_default(),
             _ => Vec::new(),
         };
         for dep in parsed {
             if seen.insert(format!("{}@{}@{}", dep.name, dep.version, dep.ecosystem)) {
                 deps.push(dep);
             }
+        }
+    }
+    deps
+}
+
+fn parse_go_mod(text: &str) -> Vec<Dependency> {
+    let mut deps = Vec::new();
+    let mut in_block = false;
+    for raw in text.lines() {
+        let mut t = raw.trim();
+        if t == "require (" || t == "require {" {
+            in_block = true;
+            continue;
+        }
+        if in_block && (t == ")" || t == "}") {
+            in_block = false;
+            continue;
+        }
+        if !in_block {
+            let Some(rest) = t.strip_prefix("require ") else {
+                continue;
+            };
+            if rest.starts_with('(') {
+                continue;
+            }
+            t = rest.trim();
+        }
+        // One require line, block body or single require form, comments
+        // and replacement blocks never look like module version pairs.
+        let body = t.split("//").next().unwrap_or(t).trim();
+        if body.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = body.split_whitespace().collect();
+        if parts.len() >= 2 {
+            deps.push(Dependency {
+                name: parts[0].to_string(),
+                version: parts[1].trim_start_matches('v').to_string(),
+                ecosystem: "Go",
+            });
         }
     }
     deps
@@ -421,25 +468,112 @@ fn osv_check(dep: &Dependency) -> Option<String> {
 
 /// Fetch the latest published version of a dependency.
 fn latest_version(dep: &Dependency) -> Option<String> {
-    let url = if dep.ecosystem == "npm" {
-        format!("https://registry.npmjs.org/{}/latest", dep.name)
-    } else {
-        format!("https://crates.io/api/v1/crates/{}", dep.name)
-    };
-    let resp = crate::web::get(&url).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&resp).ok()?;
-    if dep.ecosystem == "npm" {
-        value
-            .get("version")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-    } else {
-        value
-            .get("crate")
-            .and_then(|c| c.get("max_stable_version"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
+    match dep.ecosystem {
+        "npm" => {
+            let url = format!("https://registry.npmjs.org/{}/latest", dep.name);
+            let resp = crate::web::get(&url).ok()?;
+            let value: serde_json::Value = serde_json::from_str(&resp).ok()?;
+            value
+                .get("version")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        }
+        "crates.io" => {
+            let url = format!("https://crates.io/api/v1/crates/{}", dep.name);
+            let resp = crate::web::get(&url).ok()?;
+            let value: serde_json::Value = serde_json::from_str(&resp).ok()?;
+            value
+                .get("crate")
+                .and_then(|c| c.get("max_stable_version"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        }
+        "PyPI" => {
+            let url = format!("https://pypi.org/pypi/{}/json", dep.name);
+            let resp = crate::web::get(&url).ok()?;
+            let value: serde_json::Value = serde_json::from_str(&resp).ok()?;
+            value
+                .get("info")
+                .and_then(|i| i.get("version"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        }
+        "Go" => {
+            let url = format!("https://proxy.golang.org/{}/@latest", dep.name);
+            let resp = crate::web::get(&url).ok()?;
+            let value: serde_json::Value = serde_json::from_str(&resp).ok()?;
+            value
+                .get("Version")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        }
+        "Maven" => {
+            let (g, a) = dep.name.split_once(':')?;
+            let url = format!(
+                "https://search.maven.org/solrsearch/select?q=g:%22{}%22+AND+a:%22{}%22&rows=1&wt=json",
+                g, a
+            );
+            let resp = crate::web::get(&url).ok()?;
+            let value: serde_json::Value = serde_json::from_str(&resp).ok()?;
+            value
+                .get("response")
+                .and_then(|r| r.get("docs"))
+                .and_then(|d| d.as_array())
+                .and_then(|d| d.first())
+                .and_then(|doc| doc.get("latestVersion"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        }
+        "Packagist" => {
+            let url = format!("https://repo.packagist.org/p2/{}.json", dep.name);
+            let resp = crate::web::get(&url).ok()?;
+            let value: serde_json::Value = serde_json::from_str(&resp).ok()?;
+            value
+                .get("packages")
+                .and_then(|p| p.get(&dep.name))
+                .and_then(|v| v.as_array())
+                .and_then(|vers| {
+                    vers.iter().find(|entry| {
+                        entry
+                            .get("version")
+                            .and_then(|v| v.as_str())
+                            .map(|s| !s.contains("dev") && !s.contains("RC"))
+                            .unwrap_or(false)
+                    })
+                })
+                .and_then(|entry| entry.get("version"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim_start_matches('v').to_string())
+        }
+        _ => None,
     }
+}
+
+/// Every ecosystem label this guard knows, kept static so Dependency can
+/// borrow it for the lifetime of the check.
+fn canonical_ecosystem(eco: &str) -> &'static str {
+    match eco {
+        "npm" => "npm",
+        "crates.io" => "crates.io",
+        "Go" => "Go",
+        "PyPI" => "PyPI",
+        "Maven" => "Maven",
+        "Packagist" => "Packagist",
+        "RubyGems" => "RubyGems",
+        _ => "npm",
+    }
+}
+
+/// Range style requirements cannot be queried against OSV, only pinned
+/// versions prove a vulnerability. Ranges still get the latest check.
+fn is_exact_version(version: &str) -> bool {
+    !version.starts_with('>')
+        && !version.starts_with('<')
+        && !version.starts_with('~')
+        && !version.starts_with('^')
+        && !version.starts_with('!')
+        && !version.starts_with('=')
+        && !version.starts_with('*')
 }
 
 /// Run the dependency guard. Returns reports plus a network status flag.
@@ -469,17 +603,19 @@ pub fn check(root: &Path) -> (Vec<DepReport>, bool) {
     let mut network_ok = true;
     let mut checked = 0;
     for ((name, ecosystem), version) in &seen {
+        let eco = canonical_ecosystem(ecosystem);
         let dep = Dependency {
             name: name.clone(),
             version: version.clone(),
-            ecosystem: if ecosystem == "npm" {
-                "npm"
-            } else {
-                "crates.io"
-            },
+            ecosystem: eco,
         };
         checked += 1;
-        if let Some(vuln) = osv_check(&dep) {
+        let vuln = if is_exact_version(&dep.version) {
+            osv_check(&dep)
+        } else {
+            None
+        };
+        if let Some(vuln) = vuln {
             reports.push(DepReport {
                 severity: "critical".to_string(),
                 message: format!(
@@ -534,6 +670,20 @@ pub fn check(root: &Path) -> (Vec<DepReport>, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_go_mod() {
+        let text = "module example.com/myapp\n\ngo 1.22\n\nrequire (\n\tgithub.com/gin-gonic/gin v1.9.1\n\tgithub.com/go-sql-driver/mysql v1.7.1 // indirect\n)\n\nrequire golang.org/x/crypto v0.14.0\n\nreplace github.com/old => github.com/new v9.9.9\n";
+        let deps = parse_go_mod(text);
+        assert_eq!(deps.len(), 3);
+        assert_eq!(deps[0].name, "github.com/gin-gonic/gin");
+        assert_eq!(deps[0].version, "1.9.1");
+        assert_eq!(deps[0].ecosystem, "Go");
+        assert_eq!(deps[1].name, "github.com/go-sql-driver/mysql");
+        assert_eq!(deps[1].version, "1.7.1");
+        assert_eq!(deps[2].name, "golang.org/x/crypto");
+        assert_eq!(deps[2].version, "0.14.0");
+    }
 
     #[test]
     fn parses_cargo_toml() {
