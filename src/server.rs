@@ -86,9 +86,19 @@ fn handle(id: &Value, method: &str, params: &Value) {
                             "name": "spine.query",
                             "description": "Query the spine graph. Ask who calls a symbol, who imports a module, or where a symbol is defined.",
                             "inputSchema": { "type": "object", "properties": {
-                                "kind": { "type": "string", "enum": ["callers", "imports", "definition", "calls"] },
+                                "kind": { "type": "string", "enum": ["callers", "imports", "definition", "calls", "search"] },
                                 "name": { "type": "string" }
                             }, "required": ["kind", "name"] }
+                        },
+                        {
+                            "name": "spine.describe",
+                            "description": "Read the whole workspace manifest in one shot. Languages, symbol counts, entrypoints, hubs and doc coverage per language.",
+                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" } } }
+                        },
+                        {
+                            "name": "spine.neighbors",
+                            "description": "Show every side of a symbol, definition with its captured doc, callers and calls out.",
+                            "inputSchema": { "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"] }
                         },
                         {
                             "name": "harmony.check",
@@ -241,10 +251,144 @@ fn handle(id: &Value, method: &str, params: &Value) {
                                 lines.join("\n")
                             }
                         }
-                        _ => "unknown query kind. use callers, imports, definition or calls"
-                            .to_string(),
+                        "search" => match spine::search(&std::path::PathBuf::from(&root), name) {
+                            Ok(hits) if hits.is_empty() => {
+                                format!("no symbol matches {}", name)
+                            }
+                            Ok(hits) => {
+                                let mut lines: Vec<String> = vec![format!("{} hit(s)", hits.len())];
+                                for h in hits {
+                                    let doc = if h.doc.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!(", doc {}", h.doc)
+                                    };
+                                    lines.push(format!(
+                                        "{} ({} {}) at {}:{}{}",
+                                        h.name, h.kind, name, h.file, h.line, doc
+                                    ));
+                                }
+                                lines.join("\n")
+                            }
+                            Err(e) => e,
+                        },
+                        _ => {
+                            "unknown query kind. use callers, imports, definition, calls or search"
+                                .to_string()
+                        }
                     };
                     ok(id, text_result(out));
+                }
+                "spine.neighbors" => {
+                    let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    let graph = match load_graph(&root) {
+                        Ok(g) => g,
+                        Err(e) => {
+                            err(id, 1, &e);
+                            return;
+                        }
+                    };
+                    let symbols = graph.symbols_named(name);
+                    if symbols.is_empty() {
+                        ok(
+                            id,
+                            text_result(format!("no symbol named {} in the spine", name)),
+                        );
+                        return;
+                    }
+                    let mut lines: Vec<String> = Vec::new();
+                    for s in &symbols {
+                        lines.push(format!(
+                            "{} defined at {}:{} (kind {})",
+                            s.name, s.file, s.line, s.kind
+                        ));
+                        if !s.doc.is_empty() {
+                            lines.push(format!("doc {}", s.doc));
+                        }
+                    }
+                    let callers = graph.callers_of(name);
+                    if !callers.is_empty() {
+                        lines.push(format!("{} caller(s)", callers.len()));
+                        for c in callers {
+                            lines.push(format!(
+                                "{} calls {} at {}:{}",
+                                c.caller, c.callee, c.file, c.line
+                            ));
+                        }
+                    }
+                    let calls = graph.calls_from(name);
+                    if !calls.is_empty() {
+                        lines.push(format!("{} call(s) out", calls.len()));
+                        for c in calls {
+                            lines.push(format!(
+                                "{} calls {} at {}:{}",
+                                c.caller, c.callee, c.file, c.line
+                            ));
+                        }
+                    }
+                    ok(id, text_result(lines.join("\n")));
+                }
+                "spine.describe" => {
+                    let graph = match load_graph(&root) {
+                        Ok(g) => g,
+                        Err(e) => {
+                            err(id, 1, &e);
+                            return;
+                        }
+                    };
+                    let mut langs: Vec<&str> =
+                        graph.files.iter().map(|f| f.lang.as_str()).collect();
+                    langs.sort_unstable();
+                    langs.dedup();
+                    let mut lines: Vec<String> = vec![format!(
+                        "files {}, symbols {}, call edges {}, imports {}",
+                        graph.files.len(),
+                        graph.symbols.len(),
+                        graph.calls.len(),
+                        graph.imports.len()
+                    )];
+                    lines.push(format!("languages {}", langs.join(", ")));
+                    // Named entrypoints, functions that launch a program.
+                    let named = [
+                        "main", "run", "start", "handler", "index", "serve", "listen",
+                    ];
+                    let is_fn = |k: &str| k.contains("function") || k.contains("method");
+                    let entries: Vec<&str> = graph
+                        .symbols
+                        .iter()
+                        .filter(|s| named.contains(&s.name.as_str()) && is_fn(&s.kind))
+                        .map(|s| s.name.as_str())
+                        .collect();
+                    if !entries.is_empty() {
+                        lines.push(format!("entrypoints {}", entries.join(", ")));
+                    }
+                    // Hubs, the most wired symbols, calls in plus calls out.
+                    let mut degree: Vec<(String, usize)> = Vec::new();
+                    for s in &graph.symbols {
+                        if s.kind.contains("function") || s.kind.contains("method") {
+                            let d =
+                                graph.callers_of(&s.name).len() + graph.calls_from(&s.name).len();
+                            degree.push((s.name.clone(), d));
+                        }
+                    }
+                    degree.sort_by_key(|(_, d)| std::cmp::Reverse(*d));
+                    let hubs: Vec<String> = degree
+                        .iter()
+                        .take(5)
+                        .filter(|(_, d)| *d > 0)
+                        .map(|(n, d)| format!("{} {}", n, d))
+                        .collect();
+                    if !hubs.is_empty() {
+                        lines.push(format!("hubs {}", hubs.join(", ")));
+                    }
+                    // Doc coverage per language, the loop closes itself.
+                    for lang in &langs {
+                        let syms: Vec<_> =
+                            graph.symbols.iter().filter(|s| &s.lang == lang).collect();
+                        let with_doc = syms.iter().filter(|s| !s.doc.is_empty()).count();
+                        lines.push(format!("doc coverage {} {}/{}", lang, with_doc, syms.len()));
+                    }
+                    ok(id, text_result(lines.join("\n")));
                 }
                 "harmony.check" => {
                     let graph = match load_graph(&root) {

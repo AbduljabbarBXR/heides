@@ -89,7 +89,9 @@ fn main() -> ExitCode {
             let kind = args.get(2).map(|s| s.as_str()).unwrap_or("");
             let name = args.get(3).map(|s| s.as_str()).unwrap_or("");
             if kind.is_empty() || name.is_empty() {
-                println!("usage. heides query [callers|imports|definition|calls|neighbors] [name]");
+                println!(
+                    "usage. heides query [callers|imports|definition|calls|neighbors|search] [name]"
+                );
                 return ExitCode::FAILURE;
             }
             let graph = match indexer::load_or_build(&root) {
@@ -196,9 +198,35 @@ fn main() -> ExitCode {
                         }
                     }
                 }
+                "search" => {
+                    let hits = spine::search(&root, name);
+                    match hits {
+                        Ok(hits) if hits.is_empty() => {
+                            println!("no symbol matches {}", name);
+                        }
+                        Ok(hits) => {
+                            println!("{} hit(s)", hits.len());
+                            for h in hits {
+                                let doc = if h.doc.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(", doc {}", h.doc)
+                                };
+                                println!(
+                                    "{} ({} {}) at {}:{}{}",
+                                    h.name, h.kind, name, h.file, h.line, doc
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            println!("{}", e);
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                }
                 _ => {
                     println!(
-                        "unknown query kind. use callers, imports, definition, calls or neighbors"
+                        "unknown query kind. use callers, imports, definition, calls, neighbors or search"
                     );
                     return ExitCode::FAILURE;
                 }

@@ -367,6 +367,86 @@ fn enclosing_function(node: Node, content: &str) -> Option<String> {
     None
 }
 
+/// True when a value node kind is captured for this language. Rust owned
+/// the value capture until every grammar got its own extraction path, the
+/// matrix below is that path, one language at a time.
+fn value_allowed(lang: &str, kind: &str) -> bool {
+    match lang {
+        "rust" => matches!(kind, "enum_variant" | "field_declaration"),
+        "go" => matches!(kind, "field_declaration" | "const_spec" | "var_spec"),
+        "java" => matches!(kind, "field_declaration" | "constant_declaration"),
+        "csharp" => matches!(kind, "field_declaration" | "enum_member_declaration"),
+        "javascript" | "typescript" => {
+            matches!(kind, "field_definition" | "public_field_definition")
+        }
+        _ => false,
+    }
+}
+
+/// Value node names, extracted per grammar so the type first languages
+/// never name their own type. Java and csharp fields declare inside
+/// declarator children, go const and var specs carry a name field, js
+/// class fields carry a property name, rust fields are one identifier.
+fn value_names_of(node: Node, content: &str, lang: &str) -> Vec<String> {
+    let kind = node.kind();
+    match lang {
+        "rust" => name_of(node, content).into_iter().collect(),
+        "go" => {
+            let mut names: Vec<String> = Vec::new();
+            if let Some(n) = field_text(node, content, "name") {
+                names.push(n);
+            } else if kind == "field_declaration" {
+                // Anonymous layout fields, embed a type name like io.Reader.
+                for child in node.children(&mut node.walk()) {
+                    if matches!(child.kind(), "type_identifier" | "qualified_type")
+                        && let Some(n) = clean_param_name(&text(child, content))
+                    {
+                        names.push(n);
+                    }
+                }
+            }
+            names
+        }
+        "java" | "csharp" => {
+            let mut names: Vec<String> = Vec::new();
+            for child in node.children(&mut node.walk()) {
+                if child.kind() == "variable_declarator" {
+                    if let Some(n) = field_text(child, content, "name")
+                        .or_else(|| clean_param_name(&text(child, content)))
+                    {
+                        names.push(n);
+                    }
+                } else if child.kind() == "variable_declaration" {
+                    // C# wraps the declarator inside a declaration node.
+                    for d in child.children(&mut child.walk()) {
+                        if d.kind() == "variable_declarator"
+                            && let Some(n) = field_text(d, content, "name")
+                        {
+                            names.push(n);
+                        }
+                    }
+                }
+            }
+            names
+        }
+        "javascript" | "typescript" => {
+            let mut names: Vec<String> = Vec::new();
+            for child in node.children(&mut node.walk()) {
+                if matches!(
+                    child.kind(),
+                    "property_identifier" | "private_property_identifier" | "identifier"
+                ) && let Some(n) = clean_param_name(&text(child, content))
+                {
+                    names.push(n);
+                    break;
+                }
+            }
+            names
+        }
+        _ => Vec::new(),
+    }
+}
+
 const SYMBOL_KINDS: &[&str] = &[
     "function_item",
     "function_declaration",
@@ -396,6 +476,12 @@ const SYMBOL_KINDS: &[&str] = &[
     // holds, so names stay exact and the index stays clean.
     "enum_variant",
     "field_declaration",
+    "const_spec",
+    "var_spec",
+    "field_definition",
+    "public_field_definition",
+    "constant_declaration",
+    "enum_member_declaration",
 ];
 
 /// Never descend deeper than this into the syntax tree. Real code nests
@@ -518,37 +604,51 @@ fn walk(
     let line = node.start_position().row as u64 + 1;
 
     // Symbols
-    let value_kind = kind == "enum_variant" || kind == "field_declaration";
-    // Value symbols are only captured in grammars where the declaration
-    // node carries its name before its type. Today that is rust, where an
-    // enum variant or struct field is one node with the identifier first.
-    // Other grammars use the same node kind with the type first, so they
-    // stay out of the map until their own extraction lands.
-    if SYMBOL_KINDS.contains(&kind)
-        && (!value_kind || out.lang == "rust")
-        && let Some(name) = name_of(node, content)
-    {
-        let sig = if kind.contains("function") || kind == "method_definition" {
-            signature_of(node, content)
+    let value_kind = matches!(
+        kind,
+        "enum_variant"
+            | "field_declaration"
+            | "const_spec"
+            | "var_spec"
+            | "field_definition"
+            | "constant_declaration"
+            | "enum_member_declaration"
+    );
+    if SYMBOL_KINDS.contains(&kind) && (!value_kind || value_allowed(&out.lang, kind)) {
+        // Value names need grammar aware extraction. Type first languages
+        // like java and csharp put the type before the name in the same
+        // node, so a generic first identifier scan would name the type.
+        let names: Vec<String> = if value_kind {
+            value_names_of(node, content, &out.lang)
         } else {
-            String::new()
+            name_of(node, content).into_iter().collect()
         };
-        // Value symbols keep tidy kinds instead of raw grammar names so
-        // queries and practice guards read intent, never parser noise.
-        let kind_out = match kind {
-            "field_declaration" => "field",
-            _ => kind,
-        };
-        out.symbols.push(Symbol {
-            name: name.clone(),
-            kind: kind_out.to_string(),
-            file: path.display().to_string(),
-            line,
-            lang: out.lang.clone(),
-            signature: sig,
-            params: params_of(node, content),
-            doc: doc_above(content, line, &out.lang),
-        });
+        for name in names {
+            let sig = if kind.contains("function") || kind == "method_definition" {
+                signature_of(node, content)
+            } else {
+                String::new()
+            };
+            // Value symbols keep tidy kinds instead of raw grammar names so
+            // queries and practice guards read intent, never parser noise.
+            let kind_out = match kind {
+                "field_declaration" | "field_definition" | "public_field_definition" => "field",
+                "constant_declaration" | "const_spec" => "constant",
+                "var_spec" => "variable",
+                "enum_member_declaration" => "enum_variant",
+                _ => kind,
+            };
+            out.symbols.push(Symbol {
+                name: name.clone(),
+                kind: kind_out.to_string(),
+                file: path.display().to_string(),
+                line,
+                lang: out.lang.clone(),
+                signature: sig,
+                params: params_of(node, content),
+                doc: doc_above(content, line, &out.lang),
+            });
+        }
     }
 
     // Arrow functions assigned to const / let / var: a function symbol.
@@ -946,6 +1046,54 @@ fn main() {
         let e = parsed.symbols.iter().find(|s| s.name == "Color").unwrap();
         assert_eq!(e.doc, "A color palette.");
         assert!(variants.iter().all(|s| s.signature.is_empty()));
+    }
+
+    #[test]
+    #[allow(clippy::type_complexity)]
+    fn value_symbols_capture_in_go_java_csharp_and_typescript() {
+        let cases: &[(&str, &str, &[(&str, &str)])] = &[
+            (
+                "probe.go",
+                "package main\n\nconst API_KEY = \"abc\"\nvar Port = 8080\n\ntype User struct {\n\tName string\n\tAdmin bool\n}\n",
+                &[
+                    ("constant", "API_KEY"),
+                    ("variable", "Port"),
+                    ("field", "Name"),
+                    ("field", "Admin"),
+                ],
+            ),
+            (
+                "Probe.java",
+                "public class Probe {\n    public static final String KEY = \"abc\";\n    private int count;\n}\n",
+                &[("field", "KEY"), ("field", "count")],
+            ),
+            (
+                "Thing.cs",
+                "public class Thing {\n    public const string KEY = \"abc\";\n    private int count;\n}\n",
+                &[("field", "KEY"), ("field", "count")],
+            ),
+            (
+                "probe.ts",
+                "class Thing {\n  name = \"\";\n  static KEY = \"abc\";\n}\n",
+                &[("field", "name"), ("field", "KEY")],
+            ),
+        ];
+        for (file, src, want) in cases {
+            let p = std::path::Path::new(file);
+            let parsed = parse_file(p, src).unwrap();
+            for (kind, name) in *want {
+                assert!(
+                    parsed
+                        .symbols
+                        .iter()
+                        .any(|s| s.kind == *kind && s.name == *name),
+                    "{} missing {} {}",
+                    file,
+                    kind,
+                    name
+                );
+            }
+        }
     }
 
     #[test]

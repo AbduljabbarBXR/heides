@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, params};
 
-pub const INDEX_VERSION: u32 = 5;
+pub const INDEX_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Symbol {
@@ -235,7 +235,10 @@ fn open_db(root: &Path) -> Result<Connection, String> {
          CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file);
          CREATE INDEX IF NOT EXISTS idx_calls_callee ON calls(callee);
          CREATE INDEX IF NOT EXISTS idx_calls_caller ON calls(caller);
-         CREATE INDEX IF NOT EXISTS idx_imports_imported ON imports(imported);",
+         CREATE INDEX IF NOT EXISTS idx_imports_imported ON imports(imported);
+         CREATE VIRTUAL TABLE IF NOT EXISTS search USING fts5(
+             name, kind, signature, doc, file, line
+         );",
     )
     .map_err(|e| e.to_string())?;
     Ok(conn)
@@ -248,7 +251,8 @@ pub fn save(graph: &CodeGraph, root: &Path) -> Result<(), String> {
     let mut conn = open_db(root)?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     tx.execute_batch(
-        "DELETE FROM files; DELETE FROM symbols; DELETE FROM calls; DELETE FROM imports;",
+        "DELETE FROM files; DELETE FROM symbols; DELETE FROM calls; DELETE FROM imports;\
+         DELETE FROM search;",
     )
     .map_err(|e| e.to_string())?;
     {
@@ -301,6 +305,25 @@ pub fn save(graph: &CodeGraph, root: &Path) -> Result<(), String> {
         for im in &graph.imports {
             ins_import
                 .execute(params![im.file, im.imported, im.line as i64])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    {
+        let mut ins_search = tx
+            .prepare(
+                "INSERT INTO search(name, kind, signature, doc, file, line) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )
+            .map_err(|e| e.to_string())?;
+        for s in &graph.symbols {
+            ins_search
+                .execute(params![
+                    s.name,
+                    s.kind,
+                    s.signature,
+                    s.doc,
+                    s.file,
+                    s.line as i64
+                ])
                 .map_err(|e| e.to_string())?;
         }
     }
@@ -520,4 +543,53 @@ mod tests {
         assert!(err.contains("rescan needed"), "unexpected error: {err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// One text search hit, a symbol row whose name, kind, signature or doc
+/// matched the query.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SearchHit {
+    pub name: String,
+    pub kind: String,
+    pub file: String,
+    pub line: u64,
+    pub doc: String,
+}
+
+/// Free text search over names, kinds, signatures and docs. Every word
+/// becomes its own quoted phrase, so user input can never smuggle FTS5
+/// query syntax in or out, and words match anywhere in any column.
+pub fn search(root: &Path, query: &str) -> Result<Vec<SearchHit>, String> {
+    let conn = open_db(root)?;
+    let phrase: Vec<String> = query
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|w| !w.is_empty())
+        .map(|w| format!("\"{}\"", w.to_ascii_lowercase()))
+        .collect();
+    if phrase.is_empty() {
+        return Err("empty search query".to_string());
+    }
+    let match_q = phrase.join(" ");
+    let mut stmt = conn
+        .prepare(
+            "SELECT name, kind, file, line, doc FROM search \
+             WHERE search MATCH ?1 ORDER BY rank LIMIT 25",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![match_q], |r| {
+            Ok(SearchHit {
+                name: r.get(0)?,
+                kind: r.get(1)?,
+                file: r.get(2)?,
+                line: r.get::<_, i64>(3)? as u64,
+                doc: r.get(4)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut hits = Vec::new();
+    for row in rows {
+        hits.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(hits)
 }
