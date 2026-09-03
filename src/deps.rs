@@ -272,6 +272,10 @@ fn collect_manifests(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     if pyproject.exists() {
         out.push(pyproject);
     }
+    let pom = dir.join("pom.xml");
+    if pom.exists() {
+        out.push(pom);
+    }
     if depth == 0 {
         return;
     }
@@ -318,6 +322,9 @@ pub fn read_manifests(root: &Path) -> Vec<Dependency> {
                 .unwrap_or_default(),
             Some("pyproject.toml") => std::fs::read_to_string(&file)
                 .map(|t| parse_pyproject_toml(&t))
+                .unwrap_or_default(),
+            Some("pom.xml") => std::fs::read_to_string(&file)
+                .map(|t| parse_pom_xml(&t))
                 .unwrap_or_default(),
             _ => Vec::new(),
         };
@@ -495,6 +502,67 @@ fn split_quoted_list(body: &str) -> Vec<String> {
         out.push(entry);
     }
     out
+}
+
+/// Read one xml tag pair from a single line, so dependency blocks that
+/// keep each element on its own line are enough.
+fn xml_tag(line: &str, tag: &str) -> Option<String> {
+    let open = format!("<{}>", tag);
+    let close = format!("</{}>", tag);
+    let start = line.find(&open)?;
+    let rest = &line[start + open.len()..];
+    let end = rest.find(&close)?;
+    let val = rest[..end].trim().to_string();
+    if val.is_empty() { None } else { Some(val) }
+}
+
+/// Parse pom.xml dependency coordinates. Versions resolved through
+/// properties are unknown at parse time and stay silent.
+fn parse_pom_xml(text: &str) -> Vec<Dependency> {
+    let mut deps = Vec::new();
+    let mut group = String::new();
+    let mut artifact = String::new();
+    let mut version = String::new();
+    let mut in_dep = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t == "<dependency>" {
+            in_dep = true;
+            group.clear();
+            artifact.clear();
+            version.clear();
+            continue;
+        }
+        if t == "</dependency>" {
+            // Property resolved versions are unknown, dropping them stays
+            // silent rather than guessing.
+            if in_dep && !artifact.is_empty() && !version.is_empty() {
+                let v = std::mem::take(&mut version);
+                deps.push(Dependency {
+                    name: format!("{}:{}", group, artifact),
+                    version: v,
+                    ecosystem: "Maven",
+                });
+            }
+            in_dep = false;
+            continue;
+        }
+        if !in_dep {
+            continue;
+        }
+        if let Some(v) = xml_tag(t, "groupId") {
+            group = v;
+        } else if let Some(v) = xml_tag(t, "artifactId") {
+            artifact = v;
+        } else if let Some(v) = xml_tag(t, "version") {
+            // Versions resolved through properties are unknown at parse
+            // time and stay silent.
+            if !v.contains('$') && !v.contains('{') {
+                version = v;
+            }
+        }
+    }
+    deps
 }
 
 fn parse_cargo_toml(text: &str) -> Vec<Dependency> {
@@ -849,6 +917,16 @@ mod tests {
         assert_eq!(deps.len(), 2);
         assert_eq!(deps[1].name, "sqlalchemy");
         assert_eq!(deps[1].version, "2.0.29");
+    }
+
+    #[test]
+    fn parses_pom_xml() {
+        let pom = "<project>\n  <dependencies>\n    <dependency>\n      <groupId>com.google.guava</groupId>\n      <artifactId>guava</artifactId>\n      <version>31.1-jre</version>\n    </dependency>\n    <dependency>\n      <groupId>org.apache.logging.log4j</groupId>\n      <artifactId>log4j-core</artifactId>\n      <version>${log4j.version}</version>\n    </dependency>\n  </dependencies>\n</project>\n";
+        let deps = parse_pom_xml(pom);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].name, "com.google.guava:guava");
+        assert_eq!(deps[0].version, "31.1-jre");
+        assert_eq!(deps[0].ecosystem, "Maven");
     }
 
     #[test]
