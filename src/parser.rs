@@ -207,11 +207,11 @@ fn css_imports(parsed: &mut ParsedFile, root: Node, content: &str, file: &str) {
             let t = text(node, content);
             let mut target: Option<String> = None;
             for (q, m) in [('"', '"'), ('\'', '\'')] {
-                if let Some(a) = t.find(q) {
-                    if let Some(b) = t[a + 1..].find(m) {
-                        target = Some(t[a + 1..a + 1 + b].to_string());
-                        break;
-                    }
+                if let Some(a) = t.find(q)
+                    && let Some(b) = t[a + 1..].find(m)
+                {
+                    target = Some(t[a + 1..a + 1 + b].to_string());
+                    break;
                 }
             }
             if let Some(target) = target
@@ -250,23 +250,24 @@ fn web_imports(parsed: &mut ParsedFile, root: Node, content: &str, file: &str) {
             {
                 let rest = &t[a + 3..];
                 for (q, m) in [('"', '"'), ('\'', '\'')] {
-                    if let Some(x) = rest.find(q) {
-                        if let Some(y) = rest[x + 1..].find(m) {
-                            target = Some(rest[x + 1..x + 1 + y].to_string());
-                            break;
-                        }
+                    if let Some(x) = rest.find(q)
+                        && let Some(y) = rest[x + 1..].find(m)
+                    {
+                        target = Some(rest[x + 1..x + 1 + y].to_string());
+                        break;
                     }
                 }
-            } else if lower.starts_with("<link") && lower.contains("stylesheet") {
-                if let Some(a) = lower.find("href") {
-                    let rest = &t[a + 4..];
-                    for (q, m) in [('"', '"'), ('\'', '\'')] {
-                        if let Some(x) = rest.find(q) {
-                            if let Some(y) = rest[x + 1..].find(m) {
-                                target = Some(rest[x + 1..x + 1 + y].to_string());
-                                break;
-                            }
-                        }
+            } else if lower.starts_with("<link")
+                && lower.contains("stylesheet")
+                && let Some(a) = lower.find("href")
+            {
+                let rest = &t[a + 4..];
+                for (q, m) in [('"', '"'), ('\'', '\'')] {
+                    if let Some(x) = rest.find(q)
+                        && let Some(y) = rest[x + 1..].find(m)
+                    {
+                        target = Some(rest[x + 1..x + 1 + y].to_string());
+                        break;
                     }
                 }
             }
