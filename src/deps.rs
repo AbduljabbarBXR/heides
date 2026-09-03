@@ -834,18 +834,6 @@ fn canonical_ecosystem(eco: &str) -> &'static str {
     }
 }
 
-/// Range style requirements cannot be queried against OSV, only pinned
-/// versions prove a vulnerability. Ranges still get the latest check.
-fn is_exact_version(version: &str) -> bool {
-    !version.starts_with('>')
-        && !version.starts_with('<')
-        && !version.starts_with('~')
-        && !version.starts_with('^')
-        && !version.starts_with('!')
-        && !version.starts_with('=')
-        && !version.starts_with('*')
-}
-
 /// Run the dependency guard. Returns reports plus a network status flag.
 pub fn check(root: &Path) -> (Vec<DepReport>, bool) {
     let deps = read_manifests(root);
@@ -880,11 +868,7 @@ pub fn check(root: &Path) -> (Vec<DepReport>, bool) {
             ecosystem: eco,
         };
         checked += 1;
-        let vuln = if is_exact_version(&dep.version) {
-            osv_check(&dep)
-        } else {
-            None
-        };
+        let vuln = osv_check(&dep);
         if let Some(vuln) = vuln {
             reports.push(DepReport {
                 severity: "critical".to_string(),
