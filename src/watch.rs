@@ -13,9 +13,12 @@ use crate::spine::CodeGraph;
 /// Watch the workspace for changes.
 /// Runs for at most max_checks polls (None means forever).
 /// Returns the number of reindex events observed.
-pub fn watch(root: &Path, max_checks: Option<u64>, delay_secs: u64) -> u64 {
+pub fn watch(root: &Path, max_checks: Option<u64>, delay_secs: u64, ui: &crate::ui::Ui) -> u64 {
     let mut last = indexer::load_or_build(root).unwrap_or_else(|_| CodeGraph::new());
     println!("watch started on {}", root.display());
+    if ui.progress {
+        eprintln!("watching, local guards run on every change");
+    }
     let mut changes = 0u64;
     let mut checks = 0u64;
     loop {
@@ -38,6 +41,21 @@ pub fn watch(root: &Path, max_checks: Option<u64>, delay_secs: u64) -> u64 {
                 touched,
                 current.symbols.len()
             );
+            if ui.progress {
+                let reports = crate::harmony::check_workspace_local(&current);
+                let b = reports.iter().filter(|r| r.severity == "blocker").count();
+                let c = reports.iter().filter(|r| r.severity == "critical").count();
+                let w = reports.iter().filter(|r| r.severity == "warning").count();
+                let i = reports.iter().filter(|r| r.severity == "info").count();
+                eprintln!(
+                    "watch reindexed {} files, {} blocker(s), {} critical, {} warning(s), {} info",
+                    touched,
+                    ui.count("blocker", b),
+                    ui.count("critical", c),
+                    ui.count("warning", w),
+                    ui.count("info", i)
+                );
+            }
             last = current;
         }
     }

@@ -573,7 +573,7 @@ fn main() -> ExitCode {
         "watch" => {
             let root = PathBuf::from(arg2);
             let max = args.get(3).and_then(|s| s.parse::<u64>().ok());
-            watch::watch(&root, max, 2);
+            watch::watch(&root, max, 2, &ui);
             ExitCode::SUCCESS
         }
         "mcp" => server::run(),

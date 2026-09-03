@@ -20,8 +20,35 @@ pub struct GuardReport {
 
 /// Run the full workspace check: taint, edge cases, practices, dependencies.
 pub fn check_workspace(root: &Path, graph: &CodeGraph) -> Vec<GuardReport> {
-    let mut reports = Vec::new();
+    let mut reports = check_workspace_without_deps(graph);
 
+    let (dep_reports, network_ok) = crate::deps::check(root);
+    for r in dep_reports {
+        reports.push(GuardReport {
+            guard: "dependency".to_string(),
+            severity: r.severity,
+            message: r.message,
+            file: r.file,
+            line: r.line,
+        });
+    }
+    if !network_ok {
+        reports.push(GuardReport {
+            guard: "dependency".to_string(),
+            severity: "info".to_string(),
+            message: "network was unavailable for the dependency check. results are partial."
+                .to_string(),
+            file: String::new(),
+            line: 0,
+        });
+    }
+
+    reports
+}
+
+/// The shared local guard body behind check_workspace and the report tool.
+pub fn check_workspace_without_deps(graph: &CodeGraph) -> Vec<GuardReport> {
+    let mut reports = Vec::new();
     // Read every indexed file once. The intra guards and the interprocedural
     // taint pass share the same contents so nothing is parsed twice.
     let mut contents: HashMap<String, String> = HashMap::new();
@@ -87,28 +114,12 @@ pub fn check_workspace(root: &Path, graph: &CodeGraph) -> Vec<GuardReport> {
         });
     }
 
-    let (dep_reports, network_ok) = crate::deps::check(root);
-    for r in dep_reports {
-        reports.push(GuardReport {
-            guard: "dependency".to_string(),
-            severity: r.severity,
-            message: r.message,
-            file: r.file,
-            line: r.line,
-        });
-    }
-    if !network_ok {
-        reports.push(GuardReport {
-            guard: "dependency".to_string(),
-            severity: "info".to_string(),
-            message: "network was unavailable for the dependency check. results are partial."
-                .to_string(),
-            file: String::new(),
-            line: 0,
-        });
-    }
-
     reports
+}
+
+/// The local guards only, no network, for live watch deltas.
+pub fn check_workspace_local(graph: &CodeGraph) -> Vec<GuardReport> {
+    check_workspace_without_deps(graph)
 }
 
 /// Check a proposed patch against the workspace before it is applied.
