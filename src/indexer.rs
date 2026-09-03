@@ -34,6 +34,7 @@ fn skip_dir(name: &str) -> bool {
             | "temp"
             | "dist"
             | "build"
+            | "out"
     )
 }
 
