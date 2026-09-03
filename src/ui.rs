@@ -75,8 +75,8 @@ impl Ui {
         }
     }
 
-    /// Wrap one count in green when the bucket is clear, red or yellow
-    /// when it holds findings, used by the grouped guard view.
+    /// Wrap one count token in green for zero, red for anything that
+    /// blocks, used by the grouped guard view.
     pub fn count(&self, label: &str, n: usize) -> String {
         let code = match label {
             "blocker" | "critical" => {
@@ -100,6 +100,79 @@ impl Ui {
             format!("\x1b[{}m{}\x1b[0m", code, n)
         } else {
             format!("{}", n)
+        }
+    }
+}
+
+/// A running pulse for long lived commands. Only exists when progress is
+/// allowed, writes exclusively to stderr, ticks once a second with a
+/// carriage return, and clears its own line when the operation ends.
+pub struct Stopwatch {
+    ui: Ui,
+    what: String,
+    start: std::time::Instant,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ticker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Stopwatch {
+    pub fn start(ui: &Ui, what: &str) -> Option<Stopwatch> {
+        if !ui.progress {
+            return None;
+        }
+        eprintln!("{} running", what);
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop2 = std::sync::Arc::clone(&stop);
+        let started = std::time::Instant::now();
+        let what_owned = what.to_string();
+        let ticker = std::thread::spawn(move || {
+            while !stop2.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                if stop2.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                let secs = started.elapsed().as_secs();
+                eprint!("\r\x1b[2K{} running for {}s", what_owned, secs);
+            }
+        });
+        Some(Stopwatch {
+            ui: *ui,
+            what: what.to_string(),
+            start: std::time::Instant::now(),
+            stop,
+            ticker: Some(ticker),
+        })
+    }
+
+    /// Stop the pulse and report the elapsed time on stderr when the
+    /// operation took at least a second.
+    pub fn finish(mut self) {
+        let secs = self.start.elapsed().as_secs_f64();
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(t) = self.ticker.take() {
+            let _ = t.join();
+        }
+        let clear = if self.ui.progress { "\r\x1b[2K" } else { "" };
+        if secs >= 1.0 {
+            let colored = if self.ui.color {
+                "\x1b[32m".to_string()
+            } else {
+                String::new()
+            };
+            let reset = if self.ui.color { "\x1b[0m" } else { "" };
+            eprintln!(
+                "{}{} finished in {:.1}s{}{}",
+                clear, colored, secs, reset, self.what
+            );
+        }
+    }
+}
+
+impl Drop for Stopwatch {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(t) = self.ticker.take() {
+            let _ = t.join();
         }
     }
 }

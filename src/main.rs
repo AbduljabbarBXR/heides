@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use heides::{deps, grounding, harmony, indexer, server, spine, ui::Ui, watch};
+use heides::{deps, grounding, harmony, indexer, server, spine, ui::Stopwatch, ui::Ui, watch};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -51,9 +51,13 @@ fn main() -> ExitCode {
                 Ok(g) => g,
                 Err(_) => spine::CodeGraph::new(),
             };
+            let pulse = Stopwatch::start(&ui, "scan");
             let touched = indexer::update_graph(&root, &mut graph);
             match spine::save(&graph, &root) {
                 Ok(()) => {
+                    if let Some(p) = pulse {
+                        p.finish();
+                    }
                     println!(
                         "spine indexed {} files, {} symbols, {} call edges, {} imports ({} touched)",
                         graph.files.len(),
@@ -247,6 +251,7 @@ fn main() -> ExitCode {
         }
         "check" => {
             let root = PathBuf::from(arg2);
+            let pulse = Stopwatch::start(&ui, "check");
             let graph = match indexer::load_or_build(&root) {
                 Ok(g) => g,
                 Err(e) => {
@@ -255,6 +260,9 @@ fn main() -> ExitCode {
                 }
             };
             let reports = harmony::check_workspace(&root, &graph);
+            if let Some(p) = pulse {
+                p.finish();
+            }
             if reports.is_empty() {
                 println!("no findings. the workspace is clean.");
             } else {
@@ -380,7 +388,11 @@ fn main() -> ExitCode {
         }
         "deps" => {
             let root = PathBuf::from(arg2);
+            let pulse = Stopwatch::start(&ui, "deps check");
             let (reports, _network) = deps::check(&root);
+            if let Some(p) = pulse {
+                p.finish();
+            }
             if reports.is_empty() {
                 println!("no dependency findings");
             } else {
