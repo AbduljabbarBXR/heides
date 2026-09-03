@@ -2,6 +2,19 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.8.1
+
+* guard phase performance, source line checks memoized and the propagation queue deduped with a hash set, django check 52 to 46 seconds, the largest graphs no longer reprocess
+* doc eyes and taint engine hardening, attribute and decorator transparent doc capture, describe reports coverage per language, scaffolds documented from birth
+* named arguments bind by parameter name, python keywords and csharp and php 8 named syntax
+* python and javascript bare parameters captured, function flows in those languages were dead since schema v4
+* duplicate definitions merge when every candidate binds the flow identically, ambiguity stays silent
+* value symbols in go java csharp and javascript, fields and constants now part of the map
+* MCP server grew to ten tools, spine.describe and spine.neighbors plus a search kind on spine.query
+* FTS5 text search over names, kinds, signatures and docs, index schema v6
+* export command writes one self contained code map file with a presence ledger, every walked file visible, indexed or not
+* credential rule no longer fires on field label defaults, proven on the django tree
+
 ## 0.8.0
 
 * the index becomes the agent's eyes, stored in sqlite at .heides/index.db, schema v5, transactional writes, WAL concurrency, agent readable by any sqlite client

@@ -417,6 +417,40 @@ fn main() -> ExitCode {
                         md.push_str(&format!("{} {}/{}\n", lang, with_doc, syms.len()));
                     }
                     md.push_str(&format!("all {}/{}\n", total_doc, graph.symbols.len()));
+                    // Presence ledger, every file the walker saw. Indexed
+                    // files have map sheets below, the rest are listed with
+                    // their size and reason, nothing is invisible.
+                    let seen: std::collections::HashSet<String> = graph
+                        .files
+                        .iter()
+                        .map(|f| f.path.trim_start_matches("./").to_string())
+                        .collect();
+                    let walked = indexer::collect_files(&root);
+                    let mut unindexed: Vec<(String, u64)> = Vec::new();
+                    for p in walked {
+                        let key = p.display().to_string().trim_start_matches("./").to_string();
+                        if seen.contains(&key) {
+                            continue;
+                        }
+                        let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+                        unindexed.push((key, size));
+                    }
+                    unindexed.sort();
+                    md.push_str(&format!(
+                        "\n## presence\n\n{} file(s) walked, {} indexed, {} not indexed, only source files in the eight languages under 1MB are mapped, the ledger keeps every other file visible\n",
+                        seen.len() + unindexed.len(),
+                        seen.len(),
+                        unindexed.len()
+                    ));
+                    if !unindexed.is_empty() {
+                        md.push_str("\n## unindexed files\n\n");
+                        for (p, size) in unindexed.iter().take(500) {
+                            md.push_str(&format!("- {} ({} bytes)\n", p, size));
+                        }
+                        if unindexed.len() > 500 {
+                            md.push_str(&format!("- and {} more\n", unindexed.len() - 500));
+                        }
+                    }
                     // Files sorted by path, each with its own symbol and
                     // edge inventory, a section per file reads like a map
                     // sheet.
