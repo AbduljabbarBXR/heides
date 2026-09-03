@@ -89,7 +89,7 @@ fn main() -> ExitCode {
             let kind = args.get(2).map(|s| s.as_str()).unwrap_or("");
             let name = args.get(3).map(|s| s.as_str()).unwrap_or("");
             if kind.is_empty() || name.is_empty() {
-                println!("usage. heides query [callers|imports|definition|calls] [name]");
+                println!("usage. heides query [callers|imports|definition|calls|neighbors] [name]");
                 return ExitCode::FAILURE;
             }
             let graph = match indexer::load_or_build(&root) {
@@ -132,6 +132,12 @@ fn main() -> ExitCode {
                                 "{} defined at {}:{} (kind {})",
                                 s.name, s.file, s.line, s.kind
                             );
+                            if !s.doc.is_empty() {
+                                println!("  {}", s.doc);
+                            }
+                            if !s.signature.is_empty() {
+                                println!("  {}", s.signature);
+                            }
                         }
                     }
                 }
@@ -146,8 +152,54 @@ fn main() -> ExitCode {
                         }
                     }
                 }
+                "neighbors" => {
+                    // Everything the symbol touches in one shot, so an
+                    // agent learns what talks to what without reading code.
+                    let symbols = graph.symbols_named(name);
+                    if symbols.is_empty() {
+                        println!("no definition for {} in the spine", name);
+                    } else {
+                        for s in symbols {
+                            println!(
+                                "{} defined at {}:{} (kind {})",
+                                s.name, s.file, s.line, s.kind
+                            );
+                            if !s.doc.is_empty() {
+                                println!("  doc {}", s.doc);
+                            }
+                            if !s.signature.is_empty() {
+                                println!("  {}", s.signature);
+                            }
+                        }
+                        let callers = graph.callers_of(name);
+                        if callers.is_empty() {
+                            println!("no recorded callers");
+                        } else {
+                            println!("called by {} site(s)", callers.len());
+                            for c in callers {
+                                println!("  {} at {}:{}", c.caller, c.file, c.line);
+                            }
+                        }
+                        let out_calls = graph.calls_from(name);
+                        if !out_calls.is_empty() {
+                            println!("{} call(s) out", out_calls.len());
+                            for c in out_calls {
+                                println!("  {} at {}:{}", c.callee, c.file, c.line);
+                            }
+                        }
+                        let importers = graph.importers_of(name);
+                        if !importers.is_empty() {
+                            println!("imported by {} site(s)", importers.len());
+                            for i in importers {
+                                println!("  {} at {}:{}", i.file, i.imported, i.line);
+                            }
+                        }
+                    }
+                }
                 _ => {
-                    println!("unknown query kind. use callers, imports, definition or calls");
+                    println!(
+                        "unknown query kind. use callers, imports, definition, calls or neighbors"
+                    );
                     return ExitCode::FAILURE;
                 }
             }
@@ -269,6 +321,19 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        "describe" => {
+            let root = PathBuf::from(arg2);
+            match indexer::load_or_build(&root) {
+                Ok(graph) => {
+                    describe_workspace(&graph);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("{}", e);
+                    ExitCode::FAILURE
+                }
+            }
+        }
         "watch" => {
             let root = PathBuf::from(arg2);
             let max = args.get(3).and_then(|s| s.parse::<u64>().ok());
@@ -285,4 +350,203 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
     }
+}
+
+/// Workspace manifest, read only and deterministic. The output is a plain
+/// text map an agent can read instead of walking the code: languages,
+/// entrypoints, hubs, call cycles and which files talk to which.
+fn describe_workspace(graph: &spine::CodeGraph) {
+    println!(
+        "{} files, {} symbols, {} call(s), {} import(s)",
+        graph.files.len(),
+        graph.symbols.len(),
+        graph.calls.len(),
+        graph.imports.len()
+    );
+    let mut langs: Vec<&str> = graph.files.iter().map(|f| f.lang.as_str()).collect();
+    langs.sort_unstable();
+    langs.dedup();
+    println!("languages {}", langs.join(", "));
+
+    // Entrypoints. A function nobody calls in the workspace is a root of
+    // the call graph. Files with module level calls are script entry
+    // points, their own top level code starts the run.
+    let mut script_files: Vec<&str> = graph
+        .calls
+        .iter()
+        .filter(|c| c.caller == "module level")
+        .map(|c| c.file.as_str())
+        .collect();
+    script_files.sort_unstable();
+    script_files.dedup();
+    let mut entry_names: Vec<&str> = Vec::new();
+    for s in &graph.symbols {
+        if !is_fn_kind(&s.kind) {
+            continue;
+        }
+        if graph.callers_of(&s.name).is_empty() && !entry_names.contains(&s.name.as_str()) {
+            entry_names.push(s.name.as_str());
+        }
+    }
+    entry_names.sort_unstable();
+    if !script_files.is_empty() {
+        println!("entrypoint files that run module level code");
+        for f in script_files.iter().take(15) {
+            println!("  {}", f);
+        }
+    }
+    let print_entries = |names: Vec<&str>, label: &str, limit: usize| {
+        if names.is_empty() {
+            return;
+        }
+        println!("{}", label);
+        for n in names.iter().take(limit) {
+            if let Some(s) = graph.symbols_named(n).first() {
+                println!("  {} at {}:{}", n, s.file, s.line);
+            }
+        }
+    };
+    let named: Vec<&str> = entry_names
+        .iter()
+        .filter(|n| ["main", "run", "start", "handler", "index"].contains(n))
+        .copied()
+        .collect();
+    let rest: Vec<&str> = entry_names
+        .iter()
+        .filter(|n| !named.contains(n))
+        .copied()
+        .collect();
+    print_entries(named, "named entrypoints", 10);
+    print_entries(rest, "uncalled roots", 20);
+
+    // Hubs, the symbols with the most wiring in and out.
+    let mut hub_scores: Vec<(&str, usize)> = Vec::new();
+    for s in &graph.symbols {
+        if !is_fn_kind(&s.kind) {
+            continue;
+        }
+        let score = graph.callers_of(&s.name).len() + graph.calls_from(&s.name).len();
+        if score > 0 {
+            hub_scores.push((s.name.as_str(), score));
+        }
+    }
+    hub_scores.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    hub_scores.dedup_by(|a, b| a.0 == b.0);
+    if !hub_scores.is_empty() {
+        println!("most connected symbols");
+        for (n, sc) in hub_scores.iter().take(8) {
+            if let Some(s) = graph.symbols_named(n).first() {
+                println!("  {} with {} edge(s) at {}:{}", n, sc, s.file, s.line);
+            }
+        }
+    }
+
+    // Call cycles, printed as name chains.
+    let mut adj: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
+    for c in &graph.calls {
+        if is_any_known_fn(graph, &c.caller) && is_any_known_fn(graph, &c.callee) {
+            let list = adj.entry(c.caller.as_str()).or_default();
+            if !list.contains(&c.callee.as_str()) {
+                list.push(c.callee.as_str());
+            }
+        }
+    }
+    let cycles = find_cycles(&adj);
+    if !cycles.is_empty() {
+        println!("call cycles");
+        for cyc in cycles.iter().take(5) {
+            println!("  {}", cyc.join(" calls "));
+        }
+    }
+
+    // File level map, which files talk to which by resolved calls.
+    let mut def_file: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for s in &graph.symbols {
+        def_file.entry(s.name.as_str()).or_insert(s.file.as_str());
+    }
+    let mut pairs: Vec<(&str, &str, usize)> = Vec::new();
+    for c in &graph.calls {
+        if let Some(dst) = def_file.get(c.callee.as_str()) {
+            let src = c.file.as_str();
+            if src != *dst {
+                if let Some(p) = pairs.iter_mut().find(|(a, b, _)| *a == src && *b == *dst) {
+                    p.2 += 1;
+                } else {
+                    pairs.push((src, *dst, 1));
+                }
+            }
+        }
+    }
+    pairs.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(b.0)));
+    if !pairs.is_empty() {
+        println!("files that talk to each other");
+        for (a, b, n) in pairs.iter().take(30) {
+            println!("  {} talks to {}, {} call(s)", a, b, n);
+        }
+    }
+}
+
+fn is_fn_kind(kind: &str) -> bool {
+    kind.contains("function") || kind == "method_definition" || kind == "method_declaration"
+}
+
+fn is_any_known_fn(graph: &spine::CodeGraph, name: &str) -> bool {
+    graph
+        .symbols_named(name)
+        .iter()
+        .any(|s| is_fn_kind(&s.kind))
+}
+
+/// Simple colored DFS cycle finder over the symbol call graph. Returns up
+/// to five cycles, each rendered as an ordered name chain.
+fn find_cycles<'a>(adj: &std::collections::HashMap<&'a str, Vec<&'a str>>) -> Vec<Vec<String>> {
+    const COLOR_WHITE: u8 = 0;
+    const COLOR_GRAY: u8 = 1;
+    const COLOR_BLACK: u8 = 2;
+    let mut color: std::collections::HashMap<&str, u8> = std::collections::HashMap::new();
+    let mut found: Vec<Vec<String>> = Vec::new();
+    let mut names: Vec<&&str> = adj.keys().collect();
+    names.sort_unstable();
+    let mut idx = 0usize;
+    while idx < names.len() && found.len() < 5 {
+        let start = *names[idx];
+        if *color.entry(start).or_insert(COLOR_WHITE) != COLOR_WHITE {
+            idx += 1;
+            continue;
+        }
+        // Iterative DFS with explicit path stack.
+        let mut path: Vec<&str> = Vec::new();
+        let mut dfs: Vec<(&str, usize)> = vec![(start, 0)];
+        color.insert(start, COLOR_GRAY);
+        path.push(start);
+        while let Some(&(node, ci)) = dfs.last() {
+            let children = adj.get(node).cloned().unwrap_or_default();
+            if ci < children.len() {
+                let next = children[ci];
+                dfs.last_mut().unwrap().1 += 1;
+                match color.get(next).copied().unwrap_or(COLOR_WHITE) {
+                    COLOR_GRAY => {
+                        // Back edge, extract the cycle from the path.
+                        let pos = path.iter().position(|p| *p == next).unwrap_or(0);
+                        let cyc: Vec<String> = path[pos..].iter().map(|s| s.to_string()).collect();
+                        if cyc.len() >= 2 && found.len() < 5 && !found.contains(&cyc) {
+                            found.push(cyc);
+                        }
+                    }
+                    COLOR_WHITE => {
+                        color.insert(next, COLOR_GRAY);
+                        path.push(next);
+                        dfs.push((next, 0));
+                    }
+                    _ => {}
+                }
+            } else {
+                color.insert(node, COLOR_BLACK);
+                path.pop();
+                dfs.pop();
+            }
+        }
+        idx += 1;
+    }
+    found
 }

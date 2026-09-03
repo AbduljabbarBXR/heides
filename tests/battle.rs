@@ -223,6 +223,23 @@ fn battle_serial() {
         out.contains("add") && out.contains("println"),
     );
 
+    // 6b. Agent eyes, describe manifest and neighbors query
+    let (out, _, _) = b.cli(&["describe"]);
+    b.check(
+        "describe maps the workspace in one read",
+        out.contains("files,") && out.contains("languages") && out.contains("talks to"),
+    );
+    let (out, _, _) = b.cli(&["query", "neighbors", "maybe"]);
+    b.check(
+        "neighbors shows the callers side",
+        out.contains("called by") && out.contains("greet"),
+    );
+    let (out, _, _) = b.cli(&["query", "neighbors", "greet"]);
+    b.check(
+        "neighbors shows the calls out side",
+        out.contains("call(s) out") && out.contains("maybe"),
+    );
+
     // 7. Full check catches every planted bug class
     let (out, _, ok) = b.cli(&["check"]);
     b.check("check exits clean", ok);
