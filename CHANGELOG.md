@@ -2,6 +2,17 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.8.0
+
+* the index becomes the agent's eyes, stored in sqlite at .heides/index.db, schema v5, transactional writes, WAL concurrency, agent readable by any sqlite client
+* every symbol carries its doc comment, cleaned and capped, so what a function is for reads from the map without opening the file
+* rust enum variants and struct fields are first class value symbols with kinds and docs, constants were already captured
+* module level code is first class, top level statements outside functions are analyzed as their own scope and taint flows through them with full source to sink traces, closing the biggest documented launch limit
+* describe prints the workspace manifest in one read, entrypoints, files that run module level code, most connected symbols, call cycles and which files talk to which
+* query neighbors shows definition, doc, callers, calls out and importers for one symbol, query definition now shows doc and signature
+* scaffold indexes the newborn workspace immediately, describe works from the first second
+* unit suite grown to fifty three checks, battle suite grown to seventy checks with module level and agent eyes fixtures
+
 ## 0.7.1
 
 * dependency manifests are discovered recursively under the check root, parent scans no longer skip the real manifests one level down, vendored and generated trees are never walked

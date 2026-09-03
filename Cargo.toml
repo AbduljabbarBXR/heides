@@ -1,6 +1,6 @@
 [package]
 name = "heides"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2024"
 description = "HEIDES: the code nervous system. A deterministic harness that gives AI agents senses, memory and judgment for code."
 license = "MIT"
