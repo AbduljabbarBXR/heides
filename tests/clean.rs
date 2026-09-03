@@ -340,4 +340,43 @@ public class Calculator
 }
 "#,
     );
+
+    // HTML: stylesheet and script references, a form with the CSP meta
+    // present, no javascript URLs.
+    check_clean(
+        "html",
+        "clean.html",
+        r#"<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'">
+  <link rel="stylesheet" href="/css/app.css">
+  <script src="/js/app.js" defer></script>
+</head>
+<body>
+  <form action="/checkout" method="post">
+    <input name="card" type="text" required>
+  </form>
+  <a href="/pricing">pricing</a>
+</body>
+</html>
+"#,
+    );
+
+    // CSS: url references and imports are edges, never findings.
+    check_clean(
+        "css",
+        "clean.css",
+        r#"@import "/base.css";
+
+body {
+  font-family: system-ui, sans-serif;
+}
+
+.hero {
+  background: url("/img/hero.webp") no-repeat center;
+}
+"#,
+    );
 }

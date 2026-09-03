@@ -185,6 +185,10 @@ fn battle_serial() {
         "named.py",
         "import os\n\ndef run_shell(cmd, silent=False):\n    os.system(cmd)\n\ndef entry():\n    q = input()\n    run_shell(silent=True, cmd=q)\n",
     );
+    b.write(
+        "web_dirty.html",
+        "<!doctype html>\n<html>\n<body>\n  <a href=\"javascript:alert(1)\">click</a>\n  <form action=\"/pay\"></form>\n</body>\n</html>\n",
+    );
 
     // 1. Version
     let (out, _, ok) = b.cli(&["version"]);
@@ -275,6 +279,12 @@ fn battle_serial() {
         "module level flow through a function is traced",
         out.contains("reaches a SQL sink in sink_sql3 on line 6")
             && out.contains("via module level (module.php:9)"),
+    );
+    b.check(
+        "html javascript URLs are critical and forms without csp report",
+        out.contains("javascript URL in an html attribute")
+            && out.contains("content security policy meta tag")
+            && !out.contains("web_dirty.html clean"),
     );
     b.check(
         "duplicate definitions merge when every shape agrees",

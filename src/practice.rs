@@ -233,6 +233,36 @@ pub fn scan_file(path: &Path, content: &str, lang: &str) -> Vec<PracticeReport> 
             || t.starts_with("function ")
     });
     let main_guard = python_main_guard(&lines);
+    let is_html = lang == "html";
+    let mut form_line: Option<u64> = None;
+
+    for (i, line) in lines.iter().enumerate() {
+        let line_no = i as u64 + 1;
+        let lower = line.to_ascii_lowercase();
+        if is_html && lower.contains("<form") && form_line.is_none() {
+            form_line = Some(line_no);
+        }
+        // A javascript URL in a link or script attribute runs script when
+        // the page user clicks or loads it, provable from the file alone.
+        if is_html
+            && lower.contains("javascript:")
+            && (lower.contains("href=\"javascript:")
+                || lower.contains("href='javascript:")
+                || lower.contains("src=\"javascript:")
+                || lower.contains("src='javascript:"))
+        {
+            let js_at = lower.find("javascript:").unwrap_or(0);
+            let tag_before = lower[..js_at].rfind('<').is_some();
+            if tag_before {
+                reports.push(rep(
+                    path,
+                    line_no,
+                    "critical",
+                    "javascript URL in an html attribute executes script from the page, replace it with a safe destination.",
+                ));
+            }
+        }
+    }
 
     for (i, line) in lines.iter().enumerate() {
         let line_no = i as u64 + 1;
@@ -295,6 +325,19 @@ pub fn scan_file(path: &Path, content: &str, lang: &str) -> Vec<PracticeReport> 
                 "possible secret or credential hardcoded in source.",
             ));
         }
+    }
+    if is_html
+        && form_line.is_some()
+        && !content
+            .to_ascii_lowercase()
+            .contains("content-security-policy")
+    {
+        reports.push(rep(
+            path,
+            form_line.unwrap(),
+            "info",
+            "page renders a form without a content security policy meta tag, add one or confirm the server sends the header.",
+        ));
     }
     reports
 }
@@ -557,6 +600,36 @@ mod tests {
             "placeholders must not fire, got {:?}",
             reports
         );
+    }
+
+    #[test]
+    fn html_security_rules_fire_only_on_provable_pages() {
+        let dirty = "<html>\n<body>\n  <a href=\"javascript:alert(1)\">x</a>\n  <form action=\"/pay\"></form>\n</body>\n</html>\n";
+        let p = std::path::Path::new("probe.html");
+        let r = scan_file(p, dirty, "html");
+        assert!(
+            r.iter()
+                .any(|x| x.message.contains("javascript URL") && x.severity == "critical"),
+            "javascript url must be critical"
+        );
+        assert!(
+            r.iter()
+                .any(|x| x.message.contains("content security policy") && x.severity == "info"),
+            "form without csp meta must report"
+        );
+        // A page with a CSP meta and no javascript URL stays silent, and
+        // css with url references never fires anything.
+        let clean = "<html>\n<head>\n  <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self'\">\n</head>\n<body>\n  <form action=\"/ok\"></form>\n  <a href=\"/real\">ok</a>\n</body>\n</html>\n";
+        let rc = scan_file(p, clean, "html");
+        assert!(
+            rc.is_empty(),
+            "clean html reported: {:?}",
+            rc.iter().map(|x| x.message.as_str()).collect::<Vec<_>>()
+        );
+        let css = "body { background: url(\"/img/x.png\"); }\n";
+        let pc = std::path::Path::new("probe.css");
+        let rcss = scan_file(pc, css, "css");
+        assert!(rcss.is_empty(), "css reported: {:?}", rcss);
     }
 
     #[test]
