@@ -239,6 +239,16 @@ fn clean_param_name(raw: &str) -> Option<String> {
 /// patterns, js assignment patterns), then the first identifier shaped
 /// child in source order. Returns None when nothing looks like a name.
 fn param_name_of(node: Node, content: &str) -> Option<String> {
+    // Python, javascript and typescript write plain parameters as bare
+    // identifier nodes, no name field, no pattern. The node itself is
+    // the name, return it before descending.
+    if matches!(
+        node.kind(),
+        "identifier" | "name" | "variable_name" | "property_identifier"
+    ) && let Some(name) = clean_param_name(&text(node, content))
+    {
+        return Some(name);
+    }
     for field in ["name", "pattern"] {
         if let Some(n) = node.child_by_field_name(field)
             && let Some(name) = clean_param_name(&text(n, content))

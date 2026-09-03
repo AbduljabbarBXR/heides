@@ -161,7 +161,12 @@ fn body_range(lines: &[&str], lang: &str, sym_line: usize) -> (usize, usize) {
 }
 
 /// Top level argument strings of a call to callee on this line.
-fn call_args(line: &str, callee: &str) -> Vec<String> {
+/// Split the argument text of every call to callee on the line. Each
+/// segment carries an optional name, a python keyword argument q=value, a
+/// C# or PHP 8 named argument q: value, so the caller can bind by
+/// parameter name instead of assuming position. Everything else stays
+/// positional, comparison expressions never count as named.
+fn call_args(line: &str, callee: &str, lang: &str) -> Vec<(Option<String>, String)> {
     let mut out = Vec::new();
     let bytes = line.as_bytes();
     let name = callee.as_bytes();
@@ -236,20 +241,110 @@ fn call_args(line: &str, callee: &str) -> Vec<String> {
                             seg.push(ch);
                         }
                         ',' if d == 0 => {
-                            out.push(seg.trim().to_string());
+                            out.push(split_named(&seg, lang));
                             seg.clear();
                         }
                         _ => seg.push(ch),
                     }
                 }
                 if !seg.trim().is_empty() {
-                    out.push(seg.trim().to_string());
+                    out.push(split_named(&seg, lang));
                 }
                 i = k;
                 continue;
             }
         }
         i += 1;
+    }
+    out
+}
+
+/// Detect a named argument prefix on one segment. Python writes name=
+/// and C# plus PHP 8 write name:, only when the prefix is a plain
+/// identifier and the previous character is not an operator, so x == 1
+/// and x >= 0 stay positional expressions.
+fn split_named(seg: &str, lang: &str) -> (Option<String>, String) {
+    let t = seg.trim();
+    if t.is_empty() {
+        return (None, seg.to_string());
+    }
+    let bytes = t.as_bytes();
+    let mut i = 0usize;
+    let mut in_str: Option<u8> = None;
+    let mut esc = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = in_str {
+            if esc {
+                esc = false;
+            } else if b == b'\\' {
+                esc = true;
+            } else if b == q {
+                in_str = None;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'"' | b'\'' | b'`' => in_str = Some(b),
+            b'=' | b':' => {
+                let sep = b;
+                let named = match sep {
+                    b'=' => lang == "python",
+                    b':' => lang == "csharp" || lang == "php",
+                    _ => false,
+                };
+                if named {
+                    let prefix = &t[..i];
+                    let prev_is_op = i > 0
+                        && matches!(
+                            bytes[i - 1],
+                            b'=' | b'!' | b'<' | b'>' | b':' | b'+' | b'-' | b'*' | b'/'
+                        );
+                    let chars = prefix.trim();
+                    if !prev_is_op
+                        && !chars.is_empty()
+                        && (chars.as_bytes()[0].is_ascii_alphabetic()
+                            || chars.as_bytes()[0] == b'_')
+                        && chars
+                            .bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                    {
+                        return (Some(chars.to_string()), t[i + 1..].trim().to_string());
+                    }
+                }
+                return (None, t.to_string());
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    (None, t.to_string())
+}
+
+/// Map parsed call arguments to callee parameter indices. Named segments
+/// bind by name, positional segments bind in order. An argument that
+/// cannot bind, an unknown keyword or too many positional values, maps to
+/// None and stays silent, a false negative boundary not a guess.
+fn arg_indices(args: &[(Option<String>, String)], params: &[String]) -> Vec<Option<usize>> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut positional = 0usize;
+    for (name, _text) in args {
+        match name {
+            Some(n) => {
+                let idx = params.iter().position(|p| p == n);
+                out.push(idx);
+            }
+            None => {
+                let idx = if positional < params.len() {
+                    Some(positional)
+                } else {
+                    None
+                };
+                positional += 1;
+                out.push(idx);
+            }
+        }
     }
     out
 }
@@ -621,14 +716,15 @@ pub fn run_workspace(graph: &CodeGraph, contents: &HashMap<String, String>) -> V
                 let Some(&cidx) = by_key.get(&cfn) else {
                     continue;
                 };
-                let args = call_args(line, &callee);
+                let args = call_args(line, &callee, &fi.lang);
                 if args.is_empty() {
                     continue;
                 }
-                for (j, arg) in args.iter().enumerate() {
-                    if j >= fns[cidx].params.len() {
+                let indices = arg_indices(&args, &fns[cidx].params);
+                for ((_name, arg), idx) in args.iter().zip(indices.iter()) {
+                    let Some(j) = idx else {
                         continue;
-                    }
+                    };
                     let prov: Option<Prov> = if is_identifier(arg) {
                         let an = arg.trim_start_matches('$').trim();
                         tainted.get(an).cloned()
@@ -641,10 +737,10 @@ pub fn run_workspace(graph: &CodeGraph, contents: &HashMap<String, String>) -> V
                         let slot = entries
                             .entry(cfn.clone())
                             .or_insert_with(|| vec![None; fns[cidx].params.len()]);
-                        if slot[j].is_none()
+                        if slot[*j].is_none()
                             && let Some(chained) = prov_call(&p, &fi.key.1, &fi.key.0, lno)
                         {
-                            slot[j] = Some(chained);
+                            slot[*j] = Some(chained);
                             // Requeue only callers whose body makes calls,
                             // a body with no calls cannot forward taint.
                             if has_call[cidx] {
@@ -673,7 +769,7 @@ pub fn run_workspace(graph: &CodeGraph, contents: &HashMap<String, String>) -> V
                     let Some(&cidx) = by_key.get(&cfn) else {
                         continue;
                     };
-                    let args = call_args(line, &callee);
+                    let args = call_args(line, &callee, &fi.lang);
                     if fns[cidx].returns_source {
                         tainted.entry(v.clone()).or_insert_with(|| Prov {
                             hops: vec![Hop {
@@ -682,9 +778,12 @@ pub fn run_workspace(graph: &CodeGraph, contents: &HashMap<String, String>) -> V
                         });
                         continue;
                     }
-                    for (j, arg) in args.iter().enumerate() {
-                        if j < fns[cidx].param_to_return.len()
-                            && fns[cidx].param_to_return[j]
+                    let indices = arg_indices(&args, &fns[cidx].params);
+                    for ((_name, arg), idx) in args.iter().zip(indices.iter()) {
+                        let Some(j) = idx else {
+                            continue;
+                        };
+                        if fns[cidx].param_to_return.get(*j).copied().unwrap_or(false)
                             && is_identifier(arg)
                         {
                             let an = arg.trim_start_matches('$').trim();

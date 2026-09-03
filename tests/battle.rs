@@ -175,6 +175,10 @@ fn battle_serial() {
         "module_clean.php",
         "<?php\nfunction harmless2($x) {\n    echo htmlspecialchars($x);\n}\nharmless2('literal');\n$name = 'config value';\necho $name;\n",
     );
+    b.write(
+        "named.py",
+        "import os\n\ndef run_shell(cmd, silent=False):\n    os.system(cmd)\n\ndef entry():\n    q = input()\n    run_shell(silent=True, cmd=q)\n",
+    );
 
     // 1. Version
     let (out, _, ok) = b.cli(&["version"]);
@@ -269,6 +273,10 @@ fn battle_serial() {
     b.check(
         "direct module level source to sink reports",
         out.contains("reaches a SQL sink in module.php on line 11"),
+    );
+    b.check(
+        "named arguments bind by name not position",
+        out.contains("reaches a shell sink in run_shell on line 4") && out.contains("via entry"),
     );
     b.check(
         "inert module level code stays silent",
