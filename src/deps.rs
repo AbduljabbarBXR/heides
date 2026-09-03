@@ -264,6 +264,14 @@ fn collect_manifests(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     if gomod.exists() {
         out.push(gomod);
     }
+    let req = dir.join("requirements.txt");
+    if req.exists() {
+        out.push(req);
+    }
+    let pyproject = dir.join("pyproject.toml");
+    if pyproject.exists() {
+        out.push(pyproject);
+    }
     if depth == 0 {
         return;
     }
@@ -304,6 +312,12 @@ pub fn read_manifests(root: &Path) -> Vec<Dependency> {
                 .unwrap_or_default(),
             Some("go.mod") => std::fs::read_to_string(&file)
                 .map(|t| parse_go_mod(&t))
+                .unwrap_or_default(),
+            Some("requirements.txt") => std::fs::read_to_string(&file)
+                .map(|t| parse_requirements_txt(&t))
+                .unwrap_or_default(),
+            Some("pyproject.toml") => std::fs::read_to_string(&file)
+                .map(|t| parse_pyproject_toml(&t))
                 .unwrap_or_default(),
             _ => Vec::new(),
         };
@@ -354,6 +368,133 @@ fn parse_go_mod(text: &str) -> Vec<Dependency> {
         }
     }
     deps
+}
+
+/// Split a python requirement line into a package name and its pinned
+/// version when the spec is exact, else keep the full range spec.
+/// Anything that is not a real package line returns None.
+fn split_python_req(line: &str) -> Option<(String, String)> {
+    let t = line.trim();
+    if t.is_empty() || t.starts_with('#') || t.starts_with('-') {
+        return None;
+    }
+    // Exact pins split on the full == operator first so the version is
+    // clean for the OSV query, range specs keep their comparison.
+    let (name_part, spec) = if let Some(eq) = t.find("==") {
+        (&t[..eq], t[eq + 2..].trim().to_string())
+    } else {
+        let (n, s) = t.split_once(['<', '>', '~', '!'])?;
+        let op = t.chars().nth(n.len())?;
+        (n, format!("{}{}", op, s.trim()))
+    };
+    let mut name = name_part.trim().to_string();
+    if let Some(bracket) = name.find('[') {
+        name.truncate(bracket);
+    }
+    if name.is_empty() {
+        return None;
+    }
+    // Inline environment markers after a semicolon are conditions, not
+    // part of the version.
+    let version = spec.split(';').next().unwrap_or(&spec).trim().to_string();
+    if version.is_empty() {
+        None
+    } else {
+        Some((name, version))
+    }
+}
+
+/// Parse requirements.txt lines, only pinned versions and ranges that
+/// carry a comparison survive.
+fn parse_requirements_txt(text: &str) -> Vec<Dependency> {
+    let mut deps = Vec::new();
+    for line in text.lines() {
+        if let Some((name, version)) = split_python_req(line) {
+            deps.push(Dependency {
+                name,
+                version,
+                ecosystem: "PyPI",
+            });
+        }
+    }
+    deps
+}
+
+/// Parse pyproject.toml project dependencies, multiline arrays and the
+/// single line inline array form both work.
+fn parse_pyproject_toml(text: &str) -> Vec<Dependency> {
+    let mut deps = Vec::new();
+    let mut in_deps = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with('[') && t.ends_with(']') {
+            in_deps = t.starts_with("[project.dependencies]");
+            continue;
+        }
+        if !in_deps {
+            continue;
+        }
+        if t.starts_with(']') || t.is_empty() {
+            in_deps = false;
+            continue;
+        }
+        // Inline array lines carry every entry in brackets on one line,
+        // peel them and treat each quoted entry as its own requirement.
+        let inner = if t.starts_with("dependencies = [") {
+            t.trim_start_matches("dependencies = [")
+                .trim_end_matches(']')
+                .trim_end_matches(',')
+                .to_string()
+        } else {
+            t.trim_end_matches(',').to_string()
+        };
+        for entry in split_quoted_list(&inner) {
+            if let Some((name, version)) = split_python_req(&entry) {
+                deps.push(Dependency {
+                    name,
+                    version,
+                    ecosystem: "PyPI",
+                });
+            }
+        }
+    }
+    deps
+}
+
+/// Split a python style list body into its quoted string entries.
+fn split_quoted_list(body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote = None;
+    for ch in body.chars() {
+        match quote {
+            Some(q) => {
+                if ch == q {
+                    quote = None;
+                } else {
+                    cur.push(ch);
+                }
+            }
+            None => {
+                if ch == '\'' || ch == '"' {
+                    quote = Some(ch);
+                } else if ch == ',' {
+                    let entry = cur.trim().to_string();
+                    if !entry.is_empty() {
+                        out.push(entry);
+                    }
+                    cur.clear();
+                } else {
+                    cur.push(ch);
+                }
+            }
+        }
+    }
+    let entry = cur.trim().to_string();
+    if !entry.is_empty() {
+        out.push(entry);
+    }
+    out
 }
 
 fn parse_cargo_toml(text: &str) -> Vec<Dependency> {
@@ -683,6 +824,31 @@ mod tests {
         assert_eq!(deps[1].version, "1.7.1");
         assert_eq!(deps[2].name, "golang.org/x/crypto");
         assert_eq!(deps[2].version, "0.14.0");
+    }
+
+    #[test]
+    fn parses_requirements_and_pyproject() {
+        let reqs = "django==4.2.11\nrequests>=2.31.0\npillow~=10.2\nflask==3.0.0 ; python_version<\"3.13\"\n-r base.txt\nbarename\n# comment\n";
+        let deps = parse_requirements_txt(reqs);
+        assert_eq!(deps.len(), 4);
+        assert_eq!(deps[0].name, "django");
+        assert_eq!(deps[0].version, "4.2.11");
+        assert_eq!(deps[0].ecosystem, "PyPI");
+        assert_eq!(deps[1].version, ">=2.31.0");
+        assert_eq!(deps[2].version, "~=10.2");
+        assert_eq!(deps[3].name, "flask");
+
+        let inline = "[project]\nname = \"app\"\n\n[project.dependencies]\ndependencies = [\"django==4.2.11\", \"requests>=2.31.0\"]\n";
+        let deps = parse_pyproject_toml(inline);
+        assert_eq!(deps.len(), 2);
+        assert_eq!(deps[0].name, "django");
+        assert_eq!(deps[0].version, "4.2.11");
+
+        let multiline = "[project.dependencies]\n\"pillow~=10.2\",\n\"sqlalchemy==2.0.29\",\n]\n";
+        let deps = parse_pyproject_toml(multiline);
+        assert_eq!(deps.len(), 2);
+        assert_eq!(deps[1].name, "sqlalchemy");
+        assert_eq!(deps[1].version, "2.0.29");
     }
 
     #[test]
