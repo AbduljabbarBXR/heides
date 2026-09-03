@@ -327,14 +327,14 @@ pub fn scan_file(path: &Path, content: &str, lang: &str) -> Vec<PracticeReport> 
         }
     }
     if is_html
-        && form_line.is_some()
+        && let Some(form_at) = form_line
         && !content
             .to_ascii_lowercase()
             .contains("content-security-policy")
     {
         reports.push(rep(
             path,
-            form_line.unwrap(),
+            form_at,
             "info",
             "page renders a form without a content security policy meta tag, add one or confirm the server sends the header.",
         ));
