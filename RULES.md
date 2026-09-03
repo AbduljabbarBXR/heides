@@ -36,6 +36,8 @@ Boundary mistakes in changed code. Every rule is exact.
 
 - Unfinished work marker. Severity info. Trigger, a comment or string contains todo, fixme or hack. Message, unfinished work marker left in the code.
 - Debug output. Severity warning. Trigger, a javascript or typescript line contains console.log or debugger outside a script context. Message, debug output left in the code.
+- Diagnostic console calls. Severity info. Trigger, a javascript or typescript line contains console.debug, console.info, console.warn or console.error outside a script context. Message, diagnostic console call left in the code. warn and error are sometimes deliberate production logging, so they stay visible without being treated as dirt.
+- Alert dialog. Severity info. Trigger, a javascript or typescript line contains alert( outside a script context. Message, alert dialog call left in the code, remove before shipping.
 - Debug macro. Severity warning. Trigger, a rust line contains dbg!. Message, debug macro left in the code.
 - Module level print. Severity info. Trigger, a python module that defines functions prints at column zero outside the main guard. Scripts and main guarded blocks are legitimate. Message, print statement found at module level in a library module. remove before shipping.
 - Hardcoded secret. Severity critical. Trigger, an assignment binds a long literal to a name that looks like a key, password, token or secret. Message, possible secret or credential hardcoded in source.

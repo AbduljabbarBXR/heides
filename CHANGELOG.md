@@ -2,6 +2,12 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.9.1
+
+* diagnostic console calls are no longer silent, console.debug, console.info, console.warn and console.error report as info since warn and error are sometimes deliberate logging
+* alert dialogs report as info, remove before shipping
+* console.log and debugger keep their warning severity
+
 ## 0.9.0
 
 * html and css are first class languages, ten dialects in the map

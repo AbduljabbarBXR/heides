@@ -294,6 +294,27 @@ pub fn scan_file(path: &Path, content: &str, lang: &str) -> Vec<PracticeReport> 
                 "warning",
                 "debug output left in the code.",
             ));
+        } else if (lang == "javascript" || lang == "typescript")
+            && (line.contains("console.debug")
+                || line.contains("console.info")
+                || line.contains("console.warn")
+                || line.contains("console.error"))
+        {
+            // warn and error are sometimes deliberate logging, they stay
+            // visible as info so real logging is not treated as dirt.
+            reports.push(rep(
+                path,
+                line_no,
+                "info",
+                "diagnostic console call left in the code.",
+            ));
+        } else if (lang == "javascript" || lang == "typescript") && line.contains("alert(") {
+            reports.push(rep(
+                path,
+                line_no,
+                "info",
+                "alert dialog call left in the code, remove before shipping.",
+            ));
         }
         if lang == "rust" && line.contains("dbg!") {
             reports.push(rep(
@@ -640,6 +661,25 @@ mod tests {
         let pc = std::path::Path::new("probe.css");
         let rcss = scan_file(pc, css, "css");
         assert!(rcss.is_empty(), "css reported: {:?}", rcss);
+    }
+
+    #[test]
+    fn debug_console_calls_split_by_intent() {
+        let src = "function go() {\n  console.log('a');\n  console.debug('b');\n  console.warn('c');\n  console.error('d');\n  debugger;\n  alert('e');\n}\n";
+        let out = scan_file(Path::new("probe.js"), src, "javascript");
+        assert_eq!(out.len(), 6);
+        assert_eq!(out[0].severity, "warning");
+        assert_eq!(out[0].line, 2);
+        assert_eq!(out[1].severity, "info");
+        assert_eq!(out[1].line, 3);
+        assert_eq!(out[2].severity, "info");
+        assert_eq!(out[2].line, 4);
+        assert_eq!(out[3].severity, "info");
+        assert_eq!(out[3].line, 5);
+        assert_eq!(out[4].severity, "warning");
+        assert_eq!(out[4].line, 6);
+        assert_eq!(out[5].severity, "info");
+        assert_eq!(out[5].line, 7);
     }
 
     #[test]
