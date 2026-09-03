@@ -194,7 +194,7 @@ fn battle_serial() {
     let (out, _, ok) = b.cli(&["version"]);
     b.check(
         "version command exits clean and prints a version",
-        ok && out.contains("0.8"),
+        ok && out.contains("0.9"),
     );
 
     // 2. Scan builds the spine

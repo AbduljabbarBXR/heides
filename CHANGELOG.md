@@ -2,6 +2,15 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.9.0
+
+* html and css are first class languages, ten dialects in the map
+* script and stylesheet references become real import edges, a page shows which files it loads
+* inline script bodies are parsed as javascript with line numbers pointing at the real html rows, so page code joins the taint and call graph
+* css at import rules and url references become file edges
+* javascript URLs in link and script attributes report critical, a form page without a content security policy meta tag reports info
+* clean corpus gate extends to html and css, idiomatic pages stay silent
+
 ## 0.8.1
 
 * guard phase performance, source line checks memoized and the propagation queue deduped with a hash set, django check 52 to 46 seconds, the largest graphs no longer reprocess

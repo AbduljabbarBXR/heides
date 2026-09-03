@@ -41,6 +41,11 @@ Boundary mistakes in changed code. Every rule is exact.
 - Hardcoded secret. Severity critical. Trigger, an assignment binds a long literal to a name that looks like a key, password, token or secret. Message, possible secret or credential hardcoded in source.
 - Overlong function. Severity info. Trigger, a function body spans more than 80 lines. Guarantee, the body length is counted exactly from the real braces or python indentation, never estimated from the distance to the next function. Message, function {name} spans {n} lines. consider splitting it.
 
+HTML web surface rules, on html files only.
+
+- Javascript URL. Severity critical. Trigger, a link href or script src attribute value starts with javascript: and the attribute sits inside a tag on the same line, prose examples outside tags never fire. Guarantee, the hazard is proven from the file alone, a browser executing that URL runs page script. Message, javascript URL in an html attribute executes script from the page, replace it with a safe destination.
+- Missing content security policy on a form page. Severity info. Trigger, an html file contains a form element and no meta tag that mentions content-security-policy anywhere in the file. Pages whose CSP arrives in a server header stay quiet at the human judgment level. Message, page renders a form without a content security policy meta tag, add one or confirm the server sends the header.
+
 ## dependency
 
 Manifest based checks over Cargo.toml, Cargo.lock and package.json.
