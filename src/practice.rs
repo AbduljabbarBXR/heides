@@ -86,6 +86,21 @@ fn secret_assignment(line: &str) -> bool {
     if lower_name.contains("rule") {
         return false;
     }
+    // Field label parameters, password1_field_name defaults to the field
+    // name, never a credential. Secret values never live in a variable
+    // whose name ends in field or label, those hold references.
+    let raw_trim = line[at + 1..]
+        .trim_start()
+        .trim_matches(|c| c == '"' || c == '\'');
+    if (lower_name.ends_with("_field_name")
+        || lower_name.ends_with("_field")
+        || lower_name.ends_with("_label")
+        || lower_name.ends_with("_name"))
+        && raw_trim.len() <= 36
+        && !raw_trim.chars().any(|c| c.is_ascii_uppercase())
+    {
+        return false;
+    }
     // Tokenizer machinery names are not credentials.
     if lower_name.contains("tokeniz") {
         return false;
@@ -542,6 +557,22 @@ mod tests {
             "placeholders must not fire, got {:?}",
             reports
         );
+    }
+
+    #[test]
+    fn label_field_defaults_are_not_credentials() {
+        // Django form field label parameters, the default is the field
+        // name itself, idiomatic clean code.
+        assert!(!secret_assignment(
+            "    password1_field_name=\"password1\","
+        ));
+        assert!(!secret_assignment(
+            "    password2_field_name=\"password2\","
+        ));
+        assert!(!secret_assignment("def f(user_field=\"username\"):"));
+        // A real weak password in a variable named password still fires.
+        assert!(secret_assignment("password = \"Password123!\";"));
+        assert!(secret_assignment("api_key = \"AKIAIOSFODNN7EXAMPLE\";"));
     }
 
     #[test]
