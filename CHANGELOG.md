@@ -2,6 +2,15 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.10.1
+
+* severity tokens render in color on a real terminal, red blocker and critical, yellow warning, green info, plain on pipes and in logs
+* scan, check and deps show a running pulse on stderr with an elapsed report when the command takes longer than a second
+* watch mode prints live severity deltas after every reindex, local guards only so the loop never stalls on the registry
+* the group flag clusters findings by guard with colored bucket counts
+* long commands set the terminal title and ring the bell once they pass ten seconds
+* the no color flag and the color always flag give every consumer control, NO_COLOR is honored
+
 ## 0.10.0
 
 * the dependency guard now reads go.mod, requirements.txt, pyproject.toml, pom.xml, composer.lock and composer.json alongside cargo and npm manifests

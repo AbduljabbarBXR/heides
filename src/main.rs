@@ -27,11 +27,6 @@ fn print_usage() {
     println!("  watch [dir]     watch for changes and reindex on demand");
     println!("  mcp             start the MCP server over stdio");
     println!("  version         print the version");
-    println!();
-    println!("Flags");
-    println!("  --no-color      never emit color, same as NO_COLOR");
-    println!("  --color=always  force color even on pipes");
-    println!("  --group         group findings by guard with bucket counts");
 }
 
 fn main() -> ExitCode {
