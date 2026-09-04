@@ -31,5 +31,5 @@
   <line x1="145" y1="188" x2="338" y2="143" stroke="#90a4ae" stroke-width="2"/>
   <line x1="615" y1="188" x2="422" y2="143" stroke="#90a4ae" stroke-width="2"/>
 
-  <text x="380" y="228" font-size="11" fill="#546e7a" text-anchor="middle">scan, status, query, describe, check, staged, plan, scaffold, deps, watch</text>
+  <text x="380" y="228" font-size="11" fill="#546e7a" text-anchor="middle">scan, status, query, describe, export, check, staged, plan, scaffold, deps, watch, mcp, version</text>
 </svg>

@@ -1,36 +1,36 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="760" height="210" viewBox="0 0 760 210" font-family="Helvetica, Arial, sans-serif">
-  <rect width="760" height="210" fill="#ffffff"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="240" viewBox="0 0 760 240" font-family="Helvetica, Arial, sans-serif">
+  <rect width="760" height="240" fill="#ffffff"/>
   <text x="16" y="28" font-size="15" font-weight="bold" fill="#263238">Harmony turns code into findings with evidence</text>
 
-  <rect x="30" y="60" width="170" height="120" rx="12" fill="#eceff1"/>
-  <text x="115" y="95" font-size="13" font-weight="bold" fill="#455a64" text-anchor="middle">code and patches</text>
-  <circle cx="60" cy="140" r="6" fill="#546e7a"/>
-  <circle cx="85" cy="140" r="6" fill="#546e7a"/>
-  <circle cx="110" cy="140" r="6" fill="#546e7a"/>
-  <circle cx="135" cy="140" r="6" fill="#546e7a"/>
-  <text x="115" y="162" font-size="10" fill="#78909c" text-anchor="middle">every changed line</text>
+  <rect x="30" y="58" width="170" height="150" rx="12" fill="#eceff1"/>
+  <text x="115" y="98" font-size="13" font-weight="bold" fill="#455a64" text-anchor="middle">code and patches</text>
+  <circle cx="62" cy="138" r="6" fill="#546e7a"/>
+  <circle cx="88" cy="138" r="6" fill="#546e7a"/>
+  <circle cx="114" cy="138" r="6" fill="#546e7a"/>
+  <circle cx="140" cy="138" r="6" fill="#546e7a"/>
+  <text x="115" y="176" font-size="10" fill="#78909c" text-anchor="middle">every changed line</text>
 
-  <rect x="240" y="42" width="300" height="156" rx="14" fill="#f3e5f5"/>
-  <text x="390" y="64" font-size="12" font-weight="bold" fill="#6a1b9a" text-anchor="middle">five guard modules</text>
-  <rect x="258" y="78" width="264" height="22" rx="11" fill="#e1bee7"/>
-  <text x="390" y="93" font-size="11" fill="#4a148c" text-anchor="middle">staged apply blocks conflicts before disk writes</text>
-  <rect x="258" y="106" width="264" height="22" rx="11" fill="#e1bee7"/>
-  <text x="390" y="121" font-size="11" fill="#4a148c" text-anchor="middle">taint traces input into SQL, shell, fs, prompt</text>
-  <rect x="258" y="134" width="264" height="22" rx="11" fill="#e1bee7"/>
-  <text x="390" y="149" font-size="11" fill="#4a148c" text-anchor="middle">edge flags null and error paths, practice flags</text>
-  <text x="390" y="163" font-size="11" fill="#4a148c" text-anchor="middle">debug leftovers and secrets, deps checks CVEs</text>
-  <text x="390" y="185" font-size="10" fill="#9575cd" text-anchor="middle">deterministic, no model in the loop</text>
+  <path d="M200 133 L234 133" stroke="#90a4ae" stroke-width="2"/>
+  <polygon points="230,128 242,133 230,138" fill="#90a4ae"/>
 
-  <path d="M200 120 L238 120" stroke="#90a4ae" stroke-width="2"/>
-  <polygon points="234,115 246,120 234,125" fill="#90a4ae"/>
-  <path d="M540 120 L600 120" stroke="#90a4ae" stroke-width="2"/>
-  <polygon points="596,115 608,120 596,125" fill="#90a4ae"/>
+  <rect x="244" y="44" width="306" height="180" rx="14" fill="#f3e5f5"/>
+  <text x="397" y="64" font-size="12" font-weight="bold" fill="#6a1b9a" text-anchor="middle">five guard modules</text>
+<rect x="256" y="68" width="282" height="22" rx="11" fill="#e1bee7"/><text x="397" y="83" font-size="10.5" fill="#4a148c" text-anchor="middle">staged apply, blocks conflicts before any write</text>
+<rect x="256" y="94" width="282" height="22" rx="11" fill="#e1bee7"/><text x="397" y="109" font-size="10.5" fill="#4a148c" text-anchor="middle">taint, sql shell fs prompt and mark_safe sinks</text>
+<rect x="256" y="120" width="282" height="22" rx="11" fill="#e1bee7"/><text x="397" y="135" font-size="10.5" fill="#4a148c" text-anchor="middle">edge, null empty error and boundary paths</text>
+<rect x="256" y="146" width="282" height="22" rx="11" fill="#e1bee7"/><text x="397" y="161" font-size="10.5" fill="#4a148c" text-anchor="middle">practice, secrets debug and console calls</text>
+<rect x="256" y="172" width="282" height="22" rx="11" fill="#e1bee7"/><text x="397" y="187" font-size="10.5" fill="#4a148c" text-anchor="middle">deps, OSV vulnerabilities and outdated pins</text>
+  <text x="397" y="206" font-size="10" fill="#9575cd" text-anchor="middle">deterministic, no model in the loop</text>
 
-  <rect x="612" y="55" width="130" height="130" rx="12" fill="#ffebee"/>
-  <text x="677" y="90" font-size="13" font-weight="bold" fill="#c62828" text-anchor="middle">finding</text>
-  <rect x="628" y="102" width="98" height="18" rx="9" fill="#ffcdd2"/>
-  <text x="677" y="115" font-size="10" fill="#8e0000" text-anchor="middle">critical or warning</text>
-  <text x="677" y="138" font-size="11" fill="#455a64" text-anchor="middle">file, line,</text>
-  <text x="677" y="152" font-size="11" fill="#455a64" text-anchor="middle">severity, reason</text>
-  <text x="677" y="172" font-size="10" fill="#78909c" text-anchor="middle">proof, never a guess</text>
+  <path d="M550 133 L586 133" stroke="#90a4ae" stroke-width="2"/>
+  <polygon points="582,128 594,133 582,138" fill="#90a4ae"/>
+
+  <rect x="606" y="55" width="130" height="158" rx="12" fill="#ffebee"/>
+  <text x="671" y="92" font-size="13" font-weight="bold" fill="#c62828" text-anchor="middle">finding</text>
+  <rect x="622" y="104" width="98" height="20" rx="10" fill="#ffcdd2"/>
+  <text x="671" y="118" font-size="10" fill="#8e0000" text-anchor="middle">critical or warning</text>
+  <text x="671" y="146" font-size="11" fill="#455a64" text-anchor="middle">file, line,</text>
+  <text x="671" y="162" font-size="11" fill="#455a64" text-anchor="middle">severity, reason</text>
+  <text x="671" y="188" font-size="10" fill="#78909c" text-anchor="middle">proof, never</text>
+  <text x="671" y="201" font-size="10" fill="#78909c" text-anchor="middle">a guess</text>
 </svg>

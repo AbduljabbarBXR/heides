@@ -9,7 +9,7 @@
   <circle cx="72" cy="150" r="6" fill="#546e7a"/>
   <circle cx="94" cy="150" r="6" fill="#546e7a"/>
   <circle cx="116" cy="150" r="6" fill="#546e7a"/>
-  <text x="90" y="172" font-size="10" fill="#78909c" text-anchor="middle">eight languages</text>
+  <text x="90" y="172" font-size="10" fill="#78909c" text-anchor="middle">ten dialects</text>
 
   <path d="M150 120 L210 120" stroke="#90a4ae" stroke-width="2"/>
   <polygon points="206,115 218,120 206,125" fill="#90a4ae"/>
