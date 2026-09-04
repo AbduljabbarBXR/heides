@@ -2,6 +2,10 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.13.1
+
+* Fixed a test-only race where the display override unit tests shared process-wide state across parallel test threads. The UI tests now serialize on a test lock, 70 of 70 green on repeated default parallel runs. Added the crates.io publish job to the release workflow and backfilled package metadata (homepage, readme, keywords, categories).
+
 ## 0.13.0
 
 * Stored file paths now resolve against the scan root recorded in the index. A check run from inside the repo and one run from the directory that launched the scan report identical findings, closing the silent false clean found when heides checked its own code from a parent folder. Index version 7, stale indexes rescan on the next command. Regression covered by the cross working directory test.
