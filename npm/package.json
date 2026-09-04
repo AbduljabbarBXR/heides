@@ -1,0 +1,43 @@
+{
+  "name": "heides",
+  "version": "0.13.1",
+  "description": "HEIDES installer. Downloads the prebuilt HEIDES binary for your platform and exposes the heides command. Deterministic code analysis harness for AI agents.",
+  "bin": {
+    "heides": "./bin/heides.js"
+  },
+  "scripts": {
+    "postinstall": "node ./install.js",
+    "test": "node ./test.js"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "heides",
+    "code-analysis",
+    "static-analysis",
+    "mcp",
+    "model-context-protocol",
+    "ai-agents",
+    "cli",
+    "binary"
+  ],
+  "author": "AbduljabbarBXR",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AbduljabbarBXR/heides.git",
+    "directory": "npm"
+  },
+  "homepage": "https://github.com/AbduljabbarBXR/heides#readme",
+  "bugs": {
+    "url": "https://github.com/AbduljabbarBXR/heides/issues"
+  },
+  "files": [
+    "bin/",
+    "install.js",
+    "test.js",
+    "README.md",
+    "LICENSE"
+  ]
+}
