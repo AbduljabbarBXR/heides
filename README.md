@@ -174,6 +174,11 @@ Pin a version with HEIDES_VERSION.
 
     HEIDES_VERSION=0.6.0 curl -fsSL https://raw.githubusercontent.com/AbduljabbarBXR/heides/main/scripts/install.sh | bash
 
+Or install the `heides` command from npm (no Rust toolchain needed):
+
+    npm install -g heides
+    heides --help
+
 Or build from source with a Rust toolchain, or take a prebuilt binary from the releases page.
 
     git clone git@github.com:AbduljabbarBXR/heides.git
