@@ -3,7 +3,7 @@
   "version": "0.13.1",
   "description": "HEIDES installer. Downloads the prebuilt HEIDES binary for your platform and exposes the heides command. Deterministic code analysis harness for AI agents.",
   "bin": {
-    "heides": "./bin/heides.js"
+    "heides": "bin/heides.js"
   },
   "scripts": {
     "postinstall": "node ./install.js",
