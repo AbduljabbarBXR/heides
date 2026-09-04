@@ -2,6 +2,11 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.11.0
+
+* mark_safe is now a python taint sink, the only framework sink in the engine. Django escapes template output unless a value is explicitly marked safe, so a qualifying source flowing into mark_safe is provable cross site scripting. Literal markup inside mark_safe stays silent, the clean corpus proves the idiomatic escaped render passes.
+* Framework specific XSS shapes stay silent until grammars and a template context model exist, that boundary is stated in RULES.md so the claim never overreaches.
+
 ## 0.10.1
 
 * severity tokens render in color on a real terminal, red blocker and critical, yellow warning, green info, plain on pipes and in logs

@@ -98,6 +98,14 @@ fn fixture_py() -> String {
     .to_string()
 }
 
+fn fixture_py_xss() -> String {
+    r#"def render(request):
+    name = input()
+    return mark_safe(name)
+"#
+    .to_string()
+}
+
 fn fixture_php() -> String {
     "<?php\nfunction load() {\n    $q = $_GET['id'];\n    mysqli_query($conn, $q);\n}\n".to_string()
 }
@@ -134,6 +142,7 @@ fn battle_serial() {
     b.write("src/main.rs", &fixture_main());
     b.write("app.js", &fixture_js());
     b.write("app.py", &fixture_py());
+    b.write("view.py", &fixture_py_xss());
     b.write("app.php", &fixture_php());
     b.write("app.go", &fixture_go());
     b.write("app.java", &fixture_java());
@@ -194,7 +203,7 @@ fn battle_serial() {
     let (out, _, ok) = b.cli(&["version"]);
     b.check(
         "version command exits clean and prints a version",
-        ok && out.contains("0.10"),
+        ok && out.contains("0.11"),
     );
 
     // 2. Scan builds the spine
@@ -259,6 +268,10 @@ fn battle_serial() {
     b.check("check exits clean", ok);
     b.check("check catches SQL taint", out.contains("SQL"));
     b.check("check catches shell taint", out.contains("shell"));
+    b.check(
+        "check catches user input marked safe",
+        out.contains("reaches a mark_safe sink") && out.contains("view.py"),
+    );
     b.check("check catches PHP SQL taint", out.contains("app.php"));
     b.check("check catches Go SQL taint", out.contains("app.go"));
     b.check("check catches Java SQL taint", out.contains("app.java"));

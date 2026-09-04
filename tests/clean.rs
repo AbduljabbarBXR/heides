@@ -185,6 +185,15 @@ def parse_number(text):
         return int(text)
     except ValueError as error:
         return None
+
+
+def render_message(user, message):
+    from django.utils.html import escape
+    from django.utils.safestring import mark_safe
+
+    safe_message = escape(message)
+    author = escape(user)
+    return mark_safe("<p>%s said %s</p>" % (author, safe_message))
 "#,
     );
 

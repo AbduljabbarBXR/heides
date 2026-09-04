@@ -44,7 +44,7 @@ pub(crate) const SOURCES: [(&str, &str); 14] = [
     ),
 ];
 
-pub(crate) const SINKS: [(&str, &str, &str); 20] = [
+pub(crate) const SINKS: [(&str, &str, &str); 21] = [
     ("javascript", r"\b(query|execute|exec)\s*\(", "SQL"),
     ("javascript", r"\b(eval|Function)\s*\(", "eval"),
     ("javascript", r"\bexec\s*\(", "shell"),
@@ -67,6 +67,11 @@ pub(crate) const SINKS: [(&str, &str, &str); 20] = [
         "prompt",
     ),
     ("python", r"\b(prompt|system_message|messages)\b", "prompt"),
+    // mark_safe is the only framework sink. Django escapes template output
+    // unless a value is marked safe, so user input reaching mark_safe is
+    // provable cross site scripting. Literal content stays silent, only a
+    // tainted flow fires.
+    ("python", r"\bmark_safe\s*\(", "mark_safe"),
     (
         "php",
         r"\b(mysqli_query|query|exec|system|shell_exec|eval|include|unlink)\s*\(",
@@ -492,6 +497,26 @@ mod tests {
                 .iter()
                 .any(|r| r.message.contains("prompt injection"))
         );
+    }
+
+    #[test]
+    fn detects_mark_safe_taint_python() {
+        let src = "def render(request):\n    name = input()\n    return mark_safe(name)\n";
+        let p = std::path::Path::new("view.py");
+        let reports = scan_file(p, src);
+        assert!(
+            reports
+                .iter()
+                .any(|r| r.message.contains("mark_safe") && r.severity == "critical")
+        );
+    }
+
+    #[test]
+    fn literal_content_in_mark_safe_stays_silent() {
+        let src = "def render():\n    return mark_safe('<b>safe markup</b>')\n";
+        let p = std::path::Path::new("view.py");
+        let reports = scan_file(p, src);
+        assert!(reports.is_empty());
     }
 
     #[test]

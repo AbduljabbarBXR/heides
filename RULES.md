@@ -17,6 +17,7 @@ Interprocedural limits, stated so the claim never overreaches. Positional argume
 - File sink reach. Trigger, a qualifying source feeds file write calls such as file put contents, fs writeFile, File WriteAllText, os Create. Same message shape.
 - Eval sink reach. Trigger, a qualifying source feeds eval or Function construction. Same message shape.
 - Prompt injection. Trigger, a line that constructs a prompt, system message or model input uses a variable tainted from user input. This rule models AI system files first class. Message shape, user input reaches a prompt construction on this line (prompt injection risk). source at line {n}.
+- Marked safe output. Severity critical. Trigger, a qualifying source feeds a python mark_safe call. Django escapes template output unless a value is explicitly marked safe, so tainted content reaching mark_safe renders unescaped, provable cross site scripting. mark_safe is the only framework sink in the engine, every other framework specific XSS shape stays silent until grammars and a template context model exist. Message shape, user controlled input reaches a mark_safe sink. Literal content inside mark_safe never fires.
 
 ## edge.cases
 
