@@ -189,6 +189,11 @@ impl Drop for Stopwatch {
 mod tests {
     use super::*;
 
+    // The display overrides are process-wide globals. Every test below
+    // takes this lock first so parallel test threads can never observe
+    // each other's override state mid-test.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
     fn plain_ui() -> Ui {
         *COLOR_OVERRIDE.lock().unwrap() = None;
         *GROUPED_OVERRIDE.lock().unwrap() = false;
@@ -197,11 +202,13 @@ mod tests {
 
     #[test]
     fn default_resolve_is_plain_in_tests() {
+        let _test_lock = TEST_LOCK.lock().unwrap();
         assert!(!plain_ui().color);
     }
 
     #[test]
     fn force_color_paints_tokens_force_off_keeps_plain() {
+        let _test_lock = TEST_LOCK.lock().unwrap();
         *COLOR_OVERRIDE.lock().unwrap() = Some(true);
         let ui = Ui::resolve();
         assert!(ui.color);
@@ -217,6 +224,7 @@ mod tests {
 
     #[test]
     fn count_reflects_semantics() {
+        let _test_lock = TEST_LOCK.lock().unwrap();
         *COLOR_OVERRIDE.lock().unwrap() = Some(true);
         let ui = Ui::resolve();
         assert_eq!(ui.count("critical", 3), "\x1b[31m3\x1b[0m");
@@ -228,6 +236,7 @@ mod tests {
 
     #[test]
     fn flags_are_consumed_and_positionals_kept() {
+        let _test_lock = TEST_LOCK.lock().unwrap();
         assert!(Ui::consume_flag("--no-color"));
         assert!(Ui::consume_flag("--color=always"));
         assert!(Ui::consume_flag("--group"));

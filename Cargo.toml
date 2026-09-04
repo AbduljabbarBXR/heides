@@ -5,6 +5,10 @@ edition = "2024"
 description = "HEIDES: the code nervous system. A deterministic harness that gives AI agents senses, memory and judgment for code."
 license = "MIT"
 repository = "https://github.com/AbduljabbarBXR/heides"
+homepage = "https://github.com/AbduljabbarBXR/heides"
+readme = "README.md"
+keywords = ["code-analysis", "static-analysis", "mcp", "ai-agents", "deterministic"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
