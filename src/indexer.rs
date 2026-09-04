@@ -67,8 +67,10 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Describe a file the way the file table stores it.
-fn describe(path: &Path, lang: &str) -> FileEntry {
+/// Describe a file the way the file table stores it. The stored path is the
+/// key relative to the scan root, so an index reads identically no matter
+/// which directory the check runs from.
+fn describe(path: &Path, key: &str, lang: &str) -> FileEntry {
     let meta = std::fs::metadata(path);
     let mtime = meta
         .as_ref()
@@ -79,51 +81,73 @@ fn describe(path: &Path, lang: &str) -> FileEntry {
         .unwrap_or(0);
     let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
     FileEntry {
-        path: path.display().to_string(),
+        path: key.to_string(),
         lang: lang.to_string(),
         mtime,
         size,
     }
 }
 
+/// The absolute scan root, symlinks resolved when the path exists.
+fn abs_root_of(root: &Path) -> PathBuf {
+    std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
+}
+
+/// The stored key for a walked file, relative to the scan root. A path that
+/// resolves outside the root falls back to its raw display so nothing breaks.
+fn rel_key(abs_root: &Path, path: &Path) -> String {
+    let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    abs.strip_prefix(abs_root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+        .replace('\\', "/")
+}
+
 /// Build a fresh graph for the workspace at root, parsing on all cores.
 /// Returns the graph and the number of files successfully parsed.
 pub fn build_graph(root: &Path) -> (CodeGraph, usize) {
+    let abs_root = abs_root_of(root);
     let files = collect_files(root);
+    let pairs: Vec<(PathBuf, String)> = files
+        .iter()
+        .map(|p| (p.clone(), rel_key(&abs_root, p)))
+        .collect();
     let mut graph = CodeGraph::new();
-    let parsed_count = fill_graph(&mut graph, &files);
+    let parsed_count = fill_graph(&mut graph, &pairs);
     graph.rebuild_indexes();
     (graph, parsed_count)
 }
 
 /// Parse the given files and append their records to the graph.
-/// Files are parsed on worker threads, results merge in file order.
-fn fill_graph(graph: &mut CodeGraph, files: &[PathBuf]) -> usize {
+/// Files are parsed on worker threads, results merge in file order. Each
+/// entry carries the raw path for IO and the stored key for attribution.
+fn fill_graph(graph: &mut CodeGraph, entries: &[(PathBuf, String)]) -> usize {
     let workers = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
         .clamp(1, 8);
-    let parsed = if files.is_empty() {
+    let parsed = if entries.is_empty() {
         vec![]
     } else {
-        let chunk = files.len().div_ceil(workers).max(1);
+        let chunk = entries.len().div_ceil(workers).max(1);
         std::thread::scope(|scope| {
             let mut handles = Vec::new();
-            for batch in files.chunks(chunk) {
-                let owned: Vec<PathBuf> = batch.to_vec();
+            for batch in entries.chunks(chunk) {
+                let owned: Vec<(PathBuf, String)> = batch.to_vec();
                 handles.push(scope.spawn(move || {
                     let mut out = Vec::with_capacity(owned.len());
-                    for path in &owned {
+                    for (path, key) in &owned {
                         out.push(
                             std::fs::read_to_string(path)
                                 .ok()
-                                .and_then(|content| parser::parse_file(path, &content)),
+                                .and_then(|content| parser::parse_file(Path::new(key), &content)),
                         );
                     }
                     out
                 }));
             }
-            let mut merged: Vec<Option<parser::ParsedFile>> = Vec::with_capacity(files.len());
+            let mut merged: Vec<Option<parser::ParsedFile>> = Vec::with_capacity(entries.len());
             for handle in handles {
                 if let Ok(batch) = handle.join() {
                     merged.extend(batch);
@@ -134,9 +158,9 @@ fn fill_graph(graph: &mut CodeGraph, files: &[PathBuf]) -> usize {
     };
 
     let mut parsed_count = 0usize;
-    for (path, item) in files.iter().zip(parsed) {
-        let lang = parser::detect_language(path).unwrap_or_default();
-        graph.files.push(describe(path, &lang));
+    for ((path, key), item) in entries.iter().zip(parsed) {
+        let lang = parser::detect_language(Path::new(key)).unwrap_or_default();
+        graph.files.push(describe(path, key, &lang));
         if let Some(pf) = item {
             parsed_count += 1;
             graph.symbols.extend(pf.symbols);
@@ -151,12 +175,17 @@ fn fill_graph(graph: &mut CodeGraph, files: &[PathBuf]) -> usize {
 /// that changed. Files that disappeared are dropped. Returns the number of
 /// files that were added, changed or removed.
 pub fn update_graph(root: &Path, graph: &mut CodeGraph) -> usize {
+    let abs_root = abs_root_of(root);
     let files = collect_files(root);
+    let pairs: Vec<(PathBuf, String)> = files
+        .iter()
+        .map(|p| (p.clone(), rel_key(&abs_root, p)))
+        .collect();
     let mut current: std::collections::HashMap<String, (u64, u64)> =
         std::collections::HashMap::new();
-    for path in &files {
-        let lang = parser::detect_language(path).unwrap_or_default();
-        let f = describe(path, &lang);
+    for (path, key) in &pairs {
+        let lang = parser::detect_language(Path::new(key)).unwrap_or_default();
+        let f = describe(path, key, &lang);
         current.insert(f.path.clone(), (f.mtime, f.size));
     }
 
@@ -166,17 +195,16 @@ pub fn update_graph(root: &Path, graph: &mut CodeGraph) -> usize {
         .map(|f| (f.path.clone(), (f.mtime, f.size)))
         .collect();
 
-    let mut to_parse: Vec<PathBuf> = Vec::new();
+    let mut to_parse: Vec<(PathBuf, String)> = Vec::new();
     let mut to_drop: Vec<String> = Vec::new();
 
-    for path in &files {
-        let pstr = path.display().to_string();
-        match old.get(&pstr) {
-            None => to_parse.push(path.clone()),
+    for (path, key) in &pairs {
+        match old.get(key) {
+            None => to_parse.push((path.clone(), key.clone())),
             Some(&(om, os)) => {
-                if current[&pstr] != (om, os) {
-                    to_drop.push(pstr.clone());
-                    to_parse.push(path.clone());
+                if current[key] != (om, os) {
+                    to_drop.push(key.clone());
+                    to_parse.push((path.clone(), key.clone()));
                 }
             }
         }
@@ -193,7 +221,7 @@ pub fn update_graph(root: &Path, graph: &mut CodeGraph) -> usize {
             graph.remove_file(p);
         }
         let parsed_count = fill_graph(graph, &to_parse);
-        // fill_graph pushed files for every path in to_parse, even the ones
+        // fill_graph pushed files for every entry in to_parse, even the ones
         // that failed to parse, which is correct, the table tracks presence.
         let _ = parsed_count;
         graph.rebuild_indexes();

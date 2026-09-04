@@ -50,10 +50,12 @@ pub fn check_workspace(root: &Path, graph: &CodeGraph) -> Vec<GuardReport> {
 pub fn check_workspace_without_deps(graph: &CodeGraph) -> Vec<GuardReport> {
     let mut reports = Vec::new();
     // Read every indexed file once. The intra guards and the interprocedural
-    // taint pass share the same contents so nothing is parsed twice.
+    // taint pass share the same contents so nothing is parsed twice. Stored
+    // paths are keys relative to the recorded scan root, so a check returns
+    // the same findings from any working directory.
     let mut contents: HashMap<String, String> = HashMap::new();
     for f in &graph.files {
-        let path = Path::new(&f.path);
+        let path = graph.file_path_of(&f.path);
         if let Ok(content) = std::fs::read_to_string(path) {
             contents.insert(f.path.trim_start_matches("./").replace('\\', "/"), content);
         }

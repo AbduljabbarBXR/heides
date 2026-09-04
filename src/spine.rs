@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, params};
 
-pub const INDEX_VERSION: u32 = 6;
+pub const INDEX_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Symbol {
@@ -69,6 +69,10 @@ pub struct Indexes {
 #[derive(Debug, Clone, Default)]
 pub struct CodeGraph {
     pub version: u32,
+    /// The absolute scan root recorded at save time. Stored file paths are
+    /// keys relative to this root, so every read resolves the same way no
+    /// matter which directory the current command runs from.
+    pub root: Option<PathBuf>,
     pub files: Vec<FileEntry>,
     pub symbols: Vec<Symbol>,
     pub calls: Vec<CallEdge>,
@@ -81,6 +85,16 @@ impl CodeGraph {
         CodeGraph {
             version: INDEX_VERSION,
             ..Default::default()
+        }
+    }
+
+    /// Resolve a stored file key to a readable path. Keys are relative to the
+    /// recorded scan root; without a recorded root the key is used as given,
+    /// so in memory graphs keep working.
+    pub fn file_path_of(&self, key: &str) -> PathBuf {
+        match &self.root {
+            Some(root) => root.join(key.trim_start_matches("./")),
+            None => PathBuf::from(key),
         }
     }
 
@@ -332,6 +346,12 @@ pub fn save(graph: &CodeGraph, root: &Path) -> Result<(), String> {
         params![INDEX_VERSION.to_string()],
     )
     .map_err(|e| e.to_string())?;
+    let root_abs = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    tx.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES ('root', ?1)",
+        params![root_abs.display().to_string()],
+    )
+    .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     let legacy = root.join(".heides").join("index.bin");
     if legacy.exists() {
@@ -359,6 +379,12 @@ pub fn load(root: &Path) -> Result<CodeGraph, String> {
     }
     let mut graph = CodeGraph {
         version: INDEX_VERSION,
+        root: conn
+            .query_row("SELECT value FROM meta WHERE key = 'root'", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .ok()
+            .map(PathBuf::from),
         ..Default::default()
     };
     {

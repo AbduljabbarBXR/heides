@@ -465,7 +465,7 @@ pub fn long_functions(graph: &CodeGraph) -> Vec<PracticeReport> {
         if funcs.is_empty() {
             continue;
         }
-        let Ok(content) = std::fs::read_to_string(file) else {
+        let Ok(content) = std::fs::read_to_string(graph.file_path_of(file)) else {
             continue;
         };
         let lines: Vec<&str> = content.lines().collect();
