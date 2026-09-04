@@ -2,6 +2,10 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.12.0
+
+* harmony.report joins the MCP tools. It runs the same guards as harmony.check and returns the verdict as structured JSON, one object per finding with guard, severity, message, file and line, plus severity counts and a clean flag, so an agent can gate on the verdict without parsing prose.
+
 ## 0.11.0
 
 * mark_safe is now a python taint sink, the only framework sink in the engine. Django escapes template output unless a value is explicitly marked safe, so a qualifying source flowing into mark_safe is provable cross site scripting. Literal markup inside mark_safe stays silent, the clean corpus proves the idiomatic escaped render passes.

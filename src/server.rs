@@ -55,6 +55,39 @@ fn report_lines(reports: &[harmony::GuardReport]) -> String {
     lines.join("\n")
 }
 
+/// The structured shape behind harmony.report. One object per finding with
+/// the guard, severity, message, file and line, plus severity counts and a
+/// clean flag so an agent can gate on the verdict without parsing prose.
+fn report_json(reports: &[harmony::GuardReport]) -> String {
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for r in reports {
+        *counts.entry(&r.severity).or_insert(0) += 1;
+    }
+    let findings: Vec<serde_json::Value> = reports
+        .iter()
+        .map(|r| {
+            json!({
+                "guard": r.guard,
+                "severity": r.severity,
+                "message": r.message,
+                "file": r.file,
+                "line": r.line,
+            })
+        })
+        .collect();
+    serde_json::to_string_pretty(&json!({
+        "clean": reports.is_empty(),
+        "counts": {
+            "blocker": counts.get("blocker").copied().unwrap_or(0),
+            "critical": counts.get("critical").copied().unwrap_or(0),
+            "warning": counts.get("warning").copied().unwrap_or(0),
+            "info": counts.get("info").copied().unwrap_or(0),
+        },
+        "findings": findings,
+    }))
+    .unwrap_or_default()
+}
+
 fn load_graph(root: &str) -> Result<spine::CodeGraph, String> {
     indexer::load_or_build(&std::path::PathBuf::from(root))
 }
@@ -103,6 +136,11 @@ fn handle(id: &Value, method: &str, params: &Value) {
                         {
                             "name": "harmony.check",
                             "description": "Run every guard on the workspace and return findings with evidence.",
+                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" } } }
+                        },
+                        {
+                            "name": "harmony.report",
+                            "description": "Run every guard on the workspace and return findings as structured JSON with severity counts.",
                             "inputSchema": { "type": "object", "properties": { "root": { "type": "string" } } }
                         },
                         {
@@ -401,6 +439,18 @@ fn handle(id: &Value, method: &str, params: &Value) {
                     let reports =
                         harmony::check_workspace(&std::path::PathBuf::from(&root), &graph);
                     ok(id, text_result(report_lines(&reports)));
+                }
+                "harmony.report" => {
+                    let graph = match load_graph(&root) {
+                        Ok(g) => g,
+                        Err(e) => {
+                            err(id, 1, &e);
+                            return;
+                        }
+                    };
+                    let reports =
+                        harmony::check_workspace(&std::path::PathBuf::from(&root), &graph);
+                    ok(id, text_result(report_json(&reports)));
                 }
                 "harmony.staged" => {
                     let patch = args.get("patch").and_then(|v| v.as_str()).unwrap_or("");

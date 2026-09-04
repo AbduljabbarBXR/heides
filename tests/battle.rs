@@ -203,7 +203,7 @@ fn battle_serial() {
     let (out, _, ok) = b.cli(&["version"]);
     b.check(
         "version command exits clean and prints a version",
-        ok && out.contains("0.11"),
+        ok && out.contains("0.12"),
     );
 
     // 2. Scan builds the spine
@@ -476,7 +476,7 @@ fn battle_serial() {
     let mut stdin = mcp.stdin.take().unwrap();
     stdin
         .write_all(
-            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"spine.query\",\"arguments\":{\"kind\":\"callers\",\"name\":\"add\"}}}\n{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"harmony.check\",\"arguments\":{}}}\n",
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"spine.query\",\"arguments\":{\"kind\":\"callers\",\"name\":\"add\"}}}\n{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"harmony.check\",\"arguments\":{}}}\n{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"harmony.report\",\"arguments\":{}}}\n",
         )
         .unwrap();
     drop(stdin);
@@ -488,10 +488,13 @@ fn battle_serial() {
     let _ = mcp.wait();
     b.check("mcp answers initialize", mcp_out.contains("\"serverInfo\""));
     b.check(
-        "mcp lists all eight tools",
+        "mcp lists the tools",
         mcp_out.contains("spine.scan")
             && mcp_out.contains("spine.query")
+            && mcp_out.contains("spine.describe")
+            && mcp_out.contains("spine.neighbors")
             && mcp_out.contains("harmony.check")
+            && mcp_out.contains("harmony.report")
             && mcp_out.contains("harmony.staged")
             && mcp_out.contains("grounding.plan")
             && mcp_out.contains("grounding.scaffold")
@@ -505,6 +508,13 @@ fn battle_serial() {
     b.check(
         "mcp answers harmony.check with taint findings",
         mcp_out.contains("SQL"),
+    );
+    b.check(
+        "mcp harmony.report returns structured JSON",
+        mcp_out.contains("\"id\":5")
+            && mcp_out.contains("findings")
+            && mcp_out.contains("counts")
+            && mcp_out.contains("clean"),
     );
 
     // 18. Dash free enforcement on local CLI output
