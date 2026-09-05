@@ -2,6 +2,14 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.14.0
+
+* Fixed the one line installer dying silently on Linux, a `set -e` plus trailing `&&` aborted detection before any download. Termux Android and proot installs work again.
+* Release pipeline builds ARM again, `aarch64-unknown-linux-gnu` on native ARM runners plus `aarch64-linux-android` via NDK and cargo-ndk, so every tag ships the phone binary. The npm wrapper maps `linux-arm64` and detects Termux for the bionic build.
+* CLI takes a workspace dir everywhere it matters, `query [kind] [name] [dir]`, `staged [patch] [dir]`, `plan [text] [dir]`, no more forced `cd`. Every command answers `--help`, `-h` and `help` with usage and exit 0 instead of treating them as paths, which previously created a junk `--help/.heides/` index. Empty args keep exit 1.
+* `describe` file talk is language aware, same named symbols across languages no longer report phantom `app.js talks to app.py` edges. Web surface (html, css) still links to scripts.
+* Battle suite holds 78 of 78 with the dash free output contract intact.
+
 ## 0.13.1
 
 * Fixed a test-only race where the display override unit tests shared process-wide state across parallel test threads. The UI tests now serialize on a test lock, 70 of 70 green on repeated default parallel runs. Added the crates.io publish job to the release workflow and backfilled package metadata (homepage, readme, keywords, categories).

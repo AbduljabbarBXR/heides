@@ -32,7 +32,9 @@ detect() {
     *) echo "unsupported arch $arch" >&2; exit 1 ;;
   esac
   ASSET="heides-$arch-$os"
-  [ "$os" = "pc-windows-msvc" ] && ASSET="$ASSET.exe"
+  if [ "$os" = "pc-windows-msvc" ]; then
+    ASSET="$ASSET.exe"
+  fi
 }
 
 url_for() {

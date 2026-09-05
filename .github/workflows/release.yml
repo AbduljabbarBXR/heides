@@ -19,6 +19,13 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             asset: heides-x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset: heides-aarch64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-linux-android
+            asset: heides-aarch64-linux-android
+            ndk: true
           - os: macos-14
             target: aarch64-apple-darwin
             asset: heides-aarch64-apple-darwin
@@ -34,7 +41,21 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: setup Android NDK
+        if: matrix.ndk == true
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27
+      - name: install cargo-ndk
+        if: matrix.ndk == true
+        run: cargo install cargo-ndk
+      - name: build release (ndk)
+        if: matrix.ndk == true
+        run: cargo ndk -t arm64-v8a build --release
       - name: build release
+        if: matrix.ndk != true
         run: cargo build --release --target ${{ matrix.target }}
       - name: stage asset
         shell: bash

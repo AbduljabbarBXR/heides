@@ -5,6 +5,10 @@ use heides::{deps, grounding, harmony, indexer, server, spine, ui::Stopwatch, ui
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+fn is_help(s: &str) -> bool {
+    s == "--help" || s == "-h" || s == "help"
+}
+
 fn print_usage() {
     println!("HEIDES {}  the code nervous system", VERSION);
     println!();
@@ -13,11 +17,12 @@ fn print_usage() {
     println!("Commands");
     println!("  scan [dir]      map the codebase into the persistent spine index");
     println!("  status [dir]    report the state of the spine index");
-    println!("  query [kind] [name]");
+    println!("  query [kind] [name] [dir]");
     println!("                  ask the spine: callers, imports, definition, calls");
+    println!("                  neighbors, search. dir defaults to .");
     println!("  check [dir]     run every guard and print findings");
-    println!("  staged [patch]  check a unified diff before it is applied");
-    println!("  plan [text]     ground an objective against the codebase");
+    println!("  staged [patch] [dir]  check a unified diff before it is applied");
+    println!("  plan [text] [dir]     ground an objective against the codebase");
     println!("  scaffold [text] [dir]");
     println!("                  scaffold a new project from a plan and index it");
     println!("  deps [dir]      check dependencies for vulnerabilities and updates");
@@ -27,6 +32,8 @@ fn print_usage() {
     println!("  watch [dir]     watch for changes and reindex on demand");
     println!("  mcp             start the MCP server over stdio");
     println!("  version         print the version");
+    println!();
+    println!("For per command usage run heides CMD help.");
 }
 
 fn main() -> ExitCode {
@@ -43,6 +50,62 @@ fn main() -> ExitCode {
     let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("");
     let arg2 = args.get(2).map(|s| s.as_str()).unwrap_or(".");
     let arg3 = args.get(3).map(|s| s.as_str());
+    let arg4 = args.get(4).map(|s| s.as_str());
+
+    if cmd.is_empty() || is_help(cmd) {
+        print_usage();
+        return ExitCode::SUCCESS;
+    }
+
+    // Per-command --help must never be treated as a path or symbol.
+    // Without this, `heides query --help` created a junk `--help/.heides/`
+    // directory instead of printing usage.
+    if let Some(a) = args.get(2) {
+        if is_help(a) && cmd != "plan" && cmd != "scaffold" {
+            // plan/scaffold take free text, handle inside their branches.
+            match cmd {
+                "scan" => {
+                    println!("usage. heides scan [dir]");
+                    return ExitCode::SUCCESS;
+                }
+                "status" => {
+                    println!("usage. heides status [dir]");
+                    return ExitCode::SUCCESS;
+                }
+                "query" => {
+                    println!(
+                        "usage. heides query [callers|imports|definition|calls|neighbors|search] [name] [dir]"
+                    );
+                    return ExitCode::SUCCESS;
+                }
+                "check" => {
+                    println!("usage. heides check [dir]");
+                    return ExitCode::SUCCESS;
+                }
+                "staged" => {
+                    println!("usage. heides staged [patch file] [dir]");
+                    return ExitCode::SUCCESS;
+                }
+                "deps" => {
+                    println!("usage. heides deps [dir]");
+                    return ExitCode::SUCCESS;
+                }
+                "describe" => {
+                    println!("usage. heides describe [dir]");
+                    return ExitCode::SUCCESS;
+                }
+                "export" => {
+                    println!("usage. heides export [dir] [out]");
+                    return ExitCode::SUCCESS;
+                }
+                "watch" => {
+                    println!("usage. heides watch [dir]");
+                    return ExitCode::SUCCESS;
+                }
+                _ => {}
+            }
+        }
+    }
 
     match cmd {
         "scan" => {
@@ -101,12 +164,20 @@ fn main() -> ExitCode {
             }
         }
         "query" => {
-            let root = PathBuf::from(".");
             let kind = args.get(2).map(|s| s.as_str()).unwrap_or("");
             let name = args.get(3).map(|s| s.as_str()).unwrap_or("");
+            // Optional workspace dir: heides query callers add [dir].
+            // arg4 is the dir when kind+name+dir are all present.
+            let root = PathBuf::from(arg4.unwrap_or("."));
+            if is_help(kind) || is_help(name) {
+                println!(
+                    "usage. heides query [callers|imports|definition|calls|neighbors|search] [name] [dir]"
+                );
+                return ExitCode::SUCCESS;
+            }
             if kind.is_empty() || name.is_empty() {
                 println!(
-                    "usage. heides query [callers|imports|definition|calls|neighbors|search] [name]"
+                    "usage. heides query [callers|imports|definition|calls|neighbors|search] [name] [dir]"
                 );
                 return ExitCode::FAILURE;
             }
@@ -321,8 +392,12 @@ fn main() -> ExitCode {
         }
         "staged" => {
             let patch_path = args.get(2).map(|s| s.as_str()).unwrap_or("");
+            if is_help(patch_path) {
+                println!("usage. heides staged [patch file] [dir]");
+                return ExitCode::SUCCESS;
+            }
             if patch_path.is_empty() {
-                println!("usage. heides staged [patch file]");
+                println!("usage. heides staged [patch file] [dir]");
                 return ExitCode::FAILURE;
             }
             let patch_text = match std::fs::read_to_string(patch_path) {
@@ -332,7 +407,8 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let root = PathBuf::from(".");
+            // Optional workspace dir: heides staged fix.patch [dir].
+            let root = PathBuf::from(arg3.unwrap_or("."));
             let graph = match indexer::load_or_build(&root) {
                 Ok(g) => g,
                 Err(e) => {
@@ -365,11 +441,31 @@ fn main() -> ExitCode {
             }
         }
         "plan" => {
-            let plan = arg3.map(|s| s.to_string()).unwrap_or_else(|| {
-                let arg2s = args.get(2).map(|s| s.as_str()).unwrap_or("");
-                arg2s.to_string()
-            });
-            let root = PathBuf::from(".");
+            let raw_plan = args.get(2).map(|s| s.as_str()).unwrap_or("");
+            if is_help(raw_plan) {
+                println!("usage. heides plan [text] [dir]");
+                return ExitCode::SUCCESS;
+            }
+            if raw_plan.is_empty() {
+                println!("usage. heides plan [text] [dir]");
+                return ExitCode::FAILURE;
+            }
+            // heides plan "text" [dir]: two trailing args mean text+dir,
+            // one trailing arg means text in ".".
+            let (plan, root) = match (args.get(2), args.get(3)) {
+                (Some(text), Some(dir)) => {
+                    // Heuristic: if the second trailing arg is an existing
+                    // directory, treat it as dir, else join both as text.
+                    let dir_path = PathBuf::from(dir);
+                    if dir_path.is_dir() {
+                        (text.to_string(), dir_path)
+                    } else {
+                        (format!("{} {}", text, dir), PathBuf::from("."))
+                    }
+                }
+                (Some(text), None) => (text.to_string(), PathBuf::from(".")),
+                _ => (String::new(), PathBuf::from(".")),
+            };
             let graph = match indexer::load_or_build(&root) {
                 Ok(g) => g,
                 Err(e) => {
@@ -387,6 +483,10 @@ fn main() -> ExitCode {
         "scaffold" => {
             let plan = args.get(2).map(|s| s.as_str()).unwrap_or("");
             let dir = args.get(3).map(|s| s.as_str()).unwrap_or(".");
+            if is_help(plan) {
+                println!("usage. heides scaffold [plan text] [dir]");
+                return ExitCode::SUCCESS;
+            }
             if plan.is_empty() {
                 println!("usage. heides scaffold [plan text] [dir]");
                 return ExitCode::FAILURE;
@@ -778,21 +878,45 @@ fn describe_workspace(graph: &spine::CodeGraph) {
     }
 
     // File level map, which files talk to which by resolved calls.
+    // Language-aware: JS calling a same-named Python symbol is a name
+    // collision, not a call. Without this, `app.js talks to app.py`
+    // fires for every shared `add`/`main` name.
+    let mut file_lang: std::collections::HashMap<&str, &str> =
+        std::collections::HashMap::new();
+    for f in &graph.files {
+        file_lang.insert(f.path.as_str(), f.lang.as_str());
+    }
     let mut def_file: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
     for s in &graph.symbols {
         def_file.entry(s.name.as_str()).or_insert(s.file.as_str());
     }
     let mut pairs: Vec<(&str, &str, usize)> = Vec::new();
     for c in &graph.calls {
-        if let Some(dst) = def_file.get(c.callee.as_str()) {
-            let src = c.file.as_str();
-            if src != *dst {
-                if let Some(p) = pairs.iter_mut().find(|(a, b, _)| *a == src && *b == *dst) {
-                    p.2 += 1;
-                } else {
-                    pairs.push((src, *dst, 1));
-                }
+        let Some(dst) = def_file.get(c.callee.as_str()) else {
+            continue;
+        };
+        let src = c.file.as_str();
+        if src == *dst {
+            continue;
+        }
+        // Skip cross-language name collisions (e.g. JS -> PY) unless
+        // web surface is involved (html/css import JS).
+        if let (Some(src_lang), Some(dst_lang)) =
+            (file_lang.get(src), file_lang.get(*dst))
+        {
+            if src_lang != dst_lang
+                && *src_lang != "html"
+                && *dst_lang != "html"
+                && *src_lang != "css"
+                && *dst_lang != "css"
+            {
+                continue;
             }
+        }
+        if let Some(p) = pairs.iter_mut().find(|(a, b, _)| *a == src && *b == *dst) {
+            p.2 += 1;
+        } else {
+            pairs.push((src, *dst, 1));
         }
     }
     pairs.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(b.0)));

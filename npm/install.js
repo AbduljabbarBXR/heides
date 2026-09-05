@@ -17,6 +17,8 @@ const BIN_NAME = "heides";
 
 const ASSETS = {
   "linux-x64": "heides-x86_64-unknown-linux-gnu",
+  "linux-arm64": "heides-aarch64-unknown-linux-gnu",
+  "linux-arm64-termux": "heides-aarch64-linux-android",
   "darwin-arm64": "heides-aarch64-apple-darwin",
   "darwin-x64": "heides-x86_64-apple-darwin",
   "win32-x64": "heides-x86_64-pc-windows-msvc.exe",
@@ -33,6 +35,16 @@ function assetFor(key) {
 
 function exeName() {
   return process.platform === "win32" ? `${BIN_NAME}.exe` : BIN_NAME;
+}
+
+function isTermux() {
+  try {
+    if (process.env.PREFIX && process.env.PREFIX.includes("com.termux")) return true;
+    if (fs.existsSync("/data/data/com.termux/files/usr/bin")) return true;
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 function isMusl() {
@@ -69,7 +81,11 @@ function download(url, dest, redirects = 5) {
 
 async function main() {
   const key = currentKey();
-  const asset = assetFor(key);
+  let asset = assetFor(key);
+  // Termux reports linux-arm64 but needs the bionic Android build.
+  if (key === "linux-arm64" && isTermux()) {
+    asset = assetFor("linux-arm64-termux");
+  }
   if (!asset) {
     console.error(`heides: no prebuilt binary for ${process.platform}-${process.arch}.`);
     console.error("Install from source instead: cargo install heides");
@@ -98,4 +114,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { assetFor, currentKey, exeName, isMusl, VERSION };
+module.exports = { assetFor, currentKey, exeName, isMusl, isTermux, VERSION };
