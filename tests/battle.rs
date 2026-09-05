@@ -10,6 +10,7 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 const BIN: &str = env!("CARGO_BIN_EXE_heides");
+const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 struct Battle {
     checks: Vec<(String, bool)>,
@@ -203,7 +204,7 @@ fn battle_serial() {
     let (out, _, ok) = b.cli(&["version"]);
     b.check(
         "version command exits clean and prints a version",
-        ok && out.contains("0.13"),
+        ok && out.contains(PKG_VERSION),
     );
 
     // 2. Scan builds the spine
