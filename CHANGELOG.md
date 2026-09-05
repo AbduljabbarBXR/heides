@@ -2,6 +2,10 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.14.1
+
+* rustfmt exact line joins in the language aware file talk map, CI format gate green.
+
 ## 0.14.0
 
 * Fixed the one line installer dying silently on Linux, a `set -e` plus trailing `&&` aborted detection before any download. Termux Android and proot installs work again.

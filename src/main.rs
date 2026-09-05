@@ -881,8 +881,7 @@ fn describe_workspace(graph: &spine::CodeGraph) {
     // Language-aware: JS calling a same-named Python symbol is a name
     // collision, not a call. Without this, `app.js talks to app.py`
     // fires for every shared `add`/`main` name.
-    let mut file_lang: std::collections::HashMap<&str, &str> =
-        std::collections::HashMap::new();
+    let mut file_lang: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
     for f in &graph.files {
         file_lang.insert(f.path.as_str(), f.lang.as_str());
     }
@@ -901,9 +900,7 @@ fn describe_workspace(graph: &spine::CodeGraph) {
         }
         // Skip cross-language name collisions (e.g. JS -> PY) unless
         // web surface is involved (html/css import JS).
-        if let (Some(src_lang), Some(dst_lang)) =
-            (file_lang.get(src), file_lang.get(*dst))
-        {
+        if let (Some(src_lang), Some(dst_lang)) = (file_lang.get(src), file_lang.get(*dst)) {
             if src_lang != dst_lang
                 && *src_lang != "html"
                 && *dst_lang != "html"
