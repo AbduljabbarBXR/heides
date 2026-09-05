@@ -61,7 +61,10 @@ fn main() -> ExitCode {
     // Without this, `heides query --help` created a junk `--help/.heides/`
     // directory instead of printing usage.
     if let Some(a) = args.get(2)
-        && is_help(a) && cmd != "plan" && cmd != "scaffold" {
+        && is_help(a)
+        && cmd != "plan"
+        && cmd != "scaffold"
+    {
         // plan/scaffold take free text, handle inside their branches.
         match cmd {
             "scan" => {
