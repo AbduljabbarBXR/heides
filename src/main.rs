@@ -60,50 +60,49 @@ fn main() -> ExitCode {
     // Per-command --help must never be treated as a path or symbol.
     // Without this, `heides query --help` created a junk `--help/.heides/`
     // directory instead of printing usage.
-    if let Some(a) = args.get(2) {
-        if is_help(a) && cmd != "plan" && cmd != "scaffold" {
-            // plan/scaffold take free text, handle inside their branches.
-            match cmd {
-                "scan" => {
-                    println!("usage. heides scan [dir]");
-                    return ExitCode::SUCCESS;
-                }
-                "status" => {
-                    println!("usage. heides status [dir]");
-                    return ExitCode::SUCCESS;
-                }
-                "query" => {
-                    println!(
-                        "usage. heides query [callers|imports|definition|calls|neighbors|search] [name] [dir]"
-                    );
-                    return ExitCode::SUCCESS;
-                }
-                "check" => {
-                    println!("usage. heides check [dir]");
-                    return ExitCode::SUCCESS;
-                }
-                "staged" => {
-                    println!("usage. heides staged [patch file] [dir]");
-                    return ExitCode::SUCCESS;
-                }
-                "deps" => {
-                    println!("usage. heides deps [dir]");
-                    return ExitCode::SUCCESS;
-                }
-                "describe" => {
-                    println!("usage. heides describe [dir]");
-                    return ExitCode::SUCCESS;
-                }
-                "export" => {
-                    println!("usage. heides export [dir] [out]");
-                    return ExitCode::SUCCESS;
-                }
-                "watch" => {
-                    println!("usage. heides watch [dir]");
-                    return ExitCode::SUCCESS;
-                }
-                _ => {}
+    if let Some(a) = args.get(2)
+        && is_help(a) && cmd != "plan" && cmd != "scaffold" {
+        // plan/scaffold take free text, handle inside their branches.
+        match cmd {
+            "scan" => {
+                println!("usage. heides scan [dir]");
+                return ExitCode::SUCCESS;
             }
+            "status" => {
+                println!("usage. heides status [dir]");
+                return ExitCode::SUCCESS;
+            }
+            "query" => {
+                println!(
+                    "usage. heides query [callers|imports|definition|calls|neighbors|search] [name] [dir]"
+                );
+                return ExitCode::SUCCESS;
+            }
+            "check" => {
+                println!("usage. heides check [dir]");
+                return ExitCode::SUCCESS;
+            }
+            "staged" => {
+                println!("usage. heides staged [patch file] [dir]");
+                return ExitCode::SUCCESS;
+            }
+            "deps" => {
+                println!("usage. heides deps [dir]");
+                return ExitCode::SUCCESS;
+            }
+            "describe" => {
+                println!("usage. heides describe [dir]");
+                return ExitCode::SUCCESS;
+            }
+            "export" => {
+                println!("usage. heides export [dir] [out]");
+                return ExitCode::SUCCESS;
+            }
+            "watch" => {
+                println!("usage. heides watch [dir]");
+                return ExitCode::SUCCESS;
+            }
+            _ => {}
         }
     }
 
@@ -900,15 +899,14 @@ fn describe_workspace(graph: &spine::CodeGraph) {
         }
         // Skip cross-language name collisions (e.g. JS -> PY) unless
         // web surface is involved (html/css import JS).
-        if let (Some(src_lang), Some(dst_lang)) = (file_lang.get(src), file_lang.get(*dst)) {
-            if src_lang != dst_lang
-                && *src_lang != "html"
-                && *dst_lang != "html"
-                && *src_lang != "css"
-                && *dst_lang != "css"
-            {
-                continue;
-            }
+        if let (Some(src_lang), Some(dst_lang)) = (file_lang.get(src), file_lang.get(*dst))
+            && src_lang != dst_lang
+            && *src_lang != "html"
+            && *dst_lang != "html"
+            && *src_lang != "css"
+            && *dst_lang != "css"
+        {
+            continue;
         }
         if let Some(p) = pairs.iter_mut().find(|(a, b, _)| *a == src && *b == *dst) {
             p.2 += 1;

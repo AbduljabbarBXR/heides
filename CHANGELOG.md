@@ -2,6 +2,10 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.14.2
+
+* Collapsed two nested ifs into let chains per clippy, CI lint gate green.
+
 ## 0.14.1
 
 * rustfmt exact line joins in the language aware file talk map, CI format gate green.
