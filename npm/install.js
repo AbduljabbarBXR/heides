@@ -19,6 +19,7 @@ const ASSETS = {
   "linux-x64": "heides-x86_64-unknown-linux-gnu",
   "linux-arm64": "heides-aarch64-unknown-linux-gnu",
   "linux-arm64-termux": "heides-aarch64-linux-android",
+  "android-arm64": "heides-aarch64-linux-android",
   "darwin-arm64": "heides-aarch64-apple-darwin",
   "darwin-x64": "heides-x86_64-apple-darwin",
   "win32-x64": "heides-x86_64-pc-windows-msvc.exe",

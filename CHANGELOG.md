@@ -2,6 +2,11 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.14.4
+
+* npm installer maps android-arm64 to the Android build, Termux reports android not linux so global installs failed without it.
+* Terminal wordmark is figlet standard ASCII, phone safe on every font. README keeps the PNG banner.
+
 ## 0.14.3
 
 * TTY only ANSI Shadow wordmark on the bare command and help screens, verified byte identical to the approved render, silent on pipes so agents and the dash free contract are unaffected.
