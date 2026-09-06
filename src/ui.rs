@@ -124,11 +124,7 @@ pub fn banner() -> Option<&'static str> {
         || std::env::var_os("TERM")
             .map(|t| t == "dumb")
             .unwrap_or(false);
-    if tty && !muted {
-        Some(BANNER)
-    } else {
-        None
-    }
+    if tty && !muted { Some(BANNER) } else { None }
 }
 
 /// A running pulse for long lived commands. Only exists when progress is
