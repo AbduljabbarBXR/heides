@@ -2,6 +2,11 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.14.3
+
+* TTY only ANSI Shadow wordmark on the bare command and help screens, verified byte identical to the approved render, silent on pipes so agents and the dash free contract are unaffected.
+* README shows the same wordmark art and keeps Compatibility prose grouped with every logo row at the very bottom.
+
 ## 0.14.2
 
 * Collapsed two nested ifs into let chains per clippy, CI lint gate green.
