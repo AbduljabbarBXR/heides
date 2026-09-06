@@ -108,11 +108,11 @@ impl Ui {
 /// every terminal measures every glyph identically, no crooked
 /// columns on phone fonts. The gallery art lives in the README.
 const BANNER: &str = concat!(
-    "#  #  ####  ####  ####  ####  ####\n",
-    "#  #  #   #   #  #  #  #\n",
-    "####  ###   #   #  #  ###  ####\n",
-    "#  #  #   #   #  #  #     #\n",
-    "#  #  ####  ####  ####  ####  ####",
+    " _   _ _____ ___ ____  _____ ____\n",
+    "| | | | ____|_ _|  _ \\| ____/ ___|\n",
+    "| |_| |  _|  | || | | |  _| \\___ \\\n",
+    "|  _  | |___ | || |_| | |___ ___) |\n",
+    "|_| |_|_____|___|____/|_____|____/",
 );
 
 /// Show the wordmark on a real terminal only. Pipes, NO_COLOR and
@@ -280,7 +280,7 @@ mod tests {
     #[test]
     fn banner_art_holds_the_dash_free_contract() {
         let _test_lock = TEST_LOCK.lock().unwrap();
-        assert!(BANNER.contains("####"));
+        assert!(BANNER.contains('_'));
         assert!(!BANNER.contains('-'));
         assert!(!BANNER.contains('–'));
         assert!(!BANNER.contains('—'));
