@@ -104,16 +104,15 @@ impl Ui {
     }
 }
 
-/// HEIDES wordmark for interactive entry points. Block glyphs and
-/// spaces only, so the dash free output contract holds everywhere
-/// it renders.
+/// HEIDES wordmark for interactive entry points. Plain ASCII so
+/// every terminal measures every glyph identically, no crooked
+/// columns on phone fonts. The gallery art lives in the README.
 const BANNER: &str = concat!(
-    "██╗  ██╗███████╗██╗██████╗ ███████╗███████╗\n",
-    "██║  ██║██╔════╝██║██╔══██╗██╔════╝██╔════╝\n",
-    "███████║█████╗  ██║██║  ██║█████╗  ███████╗\n",
-    "██╔══██║██╔══╝  ██║██║  ██║██╔══╝  ╚════██║\n",
-    "██║  ██║███████╗██║██████╔╝███████╗███████║\n",
-    "╚═╝  ╚═╝╚══════╝╚═╝╚═════╝ ╚══════╝╚══════╝",
+    "#  #  ####  ####  ####  ####  ####\n",
+    "#  #  #   #   #  #  #  #\n",
+    "####  ###   #   #  #  ###  ####\n",
+    "#  #  #   #   #  #  #     #\n",
+    "#  #  ####  ####  ####  ####  ####",
 );
 
 /// Show the wordmark on a real terminal only. Pipes, NO_COLOR and
@@ -281,10 +280,10 @@ mod tests {
     #[test]
     fn banner_art_holds_the_dash_free_contract() {
         let _test_lock = TEST_LOCK.lock().unwrap();
-        assert!(BANNER.contains("█"));
+        assert!(BANNER.contains("####"));
         assert!(!BANNER.contains('-'));
         assert!(!BANNER.contains('–'));
         assert!(!BANNER.contains('—'));
-        assert_eq!(BANNER.lines().count(), 6);
+        assert_eq!(BANNER.lines().count(), 5);
     }
 }
