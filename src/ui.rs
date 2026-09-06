@@ -104,6 +104,32 @@ impl Ui {
     }
 }
 
+/// HEIDES wordmark for interactive entry points. Block glyphs and
+/// spaces only, so the dash free output contract holds everywhere
+/// it renders.
+const BANNER: &str = concat!(
+    "█  █  ████   ██   ███   ████   ███\n",
+    "█  █  █      ██   █  █  █     █\n",
+    "████  ███    ██   █  █  ███   ███\n",
+    "█  █  █      ██   █  █  █        █\n",
+    "█  █  ████   ██   ███   ████  ████",
+);
+
+/// Show the wordmark on a real terminal only. Pipes, NO_COLOR and
+/// dumb terminals get None, so agents, logs and tests never see it.
+pub fn banner() -> Option<&'static str> {
+    let tty = std::io::stdout().is_terminal();
+    let muted = std::env::var_os("NO_COLOR").is_some()
+        || std::env::var_os("TERM")
+            .map(|t| t == "dumb")
+            .unwrap_or(false);
+    if tty && !muted {
+        Some(BANNER)
+    } else {
+        None
+    }
+}
+
 /// A running pulse for long lived commands. Only exists when progress is
 /// allowed, writes exclusively to stderr, ticks once a second with a
 /// carriage return, and clears its own line when the operation ends.
@@ -246,5 +272,22 @@ mod tests {
         assert!(ui.grouped);
         *COLOR_OVERRIDE.lock().unwrap() = None;
         *GROUPED_OVERRIDE.lock().unwrap() = false;
+    }
+
+    #[test]
+    fn banner_stays_silent_on_pipes() {
+        let _test_lock = TEST_LOCK.lock().unwrap();
+        // Test harness stdout is piped, so the wordmark must stay off.
+        assert!(banner().is_none());
+    }
+
+    #[test]
+    fn banner_art_holds_the_dash_free_contract() {
+        let _test_lock = TEST_LOCK.lock().unwrap();
+        assert!(BANNER.contains("█"));
+        assert!(!BANNER.contains('-'));
+        assert!(!BANNER.contains('–'));
+        assert!(!BANNER.contains('—'));
+        assert_eq!(BANNER.lines().count(), 5);
     }
 }

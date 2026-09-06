@@ -53,6 +53,9 @@ fn main() -> ExitCode {
     let arg4 = args.get(4).map(|s| s.as_str());
 
     if cmd.is_empty() || is_help(cmd) {
+        if let Some(mark) = heides::ui::banner() {
+            println!("{}\n", mark);
+        }
         print_usage();
         return ExitCode::SUCCESS;
     }
