@@ -108,11 +108,12 @@ impl Ui {
 /// spaces only, so the dash free output contract holds everywhere
 /// it renders.
 const BANNER: &str = concat!(
-    "█  █  ████   ██   ███   ████   ███\n",
-    "█  █  █      ██   █  █  █     █\n",
-    "████  ███    ██   █  █  ███   ███\n",
-    "█  █  █      ██   █  █  █        █\n",
-    "█  █  ████   ██   ███   ████  ████",
+    "██╗  ██╗███████╗██╗██████╗ ███████╗███████╗\n",
+    "██║  ██║██╔════╝██║██╔══██╗██╔════╝██╔════╝\n",
+    "███████║█████╗  ██║██║  ██║█████╗  ███████╗\n",
+    "██╔══██║██╔══╝  ██║██║  ██║██╔══╝  ╚════██║\n",
+    "██║  ██║███████╗██║██████╔╝███████╗███████║\n",
+    "╚═╝  ╚═╝╚══════╝╚═╝╚═════╝ ╚══════╝╚══════╝",
 );
 
 /// Show the wordmark on a real terminal only. Pipes, NO_COLOR and
@@ -288,6 +289,6 @@ mod tests {
         assert!(!BANNER.contains('-'));
         assert!(!BANNER.contains('–'));
         assert!(!BANNER.contains('—'));
-        assert_eq!(BANNER.lines().count(), 5);
+        assert_eq!(BANNER.lines().count(), 6);
     }
 }
