@@ -1,0 +1,127 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="680" viewBox="0 0 1200 680" font-family="system-ui, -apple-system, 'Segoe UI', Arial, sans-serif">
+  <defs>
+    <pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="1.5" cy="1.5" r="1.5" fill="#20202c"/>
+    </pattern>
+    <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#60a5fa"/>
+    </marker>
+    <marker id="ahR" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#ff6b6b"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="680" fill="#0b0b10"/>
+
+  <!-- header -->
+  <rect y="0" width="1200" height="48" fill="#121219"/>
+  <rect y="47.5" width="1200" height="1" fill="#2b2b3a"/>
+  <text x="18" y="30" fill="#eceaf2" font-size="14" font-weight="800" letter-spacing="2.5">HEIDES</text>
+  <rect x="120" y="11" width="300" height="26" rx="8" fill="#1a1a24" stroke="#2b2b3a"/>
+  <text x="132" y="29" fill="#8f8fa3" font-size="11.5" font-family="monospace">/tmp/heides_src/heides-main</text>
+  <g font-size="12" fill="#eceaf2">
+    <rect x="928" y="11" width="86" height="26" rx="8" fill="#1a1a24" stroke="#2b2b3a"/><text x="941" y="29">Search</text>
+    <rect x="1020" y="11" width="70" height="26" rx="8" fill="#1a1a24" stroke="#2b2b3a"/><text x="1032" y="29">Help</text>
+    <rect x="1096" y="11" width="86" height="26" rx="8" fill="#1a1a24" stroke="#2b2b3a"/><text x="1104" y="29">Export</text>
+  </g>
+
+  <!-- stat strip -->
+  <g font-size="11">
+    <g><rect x="18" y="58" width="132" height="56" rx="10" fill="#1a1a24" stroke="#2b2b3a"/><text x="30" y="82" fill="#eceaf2" font-size="17" font-weight="700">28</text><text x="30" y="100" fill="#8f8fa3" font-size="10">FILES</text></g>
+    <g><rect x="158" y="58" width="132" height="56" rx="10" fill="#1a1a24" stroke="#2b2b3a"/><text x="170" y="82" fill="#eceaf2" font-size="17" font-weight="700">475</text><text x="170" y="100" fill="#8f8fa3" font-size="10">SYMBOLS</text></g>
+    <g><rect x="298" y="58" width="132" height="56" rx="10" fill="#1a1a24" stroke="#2b2b3a"/><text x="310" y="82" fill="#eceaf2" font-size="17" font-weight="700">4016</text><text x="310" y="100" fill="#8f8fa3" font-size="10">CALLS</text></g>
+    <g><rect x="438" y="58" width="132" height="56" rx="10" fill="#1a1a24" stroke="#2b2b3a"/><text x="450" y="82" fill="#eceaf2" font-size="17" font-weight="700">73</text><text x="450" y="100" fill="#8f8fa3" font-size="10">IMPORTS</text></g>
+    <g><rect x="578" y="58" width="132" height="56" rx="10" fill="#1a1a24" stroke="#00d4aa" opacity="0.95"/><text x="590" y="82" fill="#00d4aa" font-size="17" font-weight="700">60</text><text x="590" y="100" fill="#8f8fa3" font-size="10">ENTRYPOINTS</text></g>
+    <g><rect x="718" y="58" width="132" height="56" rx="10" fill="#1a1a24" stroke="#2b2b3a"/><text x="730" y="82" fill="#eceaf2" font-size="17" font-weight="700">55</text><text x="730" y="100" fill="#8f8fa3" font-size="10">LISTENERS</text></g>
+    <g><rect x="858" y="58" width="132" height="56" rx="10" fill="#1a1a24" stroke="#ff6b6b"/><text x="870" y="82" fill="#ff6b6b" font-size="17" font-weight="700">5</text><text x="870" y="100" fill="#8f8fa3" font-size="10">CYCLES</text></g>
+    <g><rect x="998" y="58" width="184" height="56" rx="10" fill="#1a1a24" stroke="#2b2b3a"/><text x="1010" y="82" fill="#eceaf2" font-size="17" font-weight="700">Triggers</text><text x="1010" y="100" fill="#8f8fa3" font-size="10">ENTRY · HOOKS · HUBS</text></g>
+  </g>
+
+  <!-- canvas -->
+  <rect y="124" width="1200" height="556" fill="url(#dots)"/>
+
+  <!-- edges (behind cards) -->
+  <path d="M316 300 C 368 300, 368 260, 424 260" stroke="#60a5fa" stroke-width="1.8" fill="none" marker-end="url(#ah)"/>
+  <path d="M316 420 C 368 420, 368 470, 424 470" stroke="#60a5fa" stroke-width="1.8" fill="none" marker-end="url(#ah)"/>
+  <path d="M686 260 C 730 260, 730 300, 776 300" stroke="#60a5fa" stroke-width="1.8" fill="none" marker-end="url(#ah)"/>
+  <path d="M686 470 C 740 470, 740 320, 790 320" stroke="#ff6b6b" stroke-width="2" fill="none" marker-end="url(#ahR)"/>
+  <path d="M316 250 C 360 250, 360 200, 420 200" stroke="#55556a" stroke-width="1.3" stroke-dasharray="5 4" fill="none"/>
+
+  <!-- card: main.rs -->
+  <g font-size="12">
+    <rect x="50" y="220" width="266" height="252" rx="13" fill="#23232f" stroke="#3a3a4e"/>
+    <rect x="50" y="220" width="266" height="46" rx="13" fill="#1a1a24"/>
+    <rect x="50" y="250" width="266" height="16" fill="#1a1a24"/>
+    <circle cx="66" cy="243" r="4" fill="#00d4aa"/>
+    <text x="78" y="247" fill="#eceaf2" font-size="12" font-weight="700" font-family="monospace">src/main.rs</text>
+    <text x="252" y="247" fill="#8f8fa3" font-size="10">rust</text>
+    <g font-family="monospace" font-size="12" fill="#eceaf2">
+      <text x="62" y="292"><tspan fill="#00d4aa" font-size="10">FN</tspan><tspan dx="8">main</tspan></text><text x="284" y="292" fill="#5c5c70" font-size="10">:39</text>
+      <text x="62" y="318"><tspan fill="#00d4aa" font-size="10">FN</tspan><tspan dx="8">describe_workspace</tspan></text><text x="284" y="318" fill="#5c5c70" font-size="10">:740</text>
+      <text x="62" y="344"><tspan fill="#8f8fa3" font-size="10">CONST</tspan><tspan dx="8">VERSION</tspan></text><text x="284" y="344" fill="#5c5c70" font-size="10">:8</text>
+    </g>
+    <text x="62" y="452" fill="#8f8fa3" font-size="11">3 symbols · 9 out · 0 in</text>
+  </g>
+
+  <!-- card: server.rs -->
+  <g font-size="12">
+    <rect x="424" y="150" width="262" height="200" rx="13" fill="#23232f" stroke="#3a3a4e"/>
+    <rect x="424" y="150" width="262" height="46" rx="13" fill="#1a1a24"/>
+    <rect x="424" y="180" width="262" height="16" fill="#1a1a24"/>
+    <circle cx="440" cy="173" r="4" fill="#60a5fa"/>
+    <text x="452" y="177" fill="#eceaf2" font-size="12" font-weight="700" font-family="monospace">src/server.rs</text>
+    <text x="622" y="177" fill="#8f8fa3" font-size="10">rust</text>
+    <g font-family="monospace" font-size="12" fill="#eceaf2">
+      <text x="436" y="222"><tspan fill="#00d4aa" font-size="10">FN</tspan><tspan dx="8">run</tspan></text><text x="654" y="222" fill="#5c5c70" font-size="10">:40</text>
+      <text x="436" y="248"><tspan fill="#00d4aa" font-size="10">FN</tspan><tspan dx="8">handle</tspan></text><text x="654" y="248" fill="#5c5c70" font-size="10">:88</text>
+    </g>
+    <text x="436" y="330" fill="#8f8fa3" font-size="11">11 symbols · 6 out · 2 in</text>
+  </g>
+
+  <!-- card: spine.rs -->
+  <g font-size="12">
+    <rect x="424" y="390" width="262" height="200" rx="13" fill="#23232f" stroke="#00d4aa"/>
+    <rect x="424" y="390" width="262" height="46" rx="13" fill="#1a1a24"/>
+    <rect x="424" y="420" width="262" height="16" fill="#1a1a24"/>
+    <circle cx="440" cy="413" r="4" fill="#00d4aa"/>
+    <text x="452" y="417" fill="#eceaf2" font-size="12" font-weight="700" font-family="monospace">src/spine.rs</text>
+    <text x="622" y="417" fill="#8f8fa3" font-size="10">rust</text>
+    <g font-family="monospace" font-size="12" fill="#eceaf2">
+      <text x="436" y="462"><tspan fill="#fbbf24" font-size="10">STRUCT</tspan><tspan dx="8">CodeGraph</tspan></text><text x="654" y="462" fill="#5c5c70" font-size="10">:22</text>
+      <text x="436" y="488"><tspan fill="#00d4aa" font-size="10">FN</tspan><tspan dx="8">callers_of</tspan></text><text x="654" y="488" fill="#5c5c70" font-size="10">:96</text>
+    </g>
+    <text x="436" y="570" fill="#8f8fa3" font-size="11">24 symbols · 4 out · 11 in</text>
+  </g>
+
+  <!-- ghost card: scaffold preview -->
+  <g font-size="12">
+    <rect x="790" y="220" width="250" height="170" rx="13" fill="rgba(0,212,170,0.05)" stroke="#00d4aa" stroke-dasharray="8 5"/>
+    <text x="806" y="247" fill="#eceaf2" font-size="12" font-weight="700" font-family="monospace">src/db/session.ts</text>
+    <text x="1000" y="247" fill="#00d4aa" font-size="10">new</text>
+    <g font-family="monospace" font-size="12" fill="#eceaf2">
+      <text x="802" y="282"><tspan fill="#00d4aa" font-size="10">NEW</tspan><tspan dx="8">createSession</tspan></text>
+      <text x="802" y="308"><tspan fill="#60a5fa" font-size="10">LINK</tspan><tspan dx="8">loginUser</tspan><tspan dx="6" fill="#00d4aa">↔ login.ts</tspan></text>
+    </g>
+    <text x="802" y="368" fill="#8f8fa3" font-size="11">preview only · nothing written</text>
+  </g>
+
+  <!-- legend -->
+  <g font-size="11" fill="#8f8fa3">
+    <rect x="50" y="596" width="330" height="66" rx="10" fill="#15151d" stroke="#2b2b3a"/>
+    <line x1="64" y1="616" x2="104" y2="616" stroke="#60a5fa" stroke-width="2"/><text x="112" y="620">call</text>
+    <line x1="160" y1="616" x2="200" y2="616" stroke="#55556a" stroke-width="1.5" stroke-dasharray="5 4"/><text x="208" y="620">import</text>
+    <line x1="268" y1="616" x2="308" y2="616" stroke="#ff6b6b" stroke-width="2"/><text x="316" y="620">cycle</text>
+    <text x="64" y="644">dashed cards are scaffold previews · * marks entrypoints</text>
+  </g>
+
+  <!-- triggers mini panel -->
+  <g font-size="11">
+    <rect x="790" y="420" width="360" height="170" rx="12" fill="#1a1a24" stroke="#2b2b3a"/>
+    <text x="806" y="444" fill="#8f8fa3" font-size="10" letter-spacing="1">TRIGGERS</text>
+    <text x="806" y="468" fill="#eceaf2" font-family="monospace">* main <tspan fill="#5c5c70">src/main.rs:39</tspan></text>
+    <text x="806" y="490" fill="#eceaf2" font-family="monospace">* handle <tspan fill="#5c5c70">src/server.rs:88</tspan></text>
+    <text x="806" y="512" fill="#fbbf24" font-family="monospace">walk calls walk <tspan fill="#5c5c70">cycle</tspan></text>
+    <text x="806" y="534" fill="#8f8fa3">load bearing: new · scan_file · run_workspace</text>
+    <text x="806" y="566" fill="#00d4aa">locate jumps back to the map</text>
+  </g>
+</svg>
