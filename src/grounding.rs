@@ -13,7 +13,24 @@ use crate::spine::CodeGraph;
 pub struct PlanVerdict {
     pub feasible: bool,
     pub notes: Vec<String>,
+    /// What the plan was actually grounded on: symbol, file and line. The
+    /// audit found plan printing "feasible true" with no evidence, which
+    /// reads as a verdict rather than an absence of one.
+    pub evidence: Vec<Evidence>,
 }
+
+/// One grounded fact behind the verdict.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Evidence {
+    pub kind: String,
+    pub symbol: String,
+    pub file: String,
+    pub line: u64,
+}
+
+/// How many evidence rows a verdict may carry. Bounded output is part of the
+/// contract: grounding runs inside an agent loop.
+const MAX_EVIDENCE: usize = 12;
 
 /// Evaluate a plan against the current codebase graph.
 ///
@@ -29,11 +46,13 @@ pub fn evaluate(plan: &str, graph: &CodeGraph, root: &Path) -> PlanVerdict {
         return PlanVerdict {
             feasible: false,
             notes,
+            evidence: Vec::new(),
         };
     }
 
     notes.push("grounding received the plan.".to_string());
 
+    let mut evidence: Vec<Evidence> = Vec::new();
     let mut found = Vec::new();
     let mut missing = Vec::new();
     for word in plan.split(|c: char| !c.is_alphanumeric() && c != '_') {
@@ -44,9 +63,27 @@ pub fn evaluate(plan: &str, graph: &CodeGraph, root: &Path) -> PlanVerdict {
         if word.starts_with(char::is_numeric) {
             continue;
         }
-        if !graph.symbols_named(word).is_empty() {
+        let hits = graph.symbols_named(word);
+        if !hits.is_empty() {
             if !found.contains(&word.to_string()) {
                 found.push(word.to_string());
+            }
+            if evidence.len() < MAX_EVIDENCE {
+                for h in hits.iter().take(2) {
+                    if evidence
+                        .iter()
+                        .any(|e| e.symbol == h.name && e.file == h.file)
+                    {
+                        continue;
+                    }
+                    evidence.push(Evidence {
+                        kind: "symbol".to_string(),
+                        symbol: h.name.clone(),
+                        file: h.file.clone(),
+                        line: h.line as u64,
+                    });
+                    break;
+                }
             }
             continue;
         }
@@ -90,9 +127,38 @@ pub fn evaluate(plan: &str, graph: &CodeGraph, root: &Path) -> PlanVerdict {
         ));
     }
 
+    if found.is_empty() {
+        // No identifier in the plan exists yet. Say that plainly, and hand
+        // over what the spine does contain so the agent is not left guessing.
+        notes.push(
+            "no identifier in this plan exists in the spine. this plan introduces new definitions."
+                .to_string(),
+        );
+        let mut closest: Vec<String> = graph
+            .symbols
+            .iter()
+            .filter(|s| s.kind.contains("function") || s.kind.contains("method"))
+            .map(|s| format!("{} at {}:{}", s.name, s.file, s.line))
+            .take(3)
+            .collect();
+        if !closest.is_empty() {
+            notes.push(format!(
+                "existing functions to build on or replace: {}.",
+                closest.join(", ")
+            ));
+        }
+        notes.push(format!(
+            "spine holds {} file(s) and {} symbol(s). index version {}.",
+            graph.files.len(),
+            graph.symbols.len(),
+            crate::spine::INDEX_VERSION
+        ));
+    }
+
     PlanVerdict {
         feasible: true,
         notes,
+        evidence,
     }
 }
 

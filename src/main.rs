@@ -482,6 +482,9 @@ fn main() -> ExitCode {
             };
             let verdict = grounding::evaluate(&plan, &graph, &root);
             println!("feasible {}", verdict.feasible);
+            for e in &verdict.evidence {
+                println!("  grounded {} {} at {}:{}", e.kind, e.symbol, e.file, e.line);
+            }
             for n in &verdict.notes {
                 println!("  {}", n);
             }
