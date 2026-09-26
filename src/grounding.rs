@@ -68,22 +68,34 @@ pub fn evaluate(plan: &str, graph: &CodeGraph, root: &Path) -> PlanVerdict {
             if !found.contains(&word.to_string()) {
                 found.push(word.to_string());
             }
-            if evidence.len() < MAX_EVIDENCE {
-                for h in hits.iter().take(2) {
-                    if evidence
-                        .iter()
-                        .any(|e| e.symbol == h.name && e.file == h.file)
-                    {
-                        continue;
-                    }
-                    evidence.push(Evidence {
-                        kind: "symbol".to_string(),
-                        symbol: h.name.clone(),
-                        file: h.file.clone(),
-                        line: h.line,
-                    });
+            // A name can exist in more than one file. An agent planning a
+            // change needs to know that, so every distinct location is listed
+            // rather than the first one, and the note says how many there are.
+            let mut locations = 0usize;
+            for h in hits.iter() {
+                if evidence
+                    .iter()
+                    .any(|e| e.symbol == h.name && e.file == h.file)
+                {
+                    continue;
+                }
+                if evidence.len() >= MAX_EVIDENCE {
                     break;
                 }
+                evidence.push(Evidence {
+                    kind: "symbol".to_string(),
+                    symbol: h.name.clone(),
+                    file: h.file.clone(),
+                    line: h.line,
+                });
+                locations += 1;
+            }
+            if locations > 1 {
+                notes.push(format!(
+                    "symbol {} exists in {} files, every location is listed as evidence.",
+                    word,
+                    hits.len()
+                ));
             }
             continue;
         }
@@ -338,6 +350,140 @@ fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spine::{CodeGraph, FileEntry, Symbol};
+
+    fn graph_with() -> CodeGraph {
+        let mut g = CodeGraph::new();
+        g.files.push(FileEntry {
+            path: "src/auth.rs".into(),
+            lang: "rust".into(),
+            mtime: 1,
+            size: 1,
+        });
+        for (name, line) in [("login", 4u64), ("refresh_token", 9), ("logout", 14)] {
+            g.symbols.push(Symbol {
+                name: name.into(),
+                kind: "function_definition".into(),
+                file: "src/auth.rs".into(),
+                line,
+                lang: "rust".into(),
+                signature: format!("fn {name}()"),
+                params: vec![],
+                doc: String::new(),
+            });
+        }
+        g.rebuild_indexes();
+        g
+    }
+
+    fn tmp(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("heides_{tag}_{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_plan_naming_a_symbol_comes_back_with_evidence() {
+        let g = graph_with();
+        let v = evaluate("call refresh_token before login", &g, &tmp("ground_a"));
+        assert!(v.feasible);
+        let refresh = v
+            .evidence
+            .iter()
+            .find(|e| e.symbol == "refresh_token")
+            .expect("refresh_token must be grounded");
+        assert_eq!(refresh.file, "src/auth.rs");
+        assert_eq!(refresh.line, 9);
+        assert!(
+            !v.notes
+                .iter()
+                .any(|n| n.contains("introduces new definitions"))
+        );
+    }
+
+    #[test]
+    fn a_plan_with_nothing_existing_says_so_instead_of_pretending() {
+        let g = graph_with();
+        let v = evaluate("add a health endpoint", &g, &tmp("ground_b"));
+        assert!(v.feasible);
+        assert!(v.evidence.is_empty(), "{:?}", v.evidence);
+        assert!(
+            v.notes
+                .iter()
+                .any(|n| n.contains("introduces new definitions")),
+            "{:?}",
+            v.notes
+        );
+        assert!(
+            v.notes
+                .iter()
+                .any(|n| n.contains("existing functions to build on")),
+            "{:?}",
+            v.notes
+        );
+    }
+
+    #[test]
+    fn a_name_in_two_files_lists_both_locations() {
+        // Found by running the release binary: the evidence named only the
+        // first file, which reads as if the other one did not exist.
+        let mut g = graph_with();
+        g.files.push(FileEntry {
+            path: "src/routes.rs".into(),
+            lang: "rust".into(),
+            mtime: 1,
+            size: 1,
+        });
+        g.symbols.push(Symbol {
+            name: "login".into(),
+            kind: "function_definition".into(),
+            file: "src/routes.rs".into(),
+            line: 21,
+            lang: "rust".into(),
+            signature: "fn login()".into(),
+            params: vec![],
+            doc: String::new(),
+        });
+        g.rebuild_indexes();
+        let v = evaluate("harden login", &g, &tmp("ground_c"));
+        let files: Vec<&str> = v
+            .evidence
+            .iter()
+            .filter(|e| e.symbol == "login")
+            .map(|e| e.file.as_str())
+            .collect();
+        assert_eq!(files.len(), 2, "{:?}", v.evidence);
+        assert!(files.contains(&"src/auth.rs") && files.contains(&"src/routes.rs"));
+        assert!(
+            v.notes.iter().any(|n| n.contains("exists in 2 files")),
+            "{:?}",
+            v.notes
+        );
+    }
+
+    #[test]
+    fn evidence_is_capped() {
+        let mut g = graph_with();
+        for i in 0..40 {
+            g.symbols.push(Symbol {
+                name: format!("symbol_number_{i}"),
+                kind: "function_definition".into(),
+                file: "src/many.rs".into(),
+                line: i as u64 + 1,
+                lang: "rust".into(),
+                signature: String::new(),
+                params: vec![],
+                doc: String::new(),
+            });
+        }
+        g.rebuild_indexes();
+        let plan = (0..40)
+            .map(|i| format!("symbol_number_{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let v = evaluate(&plan, &g, &tmp("ground_d"));
+        assert!(v.evidence.len() <= MAX_EVIDENCE, "{}", v.evidence.len());
+    }
 
     #[test]
     fn flags_missing_symbols() {
