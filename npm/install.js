@@ -12,6 +12,7 @@ const os = require("os");
 const path = require("path");
 
 const VERSION = require("./package.json").version;
+const BIN_VERSION = process.env.HEIDES_BIN_VERSION || "0.14.4";
 const REPO = "AbduljabbarBXR/heides";
 const BIN_NAME = "heides";
 
@@ -101,7 +102,7 @@ async function main() {
   const binDir = path.join(__dirname, "bin");
   fs.mkdirSync(binDir, { recursive: true });
   const dest = path.join(binDir, exeName());
-  const url = `https://github.com/${REPO}/releases/download/v${VERSION}/${asset}`;
+  const url = `https://github.com/${REPO}/releases/download/v${BIN_VERSION}/${asset}`;
   console.log(`heides: downloading ${asset} ...`);
   await download(url, dest);
   if (process.platform !== "win32") fs.chmodSync(dest, 0o755);
@@ -115,4 +116,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { assetFor, currentKey, exeName, isMusl, isTermux, VERSION };
+module.exports = { assetFor, currentKey, exeName, isMusl, isTermux, VERSION, BIN_VERSION };

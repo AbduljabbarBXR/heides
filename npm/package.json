@@ -1,6 +1,6 @@
 {
   "name": "heides",
-  "version": "0.14.4",
+  "version": "0.14.5",
   "description": "HEIDES installer. Downloads the prebuilt HEIDES binary for your platform and exposes the heides command. Deterministic code analysis harness for AI agents.",
   "bin": {
     "heides": "bin/heides.js"
@@ -29,7 +29,7 @@
     "url": "git+https://github.com/AbduljabbarBXR/heides.git",
     "directory": "npm"
   },
-  "homepage": "https://github.com/AbduljabbarBXR/heides#readme",
+  "homepage": "https://tawakkul-labs.co.ke",
   "bugs": {
     "url": "https://github.com/AbduljabbarBXR/heides/issues"
   },

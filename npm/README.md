@@ -1,5 +1,7 @@
 # heides (npm installer)
 
+[![npm](https://img.shields.io/npm/v/heides)](https://www.npmjs.com/package/heides) [![license](https://img.shields.io/npm/l/heides)](LICENSE) [![MCP](https://img.shields.io/badge/MCP-compatible-blue)](https://modelcontextprotocol.io) [![Tawakkul Labs](https://img.shields.io/badge/by-Tawakkul%20Labs-0f766e)](https://tawakkul-labs.co.ke)
+
 Installs the prebuilt [HEIDES](https://github.com/AbduljabbarBXR/heides) binary for your platform and exposes the `heides` command. HEIDES is a deterministic code analysis harness that gives AI agents senses, memory and judgment for code.
 
 ```bash
@@ -43,3 +45,7 @@ npm uninstall -g heides
 ## License
 
 MIT. See [LICENSE](./LICENSE). Binary builds follow the [HEIDES repo license](https://github.com/AbduljabbarBXR/heides).
+
+---
+
+Links: [npm](https://www.npmjs.com/package/heides) | [GitHub](https://github.com/AbduljabbarBXR/heides) | [Tawakkul Labs](https://tawakkul-labs.co.ke)
