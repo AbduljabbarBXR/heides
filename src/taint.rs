@@ -44,8 +44,17 @@ pub(crate) const SOURCES: [(&str, &str); 14] = [
     ),
 ];
 
-pub(crate) const SINKS: [(&str, &str, &str); 21] = [
+/// Sinks are per language. Where a name is ambiguous between SQL and something
+/// harmless, it only counts when it is called on a database-ish receiver, so
+/// `run(` in a task runner stays silent while `db.run(` is SQL.
+pub(crate) const SINKS: &[(&str, &str, &str)] = &[
     ("javascript", r"\b(query|execute|exec)\s*\(", "SQL"),
+    (
+        "javascript",
+        r"\b(db|database|sqlite|sqlite3|pg|mysql|conn|connection|client|stmt|statement|tx|transaction|pool|sequelize|knex|prisma|typeorm|drizzle|orm|sql|store)\s*\.\s*(run|exec|execSQL|raw|literal|query|all|get|prepare|execute)\s*\(",
+        "SQL",
+    ),
+    ("javascript", r"\b(execSQL|queryRaw|executeSql)\s*\(", "SQL"),
     ("javascript", r"\b(eval|Function)\s*\(", "eval"),
     ("javascript", r"\bexec\s*\(", "shell"),
     ("javascript", r"\bspawn\s*\(", "shell"),
@@ -54,7 +63,16 @@ pub(crate) const SINKS: [(&str, &str, &str); 21] = [
         r"\bfs\.(readFile|writeFile|unlink|rm)\s*\(",
         "filesystem",
     ),
-    ("python", r"\b(sql|execute|executemany)\s*\(", "SQL"),
+    (
+        "python",
+        r"\b(sql|execute|executemany|executescript)\s*\(",
+        "SQL",
+    ),
+    (
+        "python",
+        r"\b(cursor|cur|conn|connection|db|session|engine|tx|transaction|pool)\s*\.\s*(execute|executemany|executescript|raw|query|run)\s*\(",
+        "SQL",
+    ),
     (
         "python",
         r"\b(os\.system|subprocess|eval|exec)\s*\(",
@@ -74,7 +92,7 @@ pub(crate) const SINKS: [(&str, &str, &str); 21] = [
     ("python", r"\bmark_safe\s*\(", "mark_safe"),
     (
         "php",
-        r"\b(mysqli_query|query|exec|system|shell_exec|eval|include|unlink)\s*\(",
+        r"\b(mysqli_query|query|exec|prepare|rawQuery|pg_query|system|shell_exec|eval|include|unlink)\s*\(",
         "SQL",
     ),
     (
@@ -84,7 +102,7 @@ pub(crate) const SINKS: [(&str, &str, &str); 21] = [
     ),
     (
         "go",
-        r"\b(db\.Query|QueryRow|Exec|exec\.Command|sql\.Open)\s*\(",
+        r"\b(db\.(Query|QueryRow|Exec|Raw|Prepare|QueryContext|QueryRowContext|ExecContext)|QueryRow|Exec|exec\.Command|sql\.Open)\s*\(",
         "SQL",
     ),
     (
@@ -109,7 +127,7 @@ pub(crate) const SINKS: [(&str, &str, &str); 21] = [
     ),
     (
         "csharp",
-        r"\b(SqlCommand|ExecuteScalar|ExecuteNonQuery|ExecuteReader)\s*\(",
+        r"\b(SqlCommand|ExecuteScalar|ExecuteNonQuery|ExecuteReader|FromSqlRaw|ExecuteSqlRaw|ExecuteSqlInterpolated)\s*\(",
         "SQL",
     ),
     ("csharp", r"\bProcess\.Start\s*\(", "shell"),
@@ -142,10 +160,17 @@ pub fn scan_file(path: &Path, content: &str) -> Vec<TaintReport> {
                 }
             }
             for (l, pat, sink) in SINKS {
-                if l != lang {
+                if *l != lang {
                     continue;
                 }
                 if !regex_hit(pat, line) {
+                    continue;
+                }
+                // Overlapping patterns are deliberate (a bare name plus a
+                // receiver scoped one). Report a line and sink class once.
+                if reports.iter().any(|r: &TaintReport| {
+                    r.line == line_no && r.message.contains(&format!("a {} sink", sink))
+                }) {
                     continue;
                 }
                 let used = tainted.iter().any(|(v, _)| line.contains(v.as_str()));
@@ -154,7 +179,7 @@ pub fn scan_file(path: &Path, content: &str) -> Vec<TaintReport> {
                     let src_indent = leading_spaces(src_line);
                     *src_i < i && src_indent >= indent && (i - *src_i) < 60
                 });
-                if sink == "prompt" {
+                if *sink == "prompt" {
                     if used {
                         reports.push(make_report(
                             path,
@@ -526,6 +551,86 @@ mod tests {
         let reports = scan_file(p, src);
         // "run(" must not trigger shell taint without a source.
         assert!(!reports.iter().any(|r| r.message.contains("shell")));
+    }
+
+    // The audit found db.run invisible because the SQL sink table never listed
+    // it and a rule asserted run( must stay silent. better-sqlite3, node:sqlite
+    // and Knex all use it as the primary query API, so the receiver scoped
+    // entry below is what closes that class.
+    #[test]
+    fn detects_better_sqlite3_run_sink() {
+        let src = "function load() {\n  const id = req.query.id;\n  db.run(\"DELETE FROM users WHERE id = \" + id);\n}\n";
+        let p = std::path::Path::new("app.js");
+        let reports = scan_file(p, src);
+        assert!(
+            reports.iter().any(|r| r.message.contains("SQL")),
+            "db.run with tainted input must report SQL, got {:?}",
+            reports
+        );
+    }
+
+    #[test]
+    fn detects_stmt_run_and_knex_raw() {
+        let src = "export async function find(req) {\n  const sql = \"SELECT * FROM t WHERE a = \" + req.query.a;\n  const row = await stmt.run(sql);\n  return knex.raw(sql);\n}\n";
+        let p = std::path::Path::new("db.js");
+        let reports = scan_file(p, src);
+        assert_eq!(
+            reports.iter().filter(|r| r.message.contains("SQL")).count(),
+            2,
+            "both stmt.run and knex.raw are SQL sinks: {:?}",
+            reports
+        );
+    }
+
+    #[test]
+    fn detects_python_executescript_and_cursor_run() {
+        let src = "def wipe(request):\n    table = request.args['table']\n    cursor.executescript('DROP TABLE ' + table)\n    conn.execute('DELETE FROM ' + table)\n";
+        let p = std::path::Path::new("wipe.py");
+        let reports = scan_file(p, src);
+        assert_eq!(
+            reports.iter().filter(|r| r.message.contains("SQL")).count(),
+            2,
+            "{:?}",
+            reports
+        );
+    }
+
+    #[test]
+    fn detects_php_prepare_and_csharp_raw_sql() {
+        let php = "<?php\nfunction load() {\n    $id = $_GET['id'];\n    $sql = 'SELECT * FROM u WHERE id = ' . $id;\n    return $pdo->prepare($sql);\n}\n";
+        let reports = scan_file(std::path::Path::new("a.php"), php);
+        assert!(
+            reports.iter().any(|r| r.message.contains("SQL")),
+            "pdo->prepare with a tainted id must report SQL: {:?}",
+            reports
+        );
+        let cs = "class Repo {\n    void Load(HttpRequest Request) {\n        var id = Request.QueryString[\"id\"];\n        _db.FromSqlRaw(\"SELECT * FROM U WHERE Id = \" + id);\n    }\n}\n";
+        let reports = scan_file(std::path::Path::new("R.cs"), cs);
+        assert!(
+            reports.iter().any(|r| r.message.contains("SQL")),
+            "FromSqlRaw must report SQL: {:?}",
+            reports
+        );
+    }
+
+    #[test]
+    fn detects_go_gorm_raw() {
+        let src = "package main\n\nfunc load(r *http.Request) {\n\tid := r.URL.Query().Get(\"id\")\n\tdb.Raw(\"SELECT * FROM u WHERE id = \" + id).Scan(&out)\n}\n";
+        let reports = scan_file(std::path::Path::new("g.go"), src);
+        assert!(
+            reports.iter().any(|r| r.message.contains("SQL")),
+            "gorm db.Raw must report SQL: {:?}",
+            reports
+        );
+    }
+
+    #[test]
+    fn a_constant_bare_run_call_stays_silent() {
+        // The point of the receiver scoped rule: a test runner or task runner
+        // call with no user input is not SQL and must not fire.
+        let src = "function x() {\n  run(taskName);\n}\n";
+        let reports = scan_file(std::path::Path::new("a.js"), src);
+        assert!(reports.is_empty(), "{:?}", reports);
     }
 
     #[test]

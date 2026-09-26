@@ -23,3 +23,5 @@ jobs:
         run: cargo build --release
       - name: unit, battle, hostile and determinism suites
         run: cargo test
+      - name: installer mapping and version lock
+        run: node npm/test.js
