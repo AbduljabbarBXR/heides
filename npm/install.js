@@ -12,7 +12,10 @@ const os = require("os");
 const path = require("path");
 
 const VERSION = require("./package.json").version;
-const BIN_VERSION = process.env.HEIDES_BIN_VERSION || "0.14.4";
+// One source of truth: the binary tag tracks the published package. The env
+// override exists for testing a release that is not published yet, and a test
+// asserts that without it the two never drift.
+const BIN_VERSION = process.env.HEIDES_BIN_VERSION || VERSION;
 const REPO = "AbduljabbarBXR/heides";
 const BIN_NAME = "heides";
 
