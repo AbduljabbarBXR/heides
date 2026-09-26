@@ -80,7 +80,7 @@ pub fn evaluate(plan: &str, graph: &CodeGraph, root: &Path) -> PlanVerdict {
                         kind: "symbol".to_string(),
                         symbol: h.name.clone(),
                         file: h.file.clone(),
-                        line: h.line as u64,
+                        line: h.line,
                     });
                     break;
                 }
@@ -134,7 +134,7 @@ pub fn evaluate(plan: &str, graph: &CodeGraph, root: &Path) -> PlanVerdict {
             "no identifier in this plan exists in the spine. this plan introduces new definitions."
                 .to_string(),
         );
-        let mut closest: Vec<String> = graph
+        let closest: Vec<String> = graph
             .symbols
             .iter()
             .filter(|s| s.kind.contains("function") || s.kind.contains("method"))
