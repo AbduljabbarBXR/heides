@@ -252,6 +252,9 @@ fn open_db(root: &Path) -> Result<Connection, String> {
          CREATE INDEX IF NOT EXISTS idx_imports_imported ON imports(imported);
          CREATE VIRTUAL TABLE IF NOT EXISTS search USING fts5(
              name, kind, signature, doc, file, line
+         );
+         CREATE VIRTUAL TABLE IF NOT EXISTS search_text USING fts5(
+             path, kind, text, line
          );",
     )
     .map_err(|e| e.to_string())?;
@@ -621,9 +624,10 @@ mod tests {
         let dir = scratch_dir("searchsym");
         let graph = sample_graph();
         save(&graph, &dir).unwrap();
-        let hits = search(&dir, "send_order").expect("search runs");
-        assert!(!hits.is_empty());
+        let hits = search(&dir, "run").expect("search runs");
+        assert!(!hits.is_empty(), "symbol search must still work");
         assert_eq!(hits[0].origin, "symbol", "{:?}", hits[0]);
+        assert_eq!(hits[0].name, "run");
     }
 
     #[test]
