@@ -294,7 +294,7 @@ fn main() -> ExitCode {
                     let hits = spine::search(&root, name);
                     match hits {
                         Ok(hits) if hits.is_empty() => {
-                            println!("no symbol matches {}", name);
+                            println!("no matches for {}", name);
                         }
                         Ok(hits) => {
                             println!("{} hit(s)", hits.len());
@@ -304,10 +304,12 @@ fn main() -> ExitCode {
                                 } else {
                                     format!(", doc {}", h.doc)
                                 };
-                                println!(
-                                    "{} ({} {}) at {}:{}{}",
-                                    h.name, h.kind, name, h.file, h.line, doc
-                                );
+                                let origin = if h.origin == "text" {
+                                    h.kind.clone()
+                                } else {
+                                    format!("{} {}", h.kind, name)
+                                };
+                                println!("{} ({}) at {}:{}{}", h.name, origin, h.file, h.line, doc);
                             }
                         }
                         Err(e) => {

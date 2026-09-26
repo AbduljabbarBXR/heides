@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, params};
 
-pub const INDEX_VERSION: u32 = 7;
+pub const INDEX_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Symbol {
@@ -266,7 +266,7 @@ pub fn save(graph: &CodeGraph, root: &Path) -> Result<(), String> {
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     tx.execute_batch(
         "DELETE FROM files; DELETE FROM symbols; DELETE FROM calls; DELETE FROM imports;\
-         DELETE FROM search;",
+         DELETE FROM search; DELETE FROM search_text;",
     )
     .map_err(|e| e.to_string())?;
     {
@@ -300,6 +300,27 @@ pub fn save(graph: &CodeGraph, root: &Path) -> Result<(), String> {
                     s.doc
                 ])
                 .map_err(|e| e.to_string())?;
+        }
+    }
+    {
+        // Literals and comments, so `query search` finds the string a caller
+        // actually greps for and not only symbol names. One sequential read
+        // per file, no parse, no AST retention, capped per file so the index
+        // stays small. The audit showed `query search sql` returning nothing
+        // for a file whose whole point was a SQL string.
+        let mut ins_text = tx
+            .prepare("INSERT INTO search_text(path, kind, text, line) VALUES (?1, ?2, ?3, ?4)")
+            .map_err(|e| e.to_string())?;
+        for f in &graph.files {
+            let path = root.join(&f.path);
+            let Ok(body) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            for hit in extract_text(&body, &f.lang) {
+                ins_text
+                    .execute(params![f.path, hit.kind, hit.text, hit.line as i64])
+                    .map_err(|e| e.to_string())?;
+            }
         }
     }
     {
@@ -475,6 +496,7 @@ pub fn exists(root: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     fn sample_graph() -> CodeGraph {
@@ -517,6 +539,91 @@ mod tests {
             line: 1,
         });
         g
+    }
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "heides_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn extract_text_finds_literals_and_comments() {
+        let body = "// builds the user query\nconst q = \"SELECT * FROM users WHERE id = \";\nconst n = 5;\n";
+        let hits = extract_text(body, "javascript");
+        assert!(
+            hits.iter().any(|h| h.kind == "comment" && h.line == 1),
+            "comment: {:?}",
+            hits
+        );
+        assert!(
+            hits.iter()
+                .any(|h| h.kind == "literal" && h.text.contains("SELECT") && h.line == 2),
+            "literal: {:?}",
+            hits
+        );
+        assert!(
+            !hits.iter().any(|h| h.text == "5"),
+            "numbers are not literals"
+        );
+        let py = "# note\nquery = 'SELECT 1'\n";
+        let hits = extract_text(py, "python");
+        assert!(hits.iter().any(|h| h.kind == "comment"));
+        assert!(hits.iter().any(|h| h.kind == "literal"));
+    }
+
+    #[test]
+    fn extract_text_is_capped_per_file() {
+        let body: String = (0..200)
+            .map(|i| format!("const v{i} = \"value {i}\";\n"))
+            .collect();
+        let hits = extract_text(&body, "javascript");
+        assert!(hits.len() <= MAX_TEXT_PER_FILE, "{}", hits.len());
+    }
+
+    #[test]
+    fn search_finds_a_literal_that_is_not_a_symbol() {
+        // The audit found `query search sql` answering "no symbol matches"
+        // for a file whose whole purpose was a SQL string.
+        let dir = scratch_dir("searchtext");
+        std::fs::write(
+            dir.join("orders.js"),
+            "function load(req) {\n  const sql = \"SELECT * FROM users WHERE id = \" + req.query.id;\n  return sql;\n}\n",
+        )
+        .unwrap();
+        let mut graph = CodeGraph::new();
+        graph.root = Some(dir.clone());
+        graph.files.push(FileEntry {
+            path: "orders.js".into(),
+            lang: "javascript".into(),
+            mtime: 0,
+            size: 0,
+        });
+        save(&graph, &dir).unwrap();
+        let hits = search(&dir, "users").expect("search runs");
+        assert!(
+            hits.iter()
+                .any(|h| h.origin == "text" && h.file == "orders.js" && h.line == 2),
+            "expected a text hit on line 2, got {:?}",
+            hits
+        );
+    }
+
+    #[test]
+    fn search_still_finds_symbols_first() {
+        let dir = scratch_dir("searchsym");
+        let graph = sample_graph();
+        save(&graph, &dir).unwrap();
+        let hits = search(&dir, "send_order").expect("search runs");
+        assert!(!hits.is_empty());
+        assert_eq!(hits[0].origin, "symbol", "{:?}", hits[0]);
     }
 
     #[test]
@@ -571,6 +678,68 @@ mod tests {
     }
 }
 
+/// A literal or comment pulled out of a file body so text search can find it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextHit {
+    pub kind: &'static str,
+    pub text: String,
+    pub line: u64,
+}
+
+const MAX_TEXT_PER_FILE: usize = 24;
+const MAX_TEXT_LEN: usize = 200;
+
+/// Extract string literals and comments from one file body. Deliberately a
+/// cheap scan rather than a parse: the point is that an agent can grep for a
+/// query string and find the file, not that we understand the file.
+pub fn extract_text(body: &str, lang: &str) -> Vec<TextHit> {
+    let hash = lang == "python" || lang == "yaml" || lang == "toml" || lang == "dockerfile";
+    let mut out: Vec<TextHit> = Vec::new();
+    for (i, line) in body.lines().enumerate() {
+        if out.len() >= MAX_TEXT_PER_FILE {
+            break;
+        }
+        let trimmed = line.trim_start();
+        if hash && trimmed.starts_with('#') {
+            push_text(&mut out, "comment", trimmed, i);
+            continue;
+        }
+        if !hash && (trimmed.starts_with("//") || trimmed.starts_with("/*")) {
+            push_text(&mut out, "comment", trimmed, i);
+        }
+        for (quote, closer) in [('"', '"'), ('\'', '\''), ('`', '`')] {
+            let mut rest = line;
+            while let Some(start) = rest.find(quote) {
+                let after = &rest[start + 1..];
+                let Some(len) = after.find(closer) else {
+                    break;
+                };
+                let literal = &after[..len];
+                if !literal.trim().is_empty() && !literal.contains(quote) {
+                    push_text(&mut out, "literal", literal, i);
+                }
+                rest = &after[len + 1..];
+            }
+        }
+    }
+    out
+}
+
+fn push_text(out: &mut Vec<TextHit>, kind: &'static str, raw: &str, line: usize) {
+    if out.len() >= MAX_TEXT_PER_FILE {
+        return;
+    }
+    let text: String = raw.trim().chars().take(MAX_TEXT_LEN).collect();
+    if text.is_empty() {
+        return;
+    }
+    out.push(TextHit {
+        kind,
+        text,
+        line: line as u64 + 1,
+    });
+}
+
 /// One text search hit, a symbol row whose name, kind, signature or doc
 /// matched the query.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -580,6 +749,8 @@ pub struct SearchHit {
     pub file: String,
     pub line: u64,
     pub doc: String,
+    /// "symbol" or "text", so the caller can say where the hit came from.
+    pub origin: String,
 }
 
 /// Free text search over names, kinds, signatures and docs. Every word
@@ -610,12 +781,46 @@ pub fn search(root: &Path, query: &str) -> Result<Vec<SearchHit>, String> {
                 file: r.get(2)?,
                 line: r.get::<_, i64>(3)? as u64,
                 doc: r.get(4)?,
+                origin: String::new(),
             })
         })
         .map_err(|e| e.to_string())?;
     let mut hits = Vec::new();
     for row in rows {
-        hits.push(row.map_err(|e| e.to_string())?);
+        let mut hit = row.map_err(|e| e.to_string())?;
+        hit.origin = "symbol".to_string();
+        hits.push(hit);
     }
+    // Literals and comments, so a string in a file body is findable.
+    let mut text_stmt = conn
+        .prepare(
+            "SELECT path, kind, text, line FROM search_text \
+             WHERE search_text MATCH ?1 ORDER BY rank LIMIT 25",
+        )
+        .map_err(|e| e.to_string())?;
+    let text_rows = text_stmt
+        .query_map(params![match_q], |r| {
+            Ok(SearchHit {
+                name: r.get::<_, String>(2)?,
+                kind: r.get::<_, String>(1)?,
+                file: r.get::<_, String>(0)?,
+                line: r.get::<_, i64>(3)? as u64,
+                doc: String::new(),
+                origin: "text".to_string(),
+            })
+        })
+        .map_err(|e| e.to_string());
+    if let Ok(text_rows) = text_rows {
+        for row in text_rows.flatten() {
+            if hits
+                .iter()
+                .any(|h| h.file == row.file && h.line == row.line && h.name == row.name)
+            {
+                continue;
+            }
+            hits.push(row);
+        }
+    }
+    hits.truncate(25);
     Ok(hits)
 }
