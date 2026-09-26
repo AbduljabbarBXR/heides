@@ -73,7 +73,10 @@ pub fn evaluate(plan: &str, graph: &CodeGraph, root: &Path) -> PlanVerdict {
             // rather than the first one, and the note says how many there are.
             let mut locations = 0usize;
             for h in hits.iter() {
-                if evidence.iter().any(|e| e.symbol == h.name && e.file == h.file) {
+                if evidence
+                    .iter()
+                    .any(|e| e.symbol == h.name && e.file == h.file)
+                {
                     continue;
                 }
                 if evidence.len() >= MAX_EVIDENCE {
@@ -391,7 +394,11 @@ mod tests {
             .expect("refresh_token must be grounded");
         assert_eq!(refresh.file, "src/auth.rs");
         assert_eq!(refresh.line, 9);
-        assert!(!v.notes.iter().any(|n| n.contains("introduces new definitions")));
+        assert!(
+            !v.notes
+                .iter()
+                .any(|n| n.contains("introduces new definitions"))
+        );
     }
 
     #[test]
@@ -401,12 +408,16 @@ mod tests {
         assert!(v.feasible);
         assert!(v.evidence.is_empty(), "{:?}", v.evidence);
         assert!(
-            v.notes.iter().any(|n| n.contains("introduces new definitions")),
+            v.notes
+                .iter()
+                .any(|n| n.contains("introduces new definitions")),
             "{:?}",
             v.notes
         );
         assert!(
-            v.notes.iter().any(|n| n.contains("existing functions to build on")),
+            v.notes
+                .iter()
+                .any(|n| n.contains("existing functions to build on")),
             "{:?}",
             v.notes
         );
