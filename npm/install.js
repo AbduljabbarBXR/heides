@@ -13,9 +13,15 @@ const path = require("path");
 
 const VERSION = require("./package.json").version;
 // One source of truth: the binary tag tracks the published package. The env
-// override exists for testing a release that is not published yet, and a test
-// asserts that without it the two never drift.
-const BIN_VERSION = process.env.HEIDES_BIN_VERSION || VERSION;
+// overrides exist for pinning a release that is not published yet. A leading v
+// is tolerated, because a v prefixed pin used to build a vv0.14.4 tag that 404s,
+// and HEIDES_VERSION is honoured so the same pin works for the curl installer
+// and for npm.
+function resolveBinVersion(env) {
+  const raw = env.HEIDES_BIN_VERSION || env.HEIDES_VERSION || VERSION;
+  return String(raw).replace(/^v/, "");
+}
+const BIN_VERSION = resolveBinVersion(process.env);
 const REPO = "AbduljabbarBXR/heides";
 const BIN_NAME = "heides";
 
@@ -105,7 +111,7 @@ async function main() {
   const binDir = path.join(__dirname, "bin");
   fs.mkdirSync(binDir, { recursive: true });
   const dest = path.join(binDir, exeName());
-  const url = `https://github.com/${REPO}/releases/download/v${BIN_VERSION}/${asset}`;
+  const url = downloadUrl(asset, BIN_VERSION);
   console.log(`heides: downloading ${asset} ...`);
   await download(url, dest);
   if (process.platform !== "win32") fs.chmodSync(dest, 0o755);
@@ -119,4 +125,18 @@ if (require.main === module) {
   });
 }
 
-module.exports = { assetFor, currentKey, exeName, isMusl, isTermux, VERSION, BIN_VERSION };
+function downloadUrl(asset, version) {
+  return `https://github.com/${REPO}/releases/download/v${String(version).replace(/^v/, "")}/${asset}`;
+}
+
+module.exports = {
+  assetFor,
+  currentKey,
+  exeName,
+  isMusl,
+  isTermux,
+  resolveBinVersion,
+  downloadUrl,
+  VERSION,
+  BIN_VERSION,
+};
