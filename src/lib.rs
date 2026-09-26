@@ -6,6 +6,7 @@
 
 pub mod deps;
 pub mod edge;
+pub mod frameworks;
 pub mod grounding;
 pub mod harmony;
 pub mod indexer;

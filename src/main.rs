@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use heides::{deps, grounding, harmony, indexer, server, spine, ui::Stopwatch, ui::Ui, watch};
+use heides::{
+    deps, frameworks, grounding, harmony, indexer, server, spine, ui::Stopwatch, ui::Ui, watch,
+};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -294,7 +296,7 @@ fn main() -> ExitCode {
                     let hits = spine::search(&root, name);
                     match hits {
                         Ok(hits) if hits.is_empty() => {
-                            println!("no symbol matches {}", name);
+                            println!("no matches for {}", name);
                         }
                         Ok(hits) => {
                             println!("{} hit(s)", hits.len());
@@ -304,10 +306,12 @@ fn main() -> ExitCode {
                                 } else {
                                     format!(", doc {}", h.doc)
                                 };
-                                println!(
-                                    "{} ({} {}) at {}:{}{}",
-                                    h.name, h.kind, name, h.file, h.line, doc
-                                );
+                                let origin = if h.origin == "text" {
+                                    h.kind.clone()
+                                } else {
+                                    format!("{} {}", h.kind, name)
+                                };
+                                println!("{} ({}) at {}:{}{}", h.name, origin, h.file, h.line, doc);
                             }
                         }
                         Err(e) => {
@@ -480,6 +484,12 @@ fn main() -> ExitCode {
             };
             let verdict = grounding::evaluate(&plan, &graph, &root);
             println!("feasible {}", verdict.feasible);
+            for e in &verdict.evidence {
+                println!(
+                    "  grounded {} {} at {}:{}",
+                    e.kind, e.symbol, e.file, e.line
+                );
+            }
             for n in &verdict.notes {
                 println!("  {}", n);
             }
@@ -546,7 +556,7 @@ fn main() -> ExitCode {
             let root = PathBuf::from(arg2);
             match indexer::load_or_build(&root) {
                 Ok(graph) => {
-                    describe_workspace(&graph);
+                    describe_workspace(&graph, &root);
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
@@ -731,7 +741,7 @@ fn main() -> ExitCode {
 /// Workspace manifest, read only and deterministic. The output is a plain
 /// text map an agent can read instead of walking the code: languages,
 /// entrypoints, hubs, call cycles and which files talk to which.
-fn describe_workspace(graph: &spine::CodeGraph) {
+fn describe_workspace(graph: &spine::CodeGraph, root: &std::path::Path) {
     println!(
         "{} files, {} symbols, {} call(s), {} import(s)",
         graph.files.len(),
@@ -802,12 +812,25 @@ fn describe_workspace(graph: &spine::CodeGraph) {
         .collect();
     script_files.sort_unstable();
     script_files.dedup();
+    // A function registered as a route is called by the framework, not by
+    // anything in the workspace, so it is an entrypoint and not a dead root.
+    let route_handlers = frameworks::route_handlers(
+        root,
+        &graph
+            .files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect::<Vec<_>>(),
+    );
     let mut entry_names: Vec<&str> = Vec::new();
     for s in &graph.symbols {
         if !is_fn_kind(&s.kind) {
             continue;
         }
-        if graph.callers_of(&s.name).is_empty() && !entry_names.contains(&s.name.as_str()) {
+        if graph.callers_of(&s.name).is_empty()
+            && !route_handlers.contains(&s.name)
+            && !entry_names.contains(&s.name.as_str())
+        {
             entry_names.push(s.name.as_str());
         }
     }
@@ -831,7 +854,9 @@ fn describe_workspace(graph: &spine::CodeGraph) {
     };
     let named: Vec<&str> = entry_names
         .iter()
-        .filter(|n| ["main", "run", "start", "handler", "index"].contains(n))
+        .filter(|n| {
+            ["main", "run", "start", "handler", "index"].contains(n) || route_handlers.contains(**n)
+        })
         .copied()
         .collect();
     let rest: Vec<&str> = entry_names

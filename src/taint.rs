@@ -185,8 +185,8 @@ pub fn scan_file(path: &Path, content: &str) -> Vec<TaintReport> {
                             path,
                             line_no,
                             format!(
-                                "user input reaches a prompt construction on this line (prompt injection risk). source at line {}",
-                                source.map(|(_, n)| n + 1).unwrap_or(0)
+                                "user input reaches a prompt construction on this line (prompt injection risk). source {}",
+                                source_evidence(source, line_no)
                             ),
                         ));
                     }
@@ -195,9 +195,9 @@ pub fn scan_file(path: &Path, content: &str) -> Vec<TaintReport> {
                         path,
                         line_no,
                         format!(
-                            "user controlled input reaches a {} sink on this line. source at line {}",
+                            "user controlled input reaches a {} sink on this line. source {}",
                             sink,
-                            source.map(|(_, n)| n + 1).unwrap_or(0)
+                            source_evidence(source, line_no)
                         ),
                     ));
                 }
@@ -205,6 +205,15 @@ pub fn scan_file(path: &Path, content: &str) -> Vec<TaintReport> {
         }
     }
     reports
+}
+
+/// Where the user input came from. A tainted value used on the same line as
+/// the sink is the common shape, and printing "line 0" for it was a lie.
+fn source_evidence(source: Option<&(String, usize)>, line_no: u64) -> String {
+    match source {
+        Some((_, n)) => format!("at line {}", n + 1),
+        None => format!("on this line (line {line_no})"),
+    }
 }
 
 pub(crate) fn make_report(path: &Path, line: u64, message: String) -> TaintReport {
@@ -551,6 +560,25 @@ mod tests {
         let reports = scan_file(p, src);
         // "run(" must not trigger shell taint without a source.
         assert!(!reports.iter().any(|r| r.message.contains("shell")));
+    }
+
+    #[test]
+    fn same_line_source_is_reported_honestly() {
+        // The real binary printed "source at line 0" for this shape, because
+        // the tainted value is used on the line it is read on.
+        let src = "app.get(\"/u/:id\", (req, res) => {\n  const row = db.run(\"DELETE FROM users WHERE id = \" + req.params.id);\n  res.json(row);\n});\n";
+        let p = std::path::Path::new("routes.js");
+        let reports = scan_file(p, src);
+        let r = reports
+            .iter()
+            .find(|r| r.message.contains("SQL"))
+            .expect("SQL finding");
+        assert!(
+            r.message.contains("source on this line"),
+            "expected an honest source, got {}",
+            r.message
+        );
+        assert!(!r.message.contains("line 0"), "{}", r.message);
     }
 
     // The audit found db.run invisible because the SQL sink table never listed

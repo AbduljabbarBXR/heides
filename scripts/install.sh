@@ -2,11 +2,13 @@
 # HEIDES installer.
 # Download the release binary for this platform and put it on PATH.
 #   curl -fsSL https://raw.githubusercontent.com/AbduljabbarBXR/heides/main/scripts/install.sh | bash
-#   HEIDES_VERSION=0.6.0 curl -fsSL ... | bash
+#   HEIDES_VERSION=0.14.4 curl -fsSL ... | bash
 set -euo pipefail
 
 REPO="AbduljabbarBXR/heides"
 VERSION="${HEIDES_VERSION:-latest}"
+# Tolerate a v prefixed pin: it used to build a vv0.14.4 tag that 404s.
+VERSION="${VERSION#v}"
 BIN_DIR="${HEIDES_BIN_DIR:-$HOME/.local/bin}"
 
 detect() {
