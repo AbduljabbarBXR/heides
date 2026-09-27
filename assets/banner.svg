@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 500" width="1400" height="500" role="img" aria-labelledby="hb-title hb-desc" font-family="'Liberation Sans', 'DejaVu Sans', Helvetica, Arial, sans-serif">
+  <title id="hb-title">HEIDES</title>
+  <desc id="hb-desc">The code nervous system. Many code lines converge on a spine, the spine judges the patch, and one clean line continues.</desc>
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f7f9fb"/>
+      <stop offset="1" stop-color="#eef1f5"/>
+    </linearGradient>
+  </defs>
+  <rect width="1400" height="500" fill="url(#paper)"/>
+
+  <g stroke="#aab3c0" stroke-width="1.6" fill="none" opacity="0.95">
+    <path d="M40 88 C 250 88, 320 210, 430 230"/>
+    <path d="M40 160 C 230 160, 330 216, 430 238"/>
+    <path d="M40 250 C 300 250, 300 250, 430 250" stroke="#6f7b8b" stroke-width="2.2"/>
+    <path d="M40 340 C 230 340, 330 284, 430 262"/>
+    <path d="M40 412 C 250 412, 320 290, 430 268"/>
+    <path d="M40 462 C 270 462, 350 302, 430 274"/>
+  </g>
+  <g fill="#aab3c0">
+    <circle cx="40" cy="88" r="3.4"/>
+    <circle cx="150" cy="88" r="2.6" opacity="0.8"/>
+    <circle cx="40" cy="160" r="2.6" opacity="0.7"/>
+    <circle cx="120" cy="160" r="2.2" opacity="0.6"/>
+    <circle cx="40" cy="340" r="2.6" opacity="0.7"/>
+    <circle cx="120" cy="340" r="2.2" opacity="0.6"/>
+    <circle cx="40" cy="412" r="3.4"/>
+    <circle cx="150" cy="412" r="2.6" opacity="0.8"/>
+    <circle cx="40" cy="462" r="2.2" opacity="0.55"/>
+    <circle cx="130" cy="462" r="2" opacity="0.5"/>
+    <circle cx="225" cy="124" r="2.4" opacity="0.75"/>
+    <circle cx="268" cy="188" r="2.2" opacity="0.65"/>
+    <circle cx="270" cy="318" r="2.4" opacity="0.75"/>
+    <circle cx="258" cy="366" r="2.2" opacity="0.65"/>
+  </g>
+
+  <g>
+    <rect x="392" y="212" width="76" height="76" rx="19" fill="#ffffff" stroke="#1f6feb" stroke-width="2.6"/>
+    <path d="M412 251 L426 265 L450 236" fill="none" stroke="#1f6feb" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <g stroke="#6f7b8b" stroke-width="2.2" fill="none">
+    <path d="M468 250 L 494 250"/>
+    <path d="M906 250 L 950 250"/>
+  </g>
+  <g fill="#6f7b8b">
+    <circle cx="481" cy="250" r="3" opacity="0.8"/>
+    <circle cx="928" cy="250" r="3" opacity="0.8"/>
+  </g>
+
+  <g stroke="#aab3c0" stroke-width="1.6" fill="none" opacity="0.95">
+    <path d="M950 230 C 1060 210, 1150 88, 1360 88"/>
+    <path d="M950 238 C 1070 222, 1170 160, 1360 160"/>
+    <path d="M950 250 C 1080 250, 1180 250, 1360 250"/>
+    <path d="M950 262 C 1070 278, 1170 340, 1360 340"/>
+    <path d="M950 268 C 1060 288, 1150 412, 1360 412"/>
+    <path d="M950 274 C 1030 302, 1100 462, 1360 462"/>
+  </g>
+  <g fill="#aab3c0">
+    <circle cx="1360" cy="88" r="3.4"/>
+    <circle cx="1250" cy="88" r="2.6" opacity="0.8"/>
+    <circle cx="1360" cy="160" r="2.6" opacity="0.7"/>
+    <circle cx="1280" cy="160" r="2.2" opacity="0.6"/>
+    <circle cx="1360" cy="250" r="2.4" opacity="0.7"/>
+    <circle cx="1180" cy="250" r="2.2" opacity="0.6"/>
+    <circle cx="1360" cy="340" r="2.6" opacity="0.7"/>
+    <circle cx="1280" cy="340" r="2.2" opacity="0.6"/>
+    <circle cx="1360" cy="412" r="3.4"/>
+    <circle cx="1250" cy="412" r="2.6" opacity="0.8"/>
+    <circle cx="1360" cy="462" r="2.2" opacity="0.55"/>
+    <circle cx="1270" cy="462" r="2" opacity="0.5"/>
+    <circle cx="1175" cy="124" r="2.4" opacity="0.75"/>
+    <circle cx="1132" cy="188" r="2.2" opacity="0.65"/>
+    <circle cx="1130" cy="318" r="2.4" opacity="0.75"/>
+    <circle cx="1142" cy="366" r="2.2" opacity="0.65"/>
+  </g>
+
+  <text x="700" y="262" text-anchor="middle" fill="#16181d" font-size="66" font-weight="700" letter-spacing="4">HEIDES</text>
+  <text x="700" y="320" text-anchor="middle" fill="#7b8797" font-size="14" letter-spacing="4.2">THE CODE NERVOUS SYSTEM</text>
+</svg>

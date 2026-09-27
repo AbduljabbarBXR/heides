@@ -2,6 +2,19 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.15.0
+
+Tier 0 of the growth roadmap shipped: the security claims the README already made now hold, and the roadmap itself records what is done and what is not.
+
+* SQL injection detection closed for the drivers that were invisible. `db.run`, `stmt.run`, `knex.raw`, `db.exec`, `raw`, `literal`, `prepare`, `execSQL`, `queryRaw`, gorm `Raw`, EF `FromSqlRaw`, `ExecuteSqlRaw`, php `prepare` and `rawQuery`, and python `executescript` are sinks now. A planted `db.run("DELETE FROM users WHERE id = " + id)` reported zero findings before and reports critical now. Ambiguous names only count on a database-ish receiver, so `run(taskName)` in a task runner stays silent.
+* `query search` reads file content. It answered "no symbol matches" for a file whose whole point was a SQL string, because the FTS table held one row per symbol. Literals and comments are indexed now, capped per file, with symbol hits still first. Index version 8, so an existing index rescans once.
+* `plan` returns the evidence it was grounded on: symbol, file and line, capped at twelve. When no identifier in the plan exists in the spine it says the plan introduces new definitions, names existing functions to build on, and reports what the spine holds, instead of printing `feasible true` and implying it checked something.
+* Framework-aware entrypoints. Express, Flask, Django and Go route registrations are recognised, so a handler is no longer listed as an uncalled root. Runs at describe time, so no index schema moves and reindexing stays as cheap as before.
+* The taint report says `source on this line (line N)` when the value is read and used on one line. It used to print `source at line 0`, which reads as a bug in the tool rather than in the code under test. Both this and the ambiguous-evidence defect were found by running the release binary on a fixture, not by the suite.
+* One version everywhere. The npm installer derives the binary tag from `package.json`, a test fails the build if they drift, a leading `v` in a pin is stripped instead of building a `vv0.14.4` tag that 404s, and npm honours `HEIDES_VERSION` so one pin works for the curl installer and npm. The npm README platform table now matches the installer: Linux arm64 and Android map to real assets, only musl errors.
+* Documentation accuracy: the root README stopped pinning a two-year-old example version, and both READMEs point at `cargo test` instead of freezing a test count that moves with every change.
+* 91 lib tests, and the battle, clean, determinism, hostile and path resolve suites all green on the release toolchain and in CI, clippy included.
+
 ## 0.14.4
 
 * npm installer maps android-arm64 to the Android build, Termux reports android not linux so global installs failed without it.
