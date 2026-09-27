@@ -18,7 +18,7 @@ pub struct TaintReport {
 /// Source patterns per language, user input entry points. Shared with the
 /// interprocedural engine, which reads the same rows so the two layers can
 /// never disagree about what a source is.
-pub(crate) const SOURCES: [(&str, &str); 14] = [
+pub(crate) const SOURCES: [(&str, &str); 16] = [
     (
         "javascript",
         r"\b(req|request)\.(query|params|body|headers|cookies)\b",
@@ -42,6 +42,15 @@ pub(crate) const SOURCES: [(&str, &str); 14] = [
         "csharp",
         r"\b(Request\.(QueryString|Form|Headers)|Console\.ReadLine|Environment\.GetEnvironmentVariable)\b",
     ),
+    // Ruby had no source row at all, so no Ruby file could ever taint, not even
+    // the SSRF and NoSQL sinks. params[] is Rack, Sinatra and Rails, and
+    // request.GET/POST/body covers the plain framework shapes.
+    //
+    // Two rows, not one. This rule dialect expands alternation only inside a
+    // group, so a top level `|` outside one is kept as a literal character and
+    // the pattern silently stops matching anything.
+    ("ruby", r"\bparams\s*["),
+    ("ruby", r"\brequest\s*\.\s*(GET|POST|params|body|cookies)\b"),
 ];
 
 /// Sinks are per language. Where a name is ambiguous between SQL and something
@@ -138,10 +147,430 @@ pub(crate) const SINKS: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// Targets that turn an SSRF into a cloud credential theft. When a tainted
+/// fetch line mentions one of these, the report is labelled for what it
+/// actually is instead of the generic SSRF class.
+pub(crate) const METADATA_TARGETS: &[&str] = &[
+    "169.254.169.254",
+    "169.254.170.2",
+    "metadata.google.internal",
+    "100.100.100.200",
+    "fd00:ec2::254",
+];
+
+/// One rule in the strict table.
+///
+/// The original sink table fires when a tainted name is on the line, or when
+/// any source appears earlier in the same block. That is the right call for
+/// SQL, where a handler building a statement is the risk, but it is far too
+/// eager for SSRF and NoSQL. A hardcoded health check URL and a literal query
+/// object inside a request handler are both safe, and a guard that reports
+/// those is a guard people mute. These rules therefore need the tainted value
+/// to actually reach the sink line, either by name or by reading a source on
+/// that same line.
+///
+/// `requires` is a co occurrence list. At least one token must also appear on
+/// the line, which is how `collection.find(` is a NoSQL sink while `arr.find(`
+/// stays silent: the method name alone is ambiguous, the receiver is not.
+/// Rules sharing a `family` emit one report per line, first match wins.
+pub(crate) struct StrictSink {
+    pub lang: &'static str,
+    pub pattern: &'static str,
+    pub class: &'static str,
+    pub family: &'static str,
+    pub requires: &'static [&'static str],
+}
+
+/// Const constructor for the rule tables. Keeps every row on one line with its
+/// field names visible, which is what a reviewer needs to check the gate and
+/// the co occurrence list without expanding a tuple.
+macro_rules! sink {
+    ($lang:expr, $pat:expr, $class:expr, $family:expr, $req:expr) => {
+        StrictSink {
+            lang: $lang,
+            pattern: $pat,
+            class: $class,
+            family: $family,
+            requires: $req,
+        }
+    };
+}
+
+/// SSRF: user controlled input reaching a server side fetch, so the server
+/// becomes the requester and the attacker chooses the destination.
+pub(crate) const SSRF_SINKS: &[StrictSink] = &[
+    // A cloud metadata target is reported through the class upgrade in
+    // strict_class, so it is not duplicated as its own row per pattern.
+    sink!("javascript", r"\bfetch\s*\(", "SSRF", "ssrf", &[]),
+    sink!(
+        "javascript",
+        r"\b(axios|got|superagent|needle)\s*\(",
+        "SSRF",
+        "ssrf",
+        &[]
+    ),
+    sink!(
+        "javascript",
+        r"\baxios\s*\.\s*(get|post|put|delete|head|patch|request)\s*\(",
+        "SSRF",
+        "ssrf",
+        &[]
+    ),
+    sink!(
+        "javascript",
+        r"\bsuperagent\s*\.\s*(get|post|put|delete)\s*\(",
+        "SSRF",
+        "ssrf",
+        &[]
+    ),
+    sink!(
+        "javascript",
+        r"\brequest\s*\.\s*(get|post|put|delete|head|patch)\s*\(",
+        "SSRF",
+        "ssrf",
+        &[]
+    ),
+    sink!(
+        "javascript",
+        r"\b(https?)\s*\.\s*(get|request)\s*\(",
+        "SSRF",
+        "ssrf",
+        &[]
+    ),
+    sink!(
+        "python",
+        r"\brequests\s*\.\s*(get|post|put|delete|head|patch|request|send)\s*\(",
+        "SSRF",
+        "ssrf",
+        &[]
+    ),
+    sink!(
+        "python",
+        r"\bhttpx\s*\.\s*(get|post|put|delete|head|patch|request|send|stream)\s*\(",
+        "SSRF",
+        "ssrf",
+        &[]
+    ),
+    sink!("python", r"\burlopen\s*\(", "SSRF", "ssrf", &[]),
+    sink!(
+        "python",
+        r"\burllib\s*\.\s*request\s*\.\s*urlopen\s*\(",
+        "SSRF",
+        "ssrf",
+        &[]
+    ),
+    sink!(
+        "python",
+        r"\bsocket\s*\.\s*create_connection\s*\(",
+        "SSRF",
+        "ssrf",
+        &[]
+    ),
+    // file_get_contents and fopen are deliberately absent. They are already
+    // filesystem sinks, and listing them here would print two findings on one
+    // line. The risk is still reported, only the class label differs.
+    sink!(
+        "php",
+        r"\b(curl_exec|curl_init|fsockopen|stream_socket_client|get_headers)\s*\(",
+        "SSRF",
+        "ssrf",
+        &[]
+    ),
+    sink!(
+        "go",
+        r"\bhttp\s*\.\s*(Get|Post|Head|PostForm|NewRequest)\s*\(",
+        "SSRF",
+        "ssrf",
+        &[]
+    ),
+    sink!(
+        "go",
+        r"\b(client|Client|hc|httpClient|defaultClient|DefaultClient)\s*\.\s*(Get|Post|Head|PostForm|Do)\s*\(",
+        "SSRF",
+        "ssrf",
+        &[]
+    ),
+    sink!("java", r"\bnew\s+URL\s*\(", "SSRF", "ssrf", &[]),
+    sink!(
+        "java",
+        r"\b(openStream|openConnection)\s*\(",
+        "SSRF",
+        "ssrf",
+        &[]
+    ),
+    sink!(
+        "java",
+        r"\b(RestTemplate|restTemplate)\s*\.\s*(getForObject|getForEntity|postForObject|postForEntity|exchange|execute)\s*\(",
+        "SSRF",
+        "ssrf",
+        &[]
+    ),
+    sink!(
+        "java",
+        r"\bHttpClient\s*\.\s*(send|sendAsync)\s*\(",
+        "SSRF",
+        "ssrf",
+        &[]
+    ),
+    sink!("ruby", r"\bURI\s*\.\s*open\s*\(", "SSRF", "ssrf", &[]),
+    sink!(
+        "ruby",
+        r"\bNet::HTTP\s*\.\s*(get|post|head|start|new)\s*\(",
+        "SSRF",
+        "ssrf",
+        &[]
+    ),
+    sink!(
+        "ruby",
+        r"\b(HTTParty|Faraday)\s*\.\s*(get|post|put|delete|head)\s*\(",
+        "SSRF",
+        "ssrf",
+        &[]
+    ),
+    // The classic open-uri SSRF. Ruby's bare open( also matches File.open and
+    // IO.open, which are path handling rather than request forgery, so
+    // ruby_open_exempt drops those receivers before this can report.
+    sink!("ruby", r"\bopen\s*\(", "SSRF", "ssrf", &[]),
+    // Bare method names, not receiver scoped. The common C# shape assigns the
+    // client first, as in `var w = new WebClient(); w.DownloadString(u);`, so
+    // a WebClient. prefix never appears on the sink line. These names are
+    // distinctive enough to stand on their own.
+    sink!(
+        "csharp",
+        r"\b(DownloadString|DownloadData|DownloadFile|UploadData|UploadString|GetStringAsync|GetByteArrayAsync)\s*\(",
+        "SSRF",
+        "ssrf",
+        &[]
+    ),
+    sink!(
+        "csharp",
+        r"\b(GetAsync|PostAsync|PutAsync|SendAsync)\s*\(",
+        "SSRF",
+        "ssrf",
+        &[]
+    ),
+    sink!(
+        "csharp",
+        r"\bWebRequest\s*\.\s*Create\s*\(",
+        "SSRF",
+        "ssrf",
+        &[]
+    ),
+];
+
+/// NoSQL injection: request data reaching a document query, where an attacker
+/// controlled key or operator changes the meaning of the query instead of only
+/// its value.
+pub(crate) const NOSQL_SINKS: &[StrictSink] = &[
+    // where( needs no receiver. Nothing in plain JavaScript has a where method
+    // on an array, and Mongoid style where() is the entry point for an operator
+    // injection, so requiring a receiver name would miss Account.where(...).
+    sink!("javascript", r"\.\s*where\s*\(", "NoSQL", "nosql", &[]),
+    sink!(
+        "javascript",
+        r"\.\s*(find|findOne|findById|findOneAndUpdate|findOneAndDelete|findOneAndReplace|updateOne|updateMany|deleteOne|deleteMany|insertOne|insertMany|countDocuments|distinct|aggregate)\s*\(",
+        "NoSQL",
+        "nosql",
+        &[
+            "collection",
+            "Collection",
+            "Model",
+            "model",
+            "mongo",
+            "mongoose",
+            "db.",
+            "conn",
+        ]
+    ),
+    sink!(
+        "python",
+        r"\.\s*(find|find_one|find_by_id|find_one_and_update|find_one_and_delete|find_one_and_replace|update_one|update_many|delete_one|delete_many|insert_one|insert_many|count_documents|distinct|aggregate|where)\s*\(",
+        "NoSQL",
+        "nosql",
+        &[
+            "collection",
+            "mongo",
+            "motor",
+            "db",
+            "database",
+            "repo",
+            "dao",
+            "self"
+        ]
+    ),
+    // db.eval runs JavaScript inside the database, so tainted input there is
+    // code execution rather than a malformed query.
+    sink!(
+        "python",
+        r"\.\s*eval\s*\(",
+        "NoSQL",
+        "nosql",
+        &["db", "database", "mongo", "motor", "collection", "self"]
+    ),
+    // The Mongo driver specific names cannot collide with anything else, so
+    // they stand on their own and a terse receiver like $c is still caught.
+    sink!(
+        "php",
+        r"\b(findOneAndUpdate|findOneAndReplace|findOneAndDelete|aggregate|updateOne|updateMany|deleteOne|deleteMany|insertOne|insertMany|countDocuments)\s*\(",
+        "NoSQL",
+        "nosql",
+        &[]
+    ),
+    // find and findOne are generic enough to need the receiver.
+    sink!(
+        "php",
+        r"\b(find|findOne|distinct)\s*\(",
+        "NoSQL",
+        "nosql",
+        &[
+            "collection",
+            "Collection",
+            "manager",
+            "Manager",
+            "mongo",
+            "MongoDB",
+            "bulk",
+        ]
+    ),
+    sink!(
+        "go",
+        r"\.\s*(Find|FindOne|UpdateOne|UpdateMany|DeleteOne|DeleteMany|InsertOne|InsertMany|Aggregate|Distinct|CountDocuments|FindOneAndUpdate)\s*\(",
+        "NoSQL",
+        "nosql",
+        &[
+            "mongo",
+            "Mongo",
+            "collection",
+            "Collection",
+            "coll",
+            "Coll",
+            "Cursor",
+        ]
+    ),
+    sink!(
+        "java",
+        r"\.\s*(find|findOne|findOneAndUpdate|findOneAndReplace|findOneAndDelete|updateOne|updateMany|deleteOne|deleteMany|insertOne|insertMany|aggregate|countDocuments|distinct)\s*\(",
+        "NoSQL",
+        "nosql",
+        &[
+            "collection",
+            "Collection",
+            "mongo",
+            "Mongo",
+            "template",
+            "Template",
+        ]
+    ),
+    // Document.parse turns a request string straight into a query document,
+    // which is the shape the Java driver docs warn about.
+    sink!(
+        "java",
+        r"\bDocument\s*\.\s*parse\s*\(",
+        "NoSQL",
+        "nosql",
+        &[]
+    ),
+    sink!(
+        "ruby",
+        r"\.\s*(find|find_one|find_one_and_update|find_one_and_delete|where|find_by|update_one|delete_one)\s*\(",
+        "NoSQL",
+        "nosql",
+        &[
+            "collection",
+            "Collection",
+            "Model",
+            "model",
+            "mongo",
+            "Mongo",
+            "criteria",
+        ]
+    ),
+    sink!(
+        "csharp",
+        r"\.\s*(Find|FirstOrDefault|UpdateOne|UpdateMany|DeleteOne|DeleteMany|InsertOne|InsertMany|Aggregate|CountDocuments|Any)\s*\(",
+        "NoSQL",
+        "nosql",
+        &[
+            "mongo",
+            "Mongo",
+            "collection",
+            "Collection",
+            "IMongoCollection",
+            "filter",
+            "Filter",
+        ]
+    ),
+    sink!(
+        "csharp",
+        r"\bBsonDocument\s*\.\s*Parse\s*\(",
+        "NoSQL",
+        "nosql",
+        &[]
+    ),
+];
+
+/// Every strict rule for one language, SSRF before NoSQL.
+pub(crate) fn strict_sinks(lang: &str) -> impl Iterator<Item = &'static StrictSink> {
+    SSRF_SINKS
+        .iter()
+        .chain(NOSQL_SINKS.iter())
+        .filter(move |s| s.lang == lang)
+}
+
+/// True when a strict rule applies to this line. Kept in one place so the intra
+/// file scan and the interprocedural pass can never disagree about which lines
+/// qualify.
+pub(crate) fn strict_hit(rule: &StrictSink, line: &str) -> bool {
+    if !regex_hit(rule.pattern, line) {
+        return false;
+    }
+    if !rule.requires.is_empty() && !rule.requires.iter().any(|t| line.contains(t)) {
+        return false;
+    }
+    !ruby_open_exempted(rule, line)
+}
+
+/// True when this rule must be skipped. Ruby's bare open( is both open-uri and
+/// File.open, and reading or writing a path is not request forgery.
+fn ruby_open_exempted(rule: &StrictSink, line: &str) -> bool {
+    rule.pattern == r"\bopen\s*\(" && (line.contains("File.") || line.contains("IO."))
+}
+
+/// The class actually printed. A tainted fetch aimed at a metadata endpoint is
+/// cloud credential theft, and saying so is more useful than saying SSRF.
+pub(crate) fn strict_class(rule: &StrictSink, line: &str) -> &'static str {
+    if rule.family == "ssrf" && METADATA_TARGETS.iter().any(|t| line.contains(t)) {
+        "cloud metadata fetch"
+    } else {
+        rule.class
+    }
+}
+
+/// "an SSRF sink" reads correctly, "a SQL sink" reads correctly, and one
+/// template has to produce both.
+fn article(class: &str) -> &'static str {
+    if class.starts_with("SSRF") {
+        return "an";
+    }
+    match class.chars().next() {
+        Some('a' | 'e' | 'i' | 'o' | 'u' | 'A' | 'E' | 'I' | 'O' | 'U') => "an",
+        _ => "a",
+    }
+}
+
 /// Scan one source file for taint flows.
 pub fn scan_file(path: &Path, content: &str) -> Vec<TaintReport> {
     let Some(lang) = crate::parser::detect_language(path) else {
         return Vec::new();
+    };
+    // TypeScript was never in the source or sink tables, so every .ts and .tsx
+    // file was silently unscanned. Taint rules are language families and
+    // TypeScript shares the JavaScript rows, so map it rather than
+    // duplicating every rule.
+    let lang = if lang == "typescript" {
+        "javascript".to_string()
+    } else {
+        lang
     };
     let mut reports = Vec::new();
     let lines: Vec<&str> = content.lines().collect();
@@ -151,12 +580,16 @@ pub fn scan_file(path: &Path, content: &str) -> Vec<TaintReport> {
         for i in block_start..=block_end {
             let line = lines[i];
             let line_no = i as u64 + 1;
+            // Whether this line reads user input at all. The strict gate needs
+            // it, and hoisting it here costs one pass per line instead of one
+            // per rule.
+            let mut reads_source = false;
             for (l, pat) in SOURCES {
-                if l == lang
-                    && regex_hit(pat, line)
-                    && let Some(var) = assigned_var(line)
-                {
-                    tainted.push((var, i));
+                if l == lang && regex_hit(pat, line) {
+                    reads_source = true;
+                    if let Some(var) = assigned_var(line) {
+                        tainted.push((var, i));
+                    }
                 }
             }
             for (l, pat, sink) in SINKS {
@@ -202,9 +635,64 @@ pub fn scan_file(path: &Path, content: &str) -> Vec<TaintReport> {
                     ));
                 }
             }
+            // SSRF and NoSQL use the strict gate. A source somewhere earlier in
+            // the handler is not enough, the tainted value has to reach this
+            // line, otherwise every handler that reads input and calls a health
+            // check endpoint turns into a finding.
+            if !used_as_value(&tainted, line) && !reads_source {
+                continue;
+            }
+            let source = tainted.iter().find(|(_, src_i)| {
+                let src_line = lines[*src_i];
+                let src_indent = leading_spaces(src_line);
+                *src_i < i && src_indent >= indent && (i - *src_i) < 60
+            });
+            let mut seen_families: Vec<&str> = Vec::new();
+            for rule in strict_sinks(&lang) {
+                if seen_families.contains(&rule.family) {
+                    continue;
+                }
+                if !strict_hit(rule, line) {
+                    continue;
+                }
+                seen_families.push(rule.family);
+                let class = strict_class(rule, line);
+                reports.push(make_report(
+                    path,
+                    line_no,
+                    format!(
+                        "user controlled input reaches {} {} sink on this line. source {}",
+                        article(class),
+                        class,
+                        source_evidence(source, line_no)
+                    ),
+                ));
+            }
         }
     }
     reports
+}
+
+/// A tainted name used as an object key is a label, not a value. A plain
+/// substring match reads `{ published: true, page: 1 }` as a use of the tainted
+/// `page`, which is how a literal query object reported NoSQL. An occurrence
+/// followed by a colon is a key and does not count.
+///
+/// Only the strict sinks use this. The original sink table keeps its substring
+/// behaviour, so no finding that exists today changes.
+fn used_as_value(tainted: &[(String, usize)], line: &str) -> bool {
+    tainted.iter().any(|(v, _)| {
+        let mut from = 0;
+        while let Some(found) = line[from..].find(v.as_str()) {
+            let at = from + found;
+            let end = at + v.len();
+            if line[end..].trim_start().chars().next() != Some(':') {
+                return true;
+            }
+            from = end;
+        }
+        false
+    })
 }
 
 /// Where the user input came from. A tainted value used on the same line as
@@ -294,6 +782,13 @@ static PREPARED: OnceLock<Mutex<PreparedCache>> = OnceLock::new();
 
 /// Expand alternation groups like (a|b|c) into concrete patterns.
 /// Handles multiple flat groups; nested groups are supported one level deep.
+///
+/// Two limits of this dialect are worth knowing before writing a rule, because
+/// both fail silently rather than loudly. A `|` outside a group is kept as a
+/// literal character, so alternation must always be wrapped. And the only
+/// recognised escapes are `\b \s \. \( \) \$`: a pattern containing `\[`
+/// matches the text `\[` and never matches a real bracket. Square brackets are
+/// literal here anyway, since there are no character classes.
 fn concrete_patterns(pattern: &str) -> Vec<String> {
     let chars: Vec<char> = pattern.chars().collect();
     let mut i = 0;
@@ -446,10 +941,11 @@ pub(crate) fn assigned_var(line: &str) -> Option<String> {
 }
 
 /// Split file lines into function blocks. Returns (start, end, indent) per
-/// block for brace languages, or per indented suite for python.
+/// block for brace languages, or per indented suite for python and ruby, which
+/// both delimit with `def` and indentation.
 pub(crate) fn function_blocks(lines: &[&str], lang: &str) -> Vec<(usize, usize, usize)> {
     let mut blocks = Vec::new();
-    if lang == "python" {
+    if lang == "python" || lang == "ruby" {
         let mut i = 0;
         while i < lines.len() {
             let line = lines[i];
@@ -692,5 +1188,257 @@ mod tests {
         let p = std::path::Path::new("app.cs");
         let reports = scan_file(p, src);
         assert!(reports.iter().any(|r| r.message.contains("SQL")));
+    }
+
+    // ---- SSRF -------------------------------------------------------------
+
+    fn has_class(reports: &[TaintReport], class: &str) -> bool {
+        reports.iter().any(|r| r.message.contains(class))
+    }
+
+    #[test]
+    fn detects_ssrf_javascript_fetch() {
+        let src = "async function proxy(req, res) {\n  const target = req.query.url;\n  const r = await fetch(target);\n  res.send(r);\n}\n";
+        let reports = scan_file(std::path::Path::new("route.js"), src);
+        assert!(
+            has_class(&reports, "SSRF"),
+            "fetch with a tainted target must report SSRF, got {:?}",
+            reports
+        );
+    }
+
+    #[test]
+    fn detects_ssrf_same_line_source_is_honest() {
+        let src =
+            "app.get('/p', (req, res) => {\n  fetch(req.query.url).then(r => r.text());\n});\n";
+        let reports = scan_file(std::path::Path::new("routes.js"), src);
+        let r = reports
+            .iter()
+            .find(|r| r.message.contains("SSRF"))
+            .expect("SSRF finding");
+        assert!(r.message.contains("source on this line"), "{}", r.message);
+        assert!(!r.message.contains("line 0"), "{}", r.message);
+    }
+
+    #[test]
+    fn detects_ssrf_axios_and_python_requests() {
+        let js = "function p(req) {\n  const u = req.query.u;\n  return axios.get(u);\n}\n";
+        assert!(has_class(
+            &scan_file(std::path::Path::new("a.js"), js),
+            "SSRF"
+        ));
+        let py = "def proxy(request):\n    target = request.args['u']\n    return requests.get(target)\n";
+        assert!(has_class(
+            &scan_file(std::path::Path::new("a.py"), py),
+            "SSRF"
+        ));
+    }
+
+    #[test]
+    fn detects_ssrf_go_php_java_csharp() {
+        let go = "package main\n\nfunc proxy(r *http.Request) {\n\tu := r.URL.Query().Get(\"u\")\n\thttp.Get(u)\n}\n";
+        assert!(has_class(
+            &scan_file(std::path::Path::new("a.go"), go),
+            "SSRF"
+        ));
+        let php = "<?php\nfunction p() {\n    $u = $_GET['u'];\n    $c = curl_init($u);\n}\n";
+        assert!(has_class(
+            &scan_file(std::path::Path::new("a.php"), php),
+            "SSRF"
+        ));
+        let java = "class A {\n    void p(HttpServletRequest request) {\n        String u = request.getParameter(\"u\");\n        new URL(u).openStream();\n    }\n}\n";
+        assert!(has_class(
+            &scan_file(std::path::Path::new("A.java"), java),
+            "SSRF"
+        ));
+        let cs = "class A {\n    void P() {\n        var u = Request.QueryString[\"u\"];\n        var w = new WebClient();\n        w.DownloadString(u);\n    }\n}\n";
+        assert!(has_class(
+            &scan_file(std::path::Path::new("A.cs"), cs),
+            "SSRF"
+        ));
+    }
+
+    #[test]
+    fn detects_ssrf_ruby_open_uri() {
+        let src = "def proxy(params)\n  open(params[:url])\nend\n";
+        assert!(has_class(
+            &scan_file(std::path::Path::new("a.rb"), src),
+            "SSRF"
+        ));
+    }
+
+    #[test]
+    fn ruby_has_sources_and_function_blocks() {
+        // Ruby had neither a source row nor a def/end block rule, so no Ruby
+        // file could taint at all. This asserts both halves at once.
+        let src = "def show(params)\n  collection.find_one(:user => params[:user])\nend\n";
+        assert!(
+            has_class(&scan_file(std::path::Path::new("m.rb"), src), "NoSQL"),
+            "ruby needs a source row and def/end blocks to taint at all: {:?}",
+            scan_file(std::path::Path::new("m.rb"), src)
+        );
+    }
+
+    #[test]
+    fn ruby_file_open_is_not_reported_as_ssrf() {
+        // Ruby's bare open( is also File.open, which is path handling rather
+        // than request forgery. Reporting it as SSRF would be a wrong class.
+        let src = "def read(params)\n  File.open(params[:path]) { |f| f.read }\nend\n";
+        let reports = scan_file(std::path::Path::new("a.rb"), src);
+        assert!(!has_class(&reports, "SSRF"), "{:?}", reports);
+    }
+
+    #[test]
+    fn a_constant_url_inside_a_handler_stays_silent() {
+        // The point of the strict gate. The handler reads user input on the
+        // first line, so the old flow gate would have fired here.
+        let src = "app.get('/health', async (req, res) => {\n  const id = req.query.id;\n  const r = await fetch('https://api.example.com/health');\n  res.json({ id, r });\n});\n";
+        let reports = scan_file(std::path::Path::new("routes.js"), src);
+        assert!(!has_class(&reports, "SSRF"), "{:?}", reports);
+    }
+
+    #[test]
+    fn cloud_metadata_fetch_is_labelled_for_what_it_is() {
+        // The metadata address is on the line and the path is user controlled,
+        // so this is credential theft rather than a generic SSRF.
+        let src = "async function creds(req) {\n  const p = req.query.path;\n  const r = await fetch('http://169.254.169.254/' + p);\n  return r.text();\n}\n";
+        let reports = scan_file(std::path::Path::new("meta.js"), src);
+        let r = reports
+            .iter()
+            .find(|r| r.message.contains("metadata"))
+            .expect("metadata class finding");
+        assert!(
+            r.message.contains("a cloud metadata fetch sink"),
+            "{}",
+            r.message
+        );
+    }
+
+    #[test]
+    fn a_tainted_host_stays_plain_ssrf() {
+        // The address is not on the line, it arrives through the variable, so
+        // the report must not claim to know the target was metadata.
+        let src = "async function proxy(req) {\n  const url = req.query.url;\n  const r = await fetch(url);\n  return r.text();\n}\n";
+        let reports = scan_file(std::path::Path::new("m.js"), src);
+        assert!(has_class(&reports, "SSRF"), "{:?}", reports);
+        assert!(!has_class(&reports, "metadata"), "{:?}", reports);
+    }
+
+    // ---- NoSQL ------------------------------------------------------------
+
+    #[test]
+    fn detects_nosql_javascript_collection_find() {
+        let src = "async function search(req) {\n  const filter = req.query.filter;\n  return UserModel.find(JSON.parse(filter));\n}\n";
+        let reports = scan_file(std::path::Path::new("m.js"), src);
+        assert!(
+            has_class(&reports, "NoSQL"),
+            "a tainted filter into a document query must report NoSQL, got {:?}",
+            reports
+        );
+    }
+
+    #[test]
+    fn detects_nosql_python_and_document_parse() {
+        let py = "def search(request):\n    flt = request.args['filter']\n    return collection.find(flt)\n";
+        assert!(has_class(
+            &scan_file(std::path::Path::new("m.py"), py),
+            "NoSQL"
+        ));
+        let java = "class A {\n    void p(HttpServletRequest request) {\n        String q = request.getParameter(\"q\");\n        Document doc = Document.parse(q);\n    }\n}\n";
+        assert!(has_class(
+            &scan_file(std::path::Path::new("A.java"), java),
+            "NoSQL"
+        ));
+    }
+
+    #[test]
+    fn detects_nosql_where_and_dollar_where() {
+        let js = "function findOne(req) {\n  return Account.where({ user: req.query.user }).exec();\n}\n";
+        assert!(has_class(
+            &scan_file(std::path::Path::new("m.js"), js),
+            "NoSQL"
+        ));
+        let js2 = "function run(req) {\n  return db.collection('a').find({ $where: 'this.x == ' + req.query.x });\n}\n";
+        assert!(has_class(
+            &scan_file(std::path::Path::new("m.js"), js2),
+            "NoSQL"
+        ));
+    }
+
+    #[test]
+    fn detects_nosql_go_csharp_ruby_php() {
+        let go = "package main\n\nfunc find(r *http.Request) {\n\tf := r.URL.Query().Get(\"f\")\n\tcollection.Find(bson.M{\"a\": f})\n}\n";
+        assert!(has_class(
+            &scan_file(std::path::Path::new("a.go"), go),
+            "NoSQL"
+        ));
+        let cs = "class A {\n    void P() {\n        var f = Request.QueryString[\"f\"];\n        var d = BsonDocument.Parse(f);\n    }\n}\n";
+        assert!(has_class(
+            &scan_file(std::path::Path::new("A.cs"), cs),
+            "NoSQL"
+        ));
+        let rb = "def find_one(params)\n  Model.where(:user => params[:user])\nend\n";
+        assert!(has_class(
+            &scan_file(std::path::Path::new("m.rb"), rb),
+            "NoSQL"
+        ));
+        let php = "<?php\nfunction f() {\n    $f = $_GET['f'];\n    $collection->find($f);\n}\n";
+        assert!(has_class(
+            &scan_file(std::path::Path::new("m.php"), php),
+            "NoSQL"
+        ));
+        // A Mongo driver specific method is caught even with a terse receiver.
+        let php2 =
+            "<?php\nfunction f() {\n    $f = $_GET['f'];\n    $c->findOneAndUpdate($f);\n}\n";
+        assert!(has_class(
+            &scan_file(std::path::Path::new("m.php"), php2),
+            "NoSQL"
+        ));
+    }
+
+    #[test]
+    fn a_literal_query_object_stays_silent() {
+        let src = "function list(req) {\n  const page = req.query.page;\n  return postsCollection.find({ published: true, page: 1 });\n}\n";
+        let reports = scan_file(std::path::Path::new("m.js"), src);
+        assert!(!has_class(&reports, "NoSQL"), "{:?}", reports);
+    }
+
+    #[test]
+    fn array_find_is_not_a_nosql_sink() {
+        // The co occurrence list is what keeps arr.find( silent while
+        // collection.find( reports.
+        let src = "function first(req) {\n  const id = req.query.id;\n  return items.find(i => i.id === id);\n}\n";
+        let reports = scan_file(std::path::Path::new("m.js"), src);
+        assert!(!has_class(&reports, "NoSQL"), "{:?}", reports);
+    }
+
+    // ---- TypeScript -------------------------------------------------------
+
+    #[test]
+    fn typescript_files_are_scanned_at_all() {
+        // .ts mapped to "typescript" and the taint tables had no typescript
+        // rows, so every TypeScript file was silently unscanned.
+        let src = "export async function load(req: Request) {\n  const id = req.query.id;\n  return db.query(id);\n}\n";
+        let reports = scan_file(std::path::Path::new("db.ts"), src);
+        assert!(
+            has_class(&reports, "SQL"),
+            "TypeScript must reach the JavaScript rules, got {:?}",
+            reports
+        );
+    }
+
+    #[test]
+    fn typescript_gets_the_new_sinks_too() {
+        let src = "export async function proxy(req: Request) {\n  const target = req.query.url;\n  return fetch(target);\n}\n";
+        let reports = scan_file(std::path::Path::new("route.ts"), src);
+        assert!(has_class(&reports, "SSRF"), "{:?}", reports);
+    }
+
+    #[test]
+    fn the_article_matches_the_class() {
+        assert_eq!(article("SSRF"), "an");
+        assert_eq!(article("NoSQL"), "a");
+        assert_eq!(article("cloud metadata fetch"), "a");
+        assert_eq!(article("SQL"), "a");
     }
 }
