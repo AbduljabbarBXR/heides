@@ -35,12 +35,12 @@ tag gets downloaded, and a test fails the build if the two ever drift.
 
 ```bash
 npm install -g heides                 # binary tag follows the package version
-HEIDES_VERSION=0.14.4 npm install -g heides   # same variable the curl installer uses
-HEIDES_BIN_VERSION=0.14.4 npm install -g heides   # binary specific pin, wins over HEIDES_VERSION
+HEIDES_VERSION=0.15.0 npm install -g heides   # same variable the curl installer uses
+HEIDES_BIN_VERSION=0.15.0 npm install -g heides   # binary specific pin, wins over HEIDES_VERSION
 ```
 
-Both variables take a bare version such as `0.14.4`. A leading `v` is accepted
-and stripped, so `v0.14.4` does not turn into a `vv0.14.4` tag that 404s.
+Both variables take a bare version such as `0.15.0`. A leading `v` is accepted
+and stripped, so `v0.15.0` does not turn into a `vv0.15.0` tag that 404s.
 
 ## Usage
 
@@ -55,8 +55,8 @@ heides mcp   # MCP server over stdio for agents
 ## Versions
 
 `package.json` is the single source of truth for the downloaded binary tag, and
-`npm test` fails if it ever drifts from what the installer uses. `heides@0.14.4`
-installs the HEIDES 0.14.4 binary. `HEIDES_BIN_VERSION` or `HEIDES_VERSION`
+`npm test` fails if it ever drifts from what the installer uses. `heides@0.15.0`
+installs the HEIDES 0.15.0 binary. `HEIDES_BIN_VERSION` or `HEIDES_VERSION`
 override it for a pin.
 
 ## Uninstall

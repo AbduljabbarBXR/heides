@@ -92,16 +92,22 @@ and offline OSV caching (it queries `api.osv.dev` live).
 
 Ordered by value. Each tier lists the work and the performance safeguard.
 
-### Tier 0 — make existing claims true (days)
+### Tier 0 — make existing claims true (shipped in 0.15.0)
 
-| Fix | Where | Safeguard |
+| Fix | Where | State |
 |---|---|---|
-| Add `run`, `execSQL`, `raw`, `literal` to SQL sinks; split the shell `run` rule from the SQL rule | `taint.rs:48` | one regex pass, no new scans |
-| Add NoSQL and SSRF sink classes | `taint.rs` | same pass |
-| Sync npm and binary versions; derive `BIN_VERSION` from `package.json` | `install.js:15` | no binary change |
-| `query search` matches literals and content, not only symbols | `spine.rs` FTS5 | FTS5 already indexed, widen the query |
-| `plan` returns the grounded evidence paths | `grounding.rs` | bounded output, cap rows |
-| Framework-aware entrypoint roots so handlers stop being flagged dead | `indexer.rs`, `describe` | one classification pass, stored as a flag |
+| SQL sinks learn `run`, `raw`, `literal`, `prepare`, `execSQL`, gorm `Raw`, EF `FromSqlRaw`, php `prepare`, python `executescript`, plus receiver-scoped matching so a bare `run(` in a task runner stays silent | `taint.rs` | shipped, 6 regression tests |
+| NoSQL and SSRF sink classes | `taint.rs` | not started |
+| One version across the binary and npm, `BIN_VERSION` derived from `package.json`, lock asserted in CI, `v` prefixes stripped, `HEIDES_VERSION` honoured by npm too | `install.js`, `scripts/install.sh` | shipped, `npm test` covers it |
+| `query search` matches literals and comments, not only symbol names, index version 8 | `spine.rs` | shipped, 6 tests |
+| `plan` returns grounded evidence with file and line, capped at 12, and says so when nothing exists | `grounding.rs` | shipped, 4 tests |
+| Framework-aware entrypoints for Express, Flask, Django and Go so handlers stop being flagged dead | `frameworks.rs`, `describe` | shipped, 4 tests |
+| Report the source honestly when the tainted value is read and used on one line | `taint.rs` | shipped, 1 test |
+
+Two defects were found by running the release binary on a fixture rather than by
+the suite, and both are fixed: evidence named only the first file when a symbol
+existed in two, and the taint report printed `source at line 0` for the common
+same-line shape.
 
 ### Tier 1 — the database layer (highest value)
 

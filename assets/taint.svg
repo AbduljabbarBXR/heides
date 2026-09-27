@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 620" width="1240" height="620" role="img" aria-labelledby="tk-title tk-desc" font-family="'Liberation Sans', 'DejaVu Sans', Helvetica, Arial, sans-serif">
+  <title id="tk-title">The taint engine</title>
+  <desc id="tk-desc">User input sources flow through variables into sinks, across function boundaries, up to eight hops, and an ambiguous sink name only counts on a database receiver so a task runner stays silent.</desc>
+  <defs>
+    <linearGradient id="paper2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fbfcfd"/>
+      <stop offset="1" stop-color="#f0f3f7"/>
+    </linearGradient>
+  </defs>
+  <rect width="1240" height="620" fill="url(#paper2)"/>
+
+  <text x="48" y="56" fill="#16181d" font-size="24" font-weight="700">Taint: user input, provably reaching a sink</text>
+  <text x="48" y="82" fill="#7b8797" font-size="14">Deterministic, interprocedural, with an evidence chain. No model decides this.</text>
+
+  <g>
+    <rect x="48" y="112" width="252" height="188" rx="14" fill="#ffffff" stroke="#c9d2de"/>
+    <text x="72" y="142" fill="#1f6feb" font-size="11" font-weight="700">SOURCES</text>
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#3c4655">
+      <text x="72" y="172">req.query, req.body, req.params</text>
+      <text x="72" y="194">request.args, request.form</text>
+      <text x="72" y="216">$_GET, $_POST, $_REQUEST</text>
+      <text x="72" y="238">r.URL.Query, os.Getenv</text>
+      <text x="72" y="260">Request.QueryString, getParameter</text>
+      <text x="72" y="282">process.env, input.value</text>
+    </g>
+  </g>
+
+  <path d="M306 206 L346 206" stroke="#1f6feb" stroke-width="2" fill="none" marker-end="url(#a)"/>
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#1f6feb"/></marker></defs>
+
+  <g>
+    <rect x="350" y="112" width="252" height="188" rx="14" fill="#ffffff" stroke="#c9d2de"/>
+    <text x="374" y="142" fill="#1f6feb" font-size="11" font-weight="700">FLOW</text>
+    <g font-size="12.5" fill="#3c4655">
+      <text x="374" y="172">block scoped, per language</text>
+      <text x="374" y="194">across function boundaries</text>
+      <text x="374" y="216">across module level code</text>
+      <text x="374" y="238">MAX_HOPS = 8, then silence</text>
+      <text x="374" y="260">no source to sink match,</text>
+      <text x="374" y="282">no finding. ever.</text>
+    </g>
+  </g>
+
+  <path d="M608 206 L648 206" stroke="#1f6feb" stroke-width="2" fill="none" marker-end="url(#a)"/>
+
+  <g>
+    <rect x="652" y="112" width="252" height="188" rx="14" fill="#ffffff" stroke="#c9d2de"/>
+    <text x="676" y="142" fill="#1f6feb" font-size="11" font-weight="700">SINKS</text>
+    <g font-size="12.5" fill="#3c4655">
+      <text x="676" y="172">SQL, including db.run, raw,</text>
+      <text x="676" y="192">literal, prepare, knex.raw,</text>
+      <text x="676" y="212">gorm Raw, FromSqlRaw</text>
+      <text x="676" y="238">shell, filesystem, prompt,</text>
+      <text x="676" y="258">eval, and Django mark_safe</text>
+    </g>
+  </g>
+
+  <path d="M910 206 L950 206" stroke="#1f6feb" stroke-width="2" fill="none" marker-end="url(#a)"/>
+
+  <g>
+    <rect x="954" y="112" width="238" height="188" rx="14" fill="#16202f" stroke="#33415a"/>
+    <text x="978" y="142" fill="#7fb2ff" font-size="11" font-weight="700">FINDING</text>
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#e6edf3">
+      <text x="978" y="172">severity</text>
+      <text x="978" y="194">message</text>
+      <text x="978" y="216">file and line of the sink</text>
+      <text x="978" y="238">source line</text>
+      <text x="978" y="260">rule id</text>
+    </g>
+  </g>
+
+  <g>
+    <rect x="48" y="330" width="1144" height="130" rx="14" fill="#ffffff" stroke="#c9d2de"/>
+    <text x="72" y="360" fill="#1f6feb" font-size="11" font-weight="700">THE RULE THAT MATTERS MOST: AN AMBIGUOUS NAME IS NOT A SINK BY ITSELF</text>
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#3c4655">
+      <text x="72" y="392">db.run("DELETE FROM users WHERE id = " + id)</text>
+      <text x="470" y="392" fill="#1a7f37">SQL, critical. the real bug</text>
+      <text x="72" y="420">run(taskName)</text>
+      <text x="470" y="420" fill="#8b98a9">silence. a task runner is not a database</text>
+    </g>
+    <text x="72" y="446" fill="#8b98a9" font-size="11.5">A bare name needs a database-ish receiver. Both halves have a regression test, so the shortcut cannot come back.</text>
+  </g>
+
+  <g>
+    <rect x="48" y="486" width="1144" height="106" rx="14" fill="#16202f" stroke="#33415a"/>
+    <text x="72" y="516" fill="#7fb2ff" font-size="11" font-weight="700">WHAT THE RELEASE BINARY PRINTS, ON A FIXTURE WITH THE AUDITED MISSES</text>
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#e6edf3">
+      <text x="72" y="544">[critical] user controlled input reaches a SQL sink ... at src/knexish.js:6</text>
+      <text x="72" y="568">[critical] user controlled input reaches a SQL sink ... at src/orders.js:9, source on this line (line 9)</text>
+    </g>
+  </g>
+</svg>
