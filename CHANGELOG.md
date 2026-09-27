@@ -2,6 +2,12 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.15.1
+
+A security patch, and the fix was found by the tool scanning itself.
+
+* rustls 0.23.43 is bumped to 0.23.45 for RUSTSEC-2026-0285, TLS 1.3 handshake messages incorrectly accepted across encryption level boundaries. It arrives through `ureq`, the HTTP client used for the OSV advisory lookup, so any scan that reached a registry was running on the affected TLS stack. Reported by heides scanning its own workspace, and this release is the response.
+
 ## 0.15.0
 
 Tier 0 of the growth roadmap shipped: the security claims the README already made now hold, and the roadmap itself records what is done and what is not.
