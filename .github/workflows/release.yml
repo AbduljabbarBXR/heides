@@ -100,4 +100,13 @@ jobs:
       - name: cargo publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish
+        run: |
+          # cargo publish refuses a dirty tree. The build only ever rewrites
+          # Cargo.lock when the tagged version moved, so fail loudly on
+          # anything else instead of reaching for --allow-dirty.
+          dirty="$(git status --porcelain | awk '{print $2}' | grep -v '^Cargo.lock$' || true)"
+          if [ -n "$dirty" ]; then
+            echo "refusing to publish, unexpected dirty files: $dirty"
+            exit 1
+          fi
+          cargo publish --allow-dirty
