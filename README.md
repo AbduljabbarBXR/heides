@@ -72,7 +72,17 @@ Or install from npm, no Rust toolchain needed:
 npm install -g heides
 ```
 
-Or build from source with a Rust toolchain, or take a prebuilt binary from the releases page.
+Or with cargo:
+
+```sh
+cargo install heides
+```
+
+Or take a prebuilt binary for your platform from the releases page, or build from source
+with `cargo build --release`.
+
+Every channel is on the same version, and a test fails the build if the npm wrapper and the
+binary ever drift apart.
 
 ## Quick start
 
