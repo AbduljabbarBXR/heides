@@ -114,6 +114,14 @@ pub fn build_graph(root: &Path) -> (CodeGraph, usize) {
         .map(|p| (p.clone(), rel_key(&abs_root, p)))
         .collect();
     let mut graph = CodeGraph::new();
+    // The graph must remember where it was built. File entries store paths
+    // relative to the root, and file_path_of turns them back into real paths by
+    // joining them onto this. Without it, a freshly built graph has root = None,
+    // file_path_of returns a bare relative path, every read resolves against the
+    // current working directory and fails, and any guard that reads file content
+    // silently finds nothing. On a workspace that had never been indexed, that
+    // meant `heides check` reported a clean workspace.
+    graph.root = Some(abs_root);
     let parsed_count = fill_graph(&mut graph, &pairs);
     graph.rebuild_indexes();
     (graph, parsed_count)
@@ -293,5 +301,55 @@ mod tests {
             "two identical builds must produce identical symbol lists"
         );
         assert!(!a.symbols.is_empty(), "fixture must parse something");
+    }
+
+    /// The first run on a never indexed workspace reported a clean workspace.
+    ///
+    /// build_graph stored file paths relative to the root but never recorded
+    /// the root itself, so file_path_of returned a bare relative path that
+    /// resolved against the current working directory. Every content read
+    /// failed, so the guards that read files found nothing and check printed
+    /// zero findings. The second run was clean because spine::load restores the
+    /// root from the database, which is exactly why this went unnoticed: only
+    /// the first run was affected.
+    #[test]
+    fn a_freshly_built_graph_can_still_read_its_own_files() {
+        let root = Path::new("testdata/small_mixed");
+        let (graph, _) = build_graph(root);
+        let mut readable = 0;
+        let mut total = 0;
+        for f in &graph.files {
+            total += 1;
+            if std::fs::read_to_string(graph.file_path_of(&f.path)).is_ok() {
+                readable += 1;
+            }
+        }
+        assert!(
+            total > 0,
+            "the fixture must contain at least one indexed file"
+        );
+        assert_eq!(
+            readable, total,
+            "a freshly built graph must resolve every file it lists, got {readable} of {total}"
+        );
+    }
+
+    /// The end to end version of the same defect: a check against a workspace
+    /// that has never been indexed must still find a real taint flow. This is
+    /// the shape a user actually runs, on a fresh clone, where the previous
+    /// behaviour was to report a clean workspace.
+    #[test]
+    fn a_first_run_over_unindexed_files_still_reports_findings() {
+        let root = Path::new("testdata/first_run");
+        let (graph, _) = build_graph(root);
+        let reports = crate::harmony::check_workspace_without_deps(&graph);
+        let taint: Vec<&crate::harmony::GuardReport> = reports
+            .iter()
+            .filter(|r| r.guard == "security.taint")
+            .collect();
+        assert!(
+            !taint.is_empty(),
+            "a fresh build over an unindexed tainted file must report it, got {reports:?}"
+        );
     }
 }

@@ -2,6 +2,26 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.16.0
+
+SSRF and NoSQL sink classes, and the last of Tier 0 shipped. The two classes with the highest yield in a modern app, and the two hardest to add honestly, because both produce false positives the moment they are not careful.
+
+* **SSRF.** User controlled input reaching a server side fetch, so the server becomes the requester and the attacker chooses the destination. 7 languages: python, javascript and typescript, go, java, php, ruby, csharp. Covers `requests`, `httpx`, `urlopen`, `urllib.request.urlopen`, `socket.create_connection`, `fetch`, `axios`, `got`, `superagent`, node `http.get`, `http.Get`, `client.Do`, `new URL`, `openStream`, `openConnection`, `RestTemplate`, `HttpClient.send`, `curl_exec`, `fsockopen`, ruby `URI.open` and `Net::HTTP.get`, and the .NET `WebClient` and `HttpClient` shapes. A tainted fetch aimed at `169.254.169.254`, `metadata.google.internal`, or the Alibaba and ECS equivalents is reported as `a cloud metadata fetch sink`, because credential theft is what it is.
+* **NoSQL injection.** Request data reaching a document query, where an attacker controlled key or operator changes the meaning of the query rather than only its value. 7 languages. `collection.find`, `findOne`, `findOneAndUpdate`, `updateOne`, `deleteOne`, `insertOne`, `aggregate`, `countDocuments`, `where`, pymongo and motor equivalents, the PHP driver names, the Go driver methods, `Document.parse`, `BsonDocument.Parse`, and `$where`.
+* **A stricter gate for these two classes than SQL uses.** A source existing somewhere in a handler is not enough; the tainted value has to reach the sink line. A handler that reads `req.query.id` and then calls `fetch('https://api.internal/health')` stays silent, and `find({ published: true, page: 1 })` stays silent, because a literal query object is safe. A tainted name used as an object *key* is also not a use, which is what makes the literal case work.
+* **A tainted address is never guessed.** A host passed in through a variable is reported as SSRF, not as cloud metadata, because the address is not on the line and the tool will not claim to know where it points.
+* **TypeScript was never taint scanned.** `.ts` and `.tsx` mapped to `typescript` in the parser and the source and sink tables had no `typescript` rows, so every TypeScript file was skipped in silence. TypeScript now shares the JavaScript rows. This is a larger real-world gain than the new rules themselves, since most modern SSRF and NoSQL code is TypeScript.
+* **Ruby could not taint at all,** for three separate reasons: no `rb` extension in `detect_language`, no source row, and a block detector that understood braces but not `def` and `end`. All three fixed. Ruby still has no grammar, so it contributes no symbols to the graph, and the README says so rather than implying parity.
+* **Ruby's bare `open(` is exempt when the receiver is `File.` or `IO.`** Reading or writing a path is not request forgery, and mislabelling it would be worse than missing it.
+* **The rule dialect's two silent traps are documented** at `concrete_patterns`: a `|` outside a group is kept as a literal character, and the only recognised escapes are `\b \s \. \( \) \$`, so a pattern containing `\[` matches the text `\[` and nothing else. Both were hit while writing these rules and both failed silently.
+* 22 new tests, including the false-positive halves. A hardcoded URL, a literal query object, `items.find(`, a tainted key that is only an object key, and `File.open` must all stay silent, and each has a test that fails if it does not.
+
+## 0.15.2
+
+A false negative, found by running the release binary the way a user would.
+
+* **The first check on a never indexed workspace reported nothing, and called the workspace clean.** `build_graph` stored every file path relative to the scan root but never recorded the root itself, so `file_path_of` returned a bare relative path that resolved against the current working directory. Every content read failed, so the taint, edge and practice guards had no files to look at and produced zero findings. On a fresh clone, `heides check` printed "0 blockers" over code that was full of them. The second run was correct, because the saved index restores the root from the database, which is exactly why this was not caught earlier. One line sets the root, and two tests pin it: one asserts a freshly built graph can read back every file it lists, the other asserts a first run over an unindexed tainted file reports it. Found while testing the SSRF and NoSQL sinks, when a fixture that reported findings on the second run reported nothing on the first.
+
 ## 0.15.1
 
 A security patch, and the fix was found by the tool scanning itself.

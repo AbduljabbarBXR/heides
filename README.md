@@ -35,7 +35,24 @@ The cost contract is enforced on every push by the CI scale phase, not by a numb
 
 ![Taint traces user input into sinks, across function boundaries](assets/taint.png)
 
-Taint is the part that finds real bugs. Sources are request data and environment reads per language. Flow is tracked block scoped, across function boundaries and across module level code, with a hop cap and silence past it. Sinks include SQL, shell, filesystem, prompt, eval and Django's `mark_safe`.
+Taint is the part that finds real bugs. Sources are request data and environment reads per language. Flow is tracked block scoped, across function boundaries and across module level code, with a hop cap and silence past it. Sinks include SQL, SSRF, NoSQL, shell, filesystem, prompt, eval and Django's `mark_safe`.
+
+SSRF and NoSQL use a stricter gate than SQL on purpose. A hardcoded health-check URL and a literal query object inside a request handler are both safe, so those rules require the tainted value to actually reach the sink line rather than merely a source existing somewhere in the handler:
+
+```js
+app.get('/health', async (req, res) => {
+  const id = req.query.id;                              // a source is in scope here
+  const r = await fetch('https://api.internal/health'); // ...and this must stay silent
+});
+```
+
+A tainted fetch aimed at a cloud metadata address is reported as credential theft rather than as a generic SSRF, because that is what it is:
+
+```
+user controlled input reaches a cloud metadata fetch sink on this line. source at line 4
+```
+
+The report only claims what it can see. A tainted host passed in through a variable is reported as SSRF, because the address never appears on the line and the tool will not guess where it points.
 
 The rule that matters most is restraint. `run`, `raw`, `literal` and `prepare` are ambiguous names, so they only count as SQL on a database-ish receiver:
 
@@ -44,7 +61,28 @@ db.run("DELETE FROM users WHERE id = " + id)   // critical SQL finding
 run(taskName)                                  // silence, a task runner is not a database
 ```
 
+The same applies to a document query, where the method name alone is ambiguous but the receiver is not:
+
+```js
+UserModel.find(JSON.parse(req.query.filter))  // critical NoSQL finding
+items.find(i => i.id === id)                  // silence, that is an array method
+```
+
 Both halves have a regression test, so the shortcut cannot come back.
+
+### Languages
+
+Taint and indexing are separate, and the table is honest about which is which.
+
+| Language | Indexed with symbols | Taint scanned |
+|---|---|---|
+| JavaScript, TypeScript, Python, PHP, Go, Java, C# | yes | yes |
+| Ruby | no grammar yet | yes |
+| HTML, CSS | yes | no |
+| Rust | yes | no |
+
+TypeScript was silently unscanned for taint until 0.16.0: the parser mapped `.ts` to `typescript` and the rule tables had no `typescript` rows, so every TypeScript file was skipped without a word. Ruby could not taint at all until this release, for three separate reasons: no `rb` extension, no source row, and a block detector that understood braces but not `def` and `end`. Rust is indexed but not taint scanned, so a shell or SQL sink in Rust code is not reported.
+
 
 ## The gate
 
@@ -60,10 +98,11 @@ One line installer, downloads the prebuilt binary for linux, macos, windows and 
 curl -fsSL https://raw.githubusercontent.com/AbduljabbarBXR/heides/main/scripts/install.sh | bash
 ```
 
-Pin a version with `HEIDES_VERSION`. It takes a bare version such as `0.15.0`, a leading `v` is stripped, and the npm installer reads the same variable, so one pin covers both paths.
+Pin a version with `HEIDES_VERSION`. It takes a bare version, and a leading `v` is stripped, so both `0.16.0` and `v0.16.0` work. The npm installer reads the same variable, so one pin covers both paths.
 
 ```sh
-HEIDES_VERSION=0.15.0 curl -fsSL https://raw.githubusercontent.com/AbduljabbarBXR/heides/main/scripts/install.sh | bash
+# any published tag, bare or with a leading v
+HEIDES_VERSION=v0.16.0 curl -fsSL https://raw.githubusercontent.com/AbduljabbarBXR/heides/main/scripts/install.sh | bash
 ```
 
 Or install from npm, no Rust toolchain needed:
@@ -154,14 +193,17 @@ The server exposes eleven tools over stdio, for any MCP client.
 
 ## What is not done yet
 
-Stated plainly, and tracked with citations in `ROADMAP.md`.
+Stated plainly, and tracked with citations and a resolution column in `ROADMAP.md`. Two things about this list are worth being explicit about. A gap listed here is a limit you can plan around; a silent no-op is not, and one shipped in 0.15.2, where a check on a never-indexed workspace reported a clean workspace. That specific defect is now pinned by two tests: one asserts a freshly built graph can read back every file it lists, the other asserts a first run over an unindexed tainted file reports it.
 
-* No database layer yet. There is no `.sql` parsing, no schema graph, no way to ask which code touches a table. This is the largest known gap.
-* No NoSQL or SSRF sink classes. The sink list is SQL, shell, filesystem, prompt, eval and `mark_safe`.
+* No database layer yet. There is no `.sql` parsing, no schema graph, no way to ask which code touches a table. This is the largest known gap. Note this is a missing *database* layer, not a missing store: the spine is already one embedded SQLite file, so this extends an existing store rather than introducing one.
+* No API surface graph, so nothing answers "what does `POST /users` end up writing to" in one call. This is the flagship item.
+* Path traversal beyond the filesystem write sinks, and no command injection rule for framework-specific shell APIs.
+* No open redirect, XXE, unsafe deserialization or crypto misuse rules.
 * A handful of ecosystems are not read for dependencies: Ruby, .NET, Swift, Gradle, Dart, and no transitive resolution from lockfiles.
-* Languages are the eight the grammars cover. C, C++, SQL, shell, Ruby, Kotlin, Swift, Scala, Dart and Dockerfile are not indexed.
-* `deps` needs the network to reach OSV, and degrades gracefully when it cannot.
-* No API surface graph, so nothing answers "what does `POST /users` end up writing to" in one call.
+* Languages not indexed: C, C++, SQL, shell, Kotlin, Swift, Scala, Dart, Dockerfile. Ruby is taint scanned but has no grammar, so it contributes no symbols to the graph. Rust is indexed but not taint scanned.
+* `deps` needs the network to reach OSV, and degrades gracefully when it cannot. `check` reaches the network for that one guard without being asked, which is a known inconsistency with the offline claim above.
+* `staged` validates conflicts only; it does not run taint over the post-patch tree, so a patch that introduces a flow is not yet caught by the gate.
+
 
 ## Contributing
 

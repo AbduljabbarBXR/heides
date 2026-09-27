@@ -686,7 +686,7 @@ fn used_as_value(tainted: &[(String, usize)], line: &str) -> bool {
         while let Some(found) = line[from..].find(v.as_str()) {
             let at = from + found;
             let end = at + v.len();
-            if line[end..].trim_start().chars().next() != Some(':') {
+            if !line[end..].trim_start().starts_with(':') {
                 return true;
             }
             from = end;
