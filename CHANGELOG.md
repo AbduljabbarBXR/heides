@@ -2,6 +2,12 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.15.2
+
+A false negative, found by running the release binary the way a user would.
+
+* **The first check on a never indexed workspace reported nothing, and called the workspace clean.** `build_graph` stored every file path relative to the scan root but never recorded the root itself, so `file_path_of` returned a bare relative path that resolved against the current working directory. Every content read failed, so the taint, edge and practice guards had no files to look at and produced zero findings. On a fresh clone, `heides check` printed "0 blockers" over code that was full of them. The second run was correct, because the saved index restores the root from the database, which is exactly why this was not caught earlier. One line sets the root, and two tests pin it: one asserts a freshly built graph can read back every file it lists, the other asserts a first run over an unindexed tainted file reports it. Found while testing the SSRF and NoSQL sinks, when a fixture that reported findings on the second run reported nothing on the first.
+
 ## 0.15.1
 
 A security patch, and the fix was found by the tool scanning itself.
