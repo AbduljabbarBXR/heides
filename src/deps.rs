@@ -837,6 +837,7 @@ fn canonical_ecosystem(eco: &str) -> &'static str {
 
 /// Run the dependency guard. Returns reports plus a network status flag.
 static DEPS_OVERRIDE: Mutex<Option<bool>> = Mutex::new(None);
+static REQUIRE_ADVISORIES: Mutex<bool> = Mutex::new(false);
 
 /// Whether the dependency guard is allowed to run.
 ///
@@ -862,6 +863,95 @@ pub fn deps_enabled() -> bool {
 /// Set by `--no-deps`. Wins over the environment.
 pub fn set_deps_enabled(v: bool) {
     *DEPS_OVERRIDE.lock().unwrap() = Some(v);
+}
+
+/// Set by `--require-advisories`.
+///
+/// A security gate must fail rather than pass hollow. Without this, wiring
+/// `--no-deps` into a required CI status check produces a green build that
+/// never asked OSV whether a pinned version has a known vulnerability, and the
+/// only clue is a footnote in the log. With this, that misconfiguration is a
+/// non-zero exit, which is a red X instead of a silent hole.
+pub fn set_require_advisories(v: bool) {
+    *REQUIRE_ADVISORIES.lock().unwrap() = v;
+}
+
+pub fn require_advisories() -> bool {
+    *REQUIRE_ADVISORIES.lock().unwrap()
+}
+
+/// Per-call overrides for a long-lived server, set by one MCP request and
+/// dropped when it finishes.
+///
+/// The process globals above are correct for a single-shot CLI: the process
+/// exits before another caller can see them. They are wrong for an MCP server,
+/// which handles many requests in one process. Without this, one client calling
+/// `harmony.check` with `offline: true` silently disabled the advisory lookup
+/// for every later request from every client, which is a security setting
+/// changed by an unrelated argument. Scoping the override to a single call
+/// removes that class of leak entirely.
+///
+/// Implementation note. The first draft held both locks across the closure and
+/// tried to detect nesting by testing whether they were already set. That
+/// deadlocks: the inner call blocks on a lock the outer one is holding, and the
+/// test suite hangs rather than fails. A depth counter with a separate mutex
+/// gives the same answer without ever holding a lock across the call, so
+/// nesting is detected before any of the state locks are taken.
+static SCOPED_DEPS: Mutex<Option<bool>> = Mutex::new(None);
+static SCOPED_REQUIRE: Mutex<Option<bool>> = Mutex::new(None);
+static SCOPE_DEPTH: Mutex<usize> = Mutex::new(0);
+
+/// True when a scope is already active, set and cleared without holding a lock
+/// across the call.
+fn scope_active() -> bool {
+    *SCOPE_DEPTH.lock().unwrap() > 0
+}
+
+pub fn with_scoped_deps<R>(
+    deps_enabled: Option<bool>,
+    require_advisories: Option<bool>,
+    f: impl FnOnce() -> R,
+) -> R {
+    if scope_active() {
+        // A nested scope would restore the wrong value on the way out. Refuse to
+        // nest rather than corrupt the outer scope's state.
+        return f();
+    }
+    {
+        let mut d = SCOPED_DEPS.lock().unwrap();
+        let mut r = SCOPED_REQUIRE.lock().unwrap();
+        *d = deps_enabled;
+        *r = require_advisories;
+    }
+    *SCOPE_DEPTH.lock().unwrap() = 1;
+
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+
+    {
+        *SCOPED_DEPS.lock().unwrap() = None;
+        *SCOPED_REQUIRE.lock().unwrap() = None;
+        *SCOPE_DEPTH.lock().unwrap() = 0;
+    }
+    match out {
+        Ok(v) => v,
+        Err(e) => std::panic::resume_unwind(e),
+    }
+}
+
+/// True when the advisory lookup was actually permitted for this call.
+pub fn deps_allowed_now() -> bool {
+    if let Some(v) = *SCOPED_DEPS.lock().unwrap() {
+        return v;
+    }
+    deps_enabled()
+}
+
+/// Whether a security gate should fail for this call, scoped or global.
+pub fn require_advisories_now() -> bool {
+    if let Some(v) = *SCOPED_REQUIRE.lock().unwrap() {
+        return v;
+    }
+    require_advisories()
 }
 
 fn offline_env() -> bool {
@@ -1013,6 +1103,77 @@ pub fn check_offline(root: &Path) -> (Vec<DepReport>, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The leak this whole mechanism exists to prevent. Before the scoped
+    /// override, one MCP client passing `offline: true` called
+    /// `set_deps_enabled(false)`, which wrote a process global and never
+    /// restored it. In a server handling many requests that meant every later
+    /// request from every client silently ran without advisories, so a security
+    /// setting was changed by an unrelated argument.
+    #[test]
+    fn a_scoped_override_does_not_outlive_the_call() {
+        // Baseline: the global is on.
+        assert!(deps_allowed_now(), "default is on");
+        let v = with_scoped_deps(Some(false), Some(true), || {
+            assert!(!deps_allowed_now(), "the scope must apply inside");
+            assert!(require_advisories_now(), "and so must the strict gate");
+            7
+        });
+        assert_eq!(v, 7, "the closure result must come back out");
+        assert!(
+            deps_allowed_now(),
+            "a scoped override must not outlive the call that set it"
+        );
+    }
+
+    #[test]
+    fn a_scoped_override_restores_the_previous_value_not_a_default() {
+        // A process global set by the CLI flag must survive an MCP call that set
+        // its own value, or the restore silently flips the operator's choice.
+        set_deps_enabled(false);
+        with_scoped_deps(Some(true), None, || {
+            assert!(deps_allowed_now(), "the scope wins inside");
+        });
+        assert!(
+            !deps_allowed_now(),
+            "the pre-existing global must be restored, not reset to the default"
+        );
+        set_deps_enabled(true);
+    }
+
+    #[test]
+    fn a_nested_scope_is_refused_rather_than_corrupting_the_outer_one() {
+        with_scoped_deps(Some(false), Some(true), || {
+            assert!(!deps_allowed_now());
+            // Inner scope asks for the opposite. The guard refuses to nest
+            // rather than let the inner restore write the wrong value.
+            with_scoped_deps(Some(true), Some(false), || {
+                assert!(
+                    !deps_allowed_now(),
+                    "a refused nested scope must leave the outer one intact"
+                );
+            });
+            assert!(!deps_allowed_now(), "the outer scope is still in force");
+        });
+        assert!(deps_allowed_now(), "and it is released at the end");
+    }
+
+    #[test]
+    fn a_panic_inside_a_scope_still_releases_it() {
+        // Leaving a security setting flipped after a panic is the exact failure
+        // the scoped mechanism is meant to prevent, so the unwind path has to
+        // restore too.
+        let r = std::panic::catch_unwind(|| {
+            with_scoped_deps(Some(false), Some(true), || {
+                panic!("boom");
+            })
+        });
+        assert!(r.is_err(), "the panic must propagate");
+        assert!(
+            deps_allowed_now(),
+            "the override must be released even when the closure panicked"
+        );
+    }
 
     #[test]
     fn offline_env_accepts_the_documented_values_only() {

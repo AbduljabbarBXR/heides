@@ -24,9 +24,48 @@ heides check --no-deps       # or HEIDES_OFFLINE=1
 
 On this repository that is the difference between 217 seconds and 2. Manifest
 parsing and pinned version extraction are local, so an offline check still reads
-all 94 pinned versions and reports them. What it gives up is the known-CVE
-lookup and the "a newer version exists" reminder, and the coverage receipt says
-the lookup was skipped rather than reporting a partial run as a complete one.
+all 94 pinned versions and reports them.
+
+**`--no-deps` is a speed flag. It is not a security gate.** A skipped advisory
+lookup means a known vulnerability in a pinned version is not reported, and
+there is no cache to fall back on yet. Two things stop that from being a quiet
+trap. The summary line carries the posture, so it cannot be skimmed past:
+
+```text
+0 blocker(s), 0 critical, 0 warning(s), 1 info. ADVISORIES NOT CHECKED
+```
+
+And `--require-advisories` makes the wrong configuration fail rather than pass
+hollow. Use both shapes, and make them visibly different jobs:
+
+```yaml
+# fast gate, every push, seconds. Not a security gate.
+- run: heides check --no-deps .
+
+# security gate, scheduled. Fails if the advisory lookup did not run.
+- run: heides check --require-advisories .
+```
+
+### Over MCP, the default is the safe one
+
+`harmony.check` and `harmony.report` take both `offline` and
+`require_advisories`. When `require_advisories` holds and the advisory lookup
+did not run, the tool returns a JSON-RPC error rather than a result, and
+`harmony.report` carries `security_gate` and `security_posture` in its JSON so an
+agent can gate on the verdict without parsing prose.
+
+`require_advisories` **defaults to true over MCP and is unset on the CLI.** That
+difference is deliberate. A human running `heides check` in a terminal sees the
+posture on the summary line and chooses; an agent may only read the result, so
+the safe path is the default and speed is opt-in. A per-call argument applies to
+that call only and is restored afterwards, including when it panics, so one
+caller cannot change the security posture for the next.
+
+Do not put `--no-deps` in a required status check and read a green build as
+"no known vulnerabilities". The default, with no flags, is the security gate:
+it consults OSV, and if the registry is unreachable the summary says
+`ADVISORIES INCOMPLETE` so a silent network failure cannot read as a pass
+either. The offline advisory cache that removes the tradeoff is Tier 4.
 
 ## Why it exists
 

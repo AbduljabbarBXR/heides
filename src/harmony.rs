@@ -40,6 +40,16 @@ pub enum DepsState {
 }
 
 impl DepsState {
+    /// A stable machine-readable name. Agents gate on this, so it must not be
+    /// a Debug format that could change with a variant rename.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DepsState::RanOnline => "ran_online",
+            DepsState::RanPartial => "ran_partial",
+            DepsState::Skipped => "skipped",
+        }
+    }
+
     fn note(self) -> Option<&'static str> {
         match self {
             DepsState::RanOnline => None,
@@ -164,25 +174,20 @@ pub fn check_workspace_with_coverage(
     root: &Path,
     graph: &CodeGraph,
 ) -> (Vec<GuardReport>, Coverage) {
-    let (reports, network_ok) = check_workspace_and_online(root, graph);
-    let state = if network_ok {
-        DepsState::RanOnline
-    } else {
-        DepsState::RanPartial
-    };
+    let (reports, state) = check_workspace_and_state(root, graph);
     (reports, coverage_of(graph, state))
 }
 
 /// Run the full workspace check: taint, edge cases, practices, dependencies.
 pub fn check_workspace(root: &Path, graph: &CodeGraph) -> Vec<GuardReport> {
-    check_workspace_and_online(root, graph).0
+    check_workspace_and_state(root, graph).0
 }
 
-fn check_workspace_and_online(root: &Path, graph: &CodeGraph) -> (Vec<GuardReport>, bool) {
+fn check_workspace_and_state(root: &Path, graph: &CodeGraph) -> (Vec<GuardReport>, DepsState) {
     let mut reports = check_workspace_without_deps(graph);
 
     // The one guard that is allowed to want the network, and only when asked.
-    if !crate::deps::deps_enabled() {
+    if !crate::deps::deps_allowed_now() {
         // Manifest parsing is local and still runs, so the pinned versions are
         // known even offline. Only the advisory and latest-version lookups are
         // skipped, and the receipt says so.
@@ -196,7 +201,7 @@ fn check_workspace_and_online(root: &Path, graph: &CodeGraph) -> (Vec<GuardRepor
                 line: r.line,
             });
         }
-        return (reports, true);
+        return (reports, DepsState::Skipped);
     }
 
     let (dep_reports, network_ok) = crate::deps::check(root);
@@ -220,7 +225,12 @@ fn check_workspace_and_online(root: &Path, graph: &CodeGraph) -> (Vec<GuardRepor
         });
     }
 
-    (reports, network_ok)
+    let state = if network_ok {
+        DepsState::RanOnline
+    } else {
+        DepsState::RanPartial
+    };
+    (reports, state)
 }
 
 /// The shared local guard body behind check_workspace and the report tool.
@@ -323,14 +333,27 @@ pub fn check_staged(
 }
 
 /// Summarize reports by severity for a quick overview line.
+/// The headline. Counts alone, and counts alone are a lie when a guard did not
+/// run: "0 critical" reads identically whether the advisory lookup found
+/// nothing or was skipped. The posture travels with the numbers, on the same
+/// line, so the summary cannot be skimmed past.
 pub fn summarize(reports: &[GuardReport]) -> String {
+    summarize_with(reports, DepsState::RanOnline)
+}
+
+pub fn summarize_with(reports: &[GuardReport], deps: DepsState) -> String {
     let blockers = reports.iter().filter(|r| r.severity == "blocker").count();
     let critical = reports.iter().filter(|r| r.severity == "critical").count();
     let warnings = reports.iter().filter(|r| r.severity == "warning").count();
     let infos = reports.iter().filter(|r| r.severity == "info").count();
+    let posture = match deps {
+        DepsState::RanOnline => String::new(),
+        DepsState::RanPartial => ". ADVISORIES INCOMPLETE, registry unreachable".to_string(),
+        DepsState::Skipped => ". ADVISORIES NOT CHECKED".to_string(),
+    };
     format!(
-        "{} blocker(s), {} critical, {} warning(s), {} info",
-        blockers, critical, warnings, infos
+        "{} blocker(s), {} critical, {} warning(s), {} info{}",
+        blockers, critical, warnings, infos, posture
     )
 }
 
@@ -467,6 +490,47 @@ mod liveness {
             cov2.unreadable.iter().any(|p| p.contains("a.js")),
             "the unreadable file must be named: {text}"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_summary_line_itself_carries_the_posture() {
+        // The defect this fixes: "0 blocker(s), 0 critical, 0 warning(s), 0
+        // info" is the same string whether advisories were checked and clean,
+        // or never checked. The posture has to be on the headline.
+        let clean: Vec<GuardReport> = Vec::new();
+        let skipped = summarize_with(&clean, DepsState::Skipped);
+        let online = summarize_with(&clean, DepsState::RanOnline);
+        assert!(skipped.contains("ADVISORIES NOT CHECKED"), "{skipped}");
+        assert!(skipped.contains("0 critical"), "{skipped}");
+        assert!(
+            online.contains("0 critical") && !online.contains("ADVISORIES"),
+            "an online run must not carry the warning: {online}"
+        );
+        assert_ne!(
+            skipped, online,
+            "the two postures must not be indistinguishable"
+        );
+        let partial = summarize_with(&clean, DepsState::RanPartial);
+        assert!(partial.contains("ADVISORIES INCOMPLETE"), "{partial}");
+    }
+
+    #[test]
+    fn a_skipped_run_reports_skipped_not_online() {
+        // Guards a real bug in the first draft: the offline branch returned
+        // network_ok = true, which mapped to RanOnline and would have let
+        // --require-advisories pass on a check that never asked OSV anything.
+        crate::deps::set_deps_enabled(false);
+        let dir = scratch("skipstate");
+        std::fs::write(dir.join("a.js"), "export const x = 1;\n").unwrap();
+        let (graph, _) = indexer::build_graph(&dir);
+        let (_, cov) = check_workspace_with_coverage(&dir, &graph);
+        assert_eq!(
+            cov.deps,
+            DepsState::Skipped,
+            "a skipped dependency check must not report itself as online"
+        );
+        crate::deps::set_deps_enabled(true);
         std::fs::remove_dir_all(&dir).ok();
     }
 
