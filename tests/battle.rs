@@ -680,12 +680,28 @@ fn battle_serial() {
     );
 
     let (out, _, ok) = run_in(&["check"]);
-    let json_parse = out.matches("JSON.parse can throw").count();
-    let debug_log = out.matches("debug output left").count();
-    let unwrap = out.matches("unwrap can panic").count();
+    // This used to count how many times each sentence appeared in the output,
+    // which is exactly what folding reduces. The intent is that every planted
+    // bug is accounted for, so it now asserts the reported count on the folded
+    // line. The number that must not change is how many bugs were found, not
+    // how many lines they occupied.
+    let counted = |needle: &str, want: usize| {
+        out.lines()
+            .any(|l| l.contains(needle) && l.contains(&format!("x{want} ")))
+    };
     b.check(
         "scale check catches every planted bug",
-        ok && json_parse == 200 && debug_log == 2 && unwrap == 10,
+        ok && counted("JSON.parse can throw", 200)
+            && counted("debug output left", 2)
+            && counted("unwrap can panic", 10),
+    );
+    // And the unfolded view must still name every one of them.
+    let (all, _, _) = run_in(&["check", "--all"]);
+    b.check(
+        "unfolded scale check still lists every planted bug",
+        all.matches("JSON.parse can throw").count() == 200
+            && all.matches("debug output left").count() == 2
+            && all.matches("unwrap can panic").count() == 10,
     );
     b.check("scale check output is dash free", has_no_dash(&out));
 

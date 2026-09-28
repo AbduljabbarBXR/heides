@@ -43,6 +43,79 @@ fn print_usage() {
     println!("For per command usage run heides CMD help.");
 }
 
+/// The default view: evidence first, advice second, identical findings folded.
+///
+/// A taint finding and a style opinion never share a list, because an agent
+/// reading both cannot tell which one to act on. The counts at the top always
+/// describe every finding, folded or not, so the summary is never flattered by
+/// collapsing.
+fn print_flat(ui: &Ui, reports: &[harmony::GuardReport]) {
+    println!("{}", harmony::summarize(reports));
+    let expand = harmony::expand_all();
+    let hide_advice = harmony::hide_advice();
+    let keep: Vec<&harmony::GuardReport> = if hide_advice {
+        harmony::without_advice(reports)
+    } else {
+        reports.iter().collect()
+    };
+    let (proof, advice): (Vec<&harmony::GuardReport>, Vec<&harmony::GuardReport>) = keep
+        .iter()
+        .partition(|r| harmony::bucket(&r.guard) == harmony::Bucket::Proof);
+
+    if reports
+        .iter()
+        .any(|r| r.severity == "blocker" || r.severity == "critical")
+    {
+        println!();
+    }
+    for (label, group) in [("evidence", &proof), ("advice", &advice)] {
+        if group.is_empty() {
+            continue;
+        }
+        if label == "advice" {
+            println!();
+            println!("advice, unproven and unranked:");
+        }
+        for line in harmony::collapse(group, expand) {
+            match line {
+                harmony::Line::One(r) => {
+                    let loc = if r.file.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" at {}:{}", r.file, r.line)
+                    };
+                    println!(
+                        "{} {} ({}){}",
+                        ui.severity(&r.severity),
+                        r.message,
+                        r.guard,
+                        loc
+                    );
+                }
+                harmony::Line::Many {
+                    severity,
+                    message,
+                    guard,
+                    count,
+                    first,
+                    files,
+                    file_count,
+                } => {
+                    let loc = harmony::folded_location(first, &files, file_count);
+                    println!(
+                        "{} {} x{} ({}){}",
+                        ui.severity(severity),
+                        message,
+                        count,
+                        guard,
+                        loc
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().collect();
     let mut cleaned: Vec<String> = Vec::with_capacity(args.len());
@@ -50,6 +123,17 @@ fn main() -> ExitCode {
     for a in args.iter().skip(1) {
         // The dependency guard is the only one that wants the network. Both the
         // flag and the environment turn it off, and either one is enough.
+        // Fold identical findings by default; --all prints every one.
+        if a == "--all" {
+            heides::harmony::set_expand_all(true);
+            continue;
+        }
+        // Drop the advisory findings entirely, for a gate that only wants
+        // evidence and nothing else.
+        if a == "--no-advice" {
+            heides::harmony::set_hide_advice(true);
+            continue;
+        }
         if a == "--no-deps" {
             heides::deps::set_deps_enabled(false);
             continue;
@@ -406,27 +490,7 @@ fn main() -> ExitCode {
                 }
                 println!("{}", cov.render());
             } else {
-                println!("{}", harmony::summarize_with(&reports, cov.deps));
-                let heavy = reports
-                    .iter()
-                    .any(|r| r.severity == "blocker" || r.severity == "critical");
-                if heavy {
-                    println!();
-                }
-                for r in &reports {
-                    let loc = if r.file.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" at {}:{}", r.file, r.line)
-                    };
-                    println!(
-                        "{} {} ({}){}",
-                        ui.severity(&r.severity),
-                        r.message,
-                        r.guard,
-                        loc
-                    );
-                }
+                print_flat(&ui, &reports);
                 println!("{}", cov.render());
             }
             // A security gate that did not consult the advisories must not

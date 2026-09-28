@@ -36,21 +36,56 @@ fn text_result(text: String) -> Value {
     json!({ "content": [{ "type": "text", "text": text }] })
 }
 
-fn report_lines(reports: &[harmony::GuardReport]) -> String {
+/// Findings as text, folded by default and split into evidence and advice.
+///
+/// An agent pays for every token it reads, so the MCP surface collapses unless
+/// the caller asks for everything with `all: true`. A 126 line wall of one
+/// sentence is how an agent burns its budget and misses the one finding that
+/// mattered.
+fn report_lines(reports: &[harmony::GuardReport], expand: bool) -> String {
     if reports.is_empty() {
         return "no findings. the workspace is clean.".to_string();
     }
     let mut lines = vec![harmony::summarize(reports)];
-    for r in reports {
-        let loc = if r.file.is_empty() {
-            String::new()
-        } else {
-            format!(" at {}:{}", r.file, r.line)
-        };
-        lines.push(format!(
-            "[{}] {} ({}){}{}",
-            r.severity, r.message, r.guard, loc, ""
-        ));
+    let (proof, advice): (Vec<&harmony::GuardReport>, Vec<&harmony::GuardReport>) = reports
+        .iter()
+        .partition(|r| harmony::bucket(&r.guard) == harmony::Bucket::Proof);
+    for (label, group) in [("evidence", &proof), ("advice", &advice)] {
+        if group.is_empty() {
+            continue;
+        }
+        lines.push(String::new());
+        lines.push(format!("{}:", label));
+        for line in harmony::collapse(group, expand) {
+            match line {
+                harmony::Line::One(r) => {
+                    let loc = if r.file.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" at {}:{}", r.file, r.line)
+                    };
+                    lines.push(format!(
+                        "[{}] {} ({}){}",
+                        r.severity, r.message, r.guard, loc
+                    ));
+                }
+                harmony::Line::Many {
+                    severity,
+                    message,
+                    guard,
+                    count,
+                    first,
+                    files,
+                    file_count,
+                } => {
+                    let loc = harmony::folded_location(first, &files, file_count);
+                    lines.push(format!(
+                        "[{}] {} x{} ({}){}",
+                        severity, message, count, guard, loc
+                    ));
+                }
+            }
+        }
     }
     lines.join("\n")
 }
@@ -173,12 +208,12 @@ fn handle(id: &Value, method: &str, params: &Value) {
                         {
                             "name": "harmony.check",
                             "description": "Run every guard on the workspace and return findings with evidence. Pass offline true to skip the dependency guard registry lookups. Returns an error, not a clean result, when require_advisories is true and the advisory lookup did not run, so a misconfigured gate fails instead of passing hollow.",
-                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "offline": { "type": "boolean", "description": "skip the dependency guard registry lookups" }, "require_advisories": { "type": "boolean", "description": "fail rather than return a clean result when advisories were not checked. Defaults to true, and a caller cannot lower it: an agent may only read the result, so the gate is fail closed on this surface." } } }
+                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "offline": { "type": "boolean", "description": "skip the dependency guard registry lookups" }, "require_advisories": { "type": "boolean", "description": "fail rather than return a clean result when advisories were not checked. Defaults to true, and a caller cannot lower it: an agent may only read the result, so the gate is fail closed on this surface." }, "all": { "type": "boolean", "description": "print every finding instead of folding identical ones. Folded by default, because a wall of identical lines is how an agent misses the one finding that mattered" } } }
                         },
                         {
                             "name": "harmony.report",
                             "description": "Run every guard on the workspace and return findings as structured JSON with severity counts, plus security_gate and security_posture so an agent can gate on the verdict without parsing prose. Pass offline true to skip the registry lookups.",
-                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "offline": { "type": "boolean", "description": "skip the dependency guard registry lookups" }, "require_advisories": { "type": "boolean", "description": "fail rather than return a clean result when advisories were not checked. Defaults to true, and a caller cannot lower it: an agent may only read the result, so the gate is fail closed on this surface." } } }
+                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "offline": { "type": "boolean", "description": "skip the dependency guard registry lookups" }, "require_advisories": { "type": "boolean", "description": "fail rather than return a clean result when advisories were not checked. Defaults to true, and a caller cannot lower it: an agent may only read the result, so the gate is fail closed on this surface." }, "all": { "type": "boolean", "description": "print every finding instead of folding identical ones. Folded by default, because a wall of identical lines is how an agent misses the one finding that mattered" } } }
                         },
                         {
                             "name": "harmony.staged",
@@ -479,7 +514,8 @@ fn handle(id: &Value, method: &str, params: &Value) {
                         &graph,
                         policy,
                     );
-                    let mut out = format!("{}\n\n{}", report_lines(&reports), cov.render());
+                    let expand = args.get("all").and_then(|v| v.as_bool()) == Some(true);
+                    let mut out = format!("{}\n\n{}", report_lines(&reports, expand), cov.render());
                     // The MCP equivalent of a non-zero exit. An agent cannot see
                     // an exit code, so a gate that would fail on the CLI has to
                     // fail here too, or the MCP surface is the hollow one.
@@ -531,6 +567,7 @@ fn handle(id: &Value, method: &str, params: &Value) {
                     }
                 }
                 "harmony.staged" => {
+                    let expand = args.get("all").and_then(|v| v.as_bool()) == Some(true);
                     let patch = args.get("patch").and_then(|v| v.as_str()).unwrap_or("");
                     let graph = match load_graph(&root) {
                         Ok(g) => g,
@@ -540,7 +577,7 @@ fn handle(id: &Value, method: &str, params: &Value) {
                         }
                     };
                     match harmony::check_staged(&std::path::PathBuf::from(&root), &graph, patch) {
-                        Ok(reports) => ok(id, text_result(report_lines(&reports))),
+                        Ok(reports) => ok(id, text_result(report_lines(&reports, expand))),
                         Err(e) => err(id, 2, &format!("patch could not be parsed. {}", e)),
                     }
                 }
