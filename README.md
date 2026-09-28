@@ -205,6 +205,37 @@ Stated plainly, and tracked with citations and a resolution column in `ROADMAP.m
 * `staged` validates conflicts only; it does not run taint over the post-patch tree, so a patch that introduces a flow is not yet caught by the gate.
 
 
+## The receipt
+
+Every `check` ends by saying what it actually looked at, on clean runs too:
+
+```text
+analysed 12 of 12 indexed file(s)
+languages: javascript, typescript, python
+```
+
+That is not decoration. A workspace with no findings and a workspace that was
+never analysed printed exactly the same words, and a check that cannot say
+which one it is cannot be trusted either way. The receipt also names the
+languages it could not fully cover, and distinguishes the two ways a language
+can be incomplete:
+
+```text
+languages: rust
+no taint rules for: rust (indexed, taint not scanned)
+
+languages: ruby
+taint scanned, no grammar: ruby (no symbols in the graph)
+```
+
+The first is indexed but not scanned for flows. The second is scanned for flows
+but contributes no symbols to the graph. Those are different gaps and pretending
+otherwise is how a tool loses a user.
+
+A run that could not read every indexed file, or that could not reach the
+dependency registries, says so rather than reporting a partial result as a
+complete one.
+
 ## Contributing
 
 Read `CONTRIBUTING.md` before opening a pull request. `RULES.md` is the contract: every rule the harness runs is specified there with its exact trigger, severity and guarantee, so behaviour is reviewable rather than accidental.

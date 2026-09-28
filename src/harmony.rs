@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::spine::CodeGraph;
+use crate::{parser, taint};
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct GuardReport {
@@ -18,8 +19,138 @@ pub struct GuardReport {
     pub line: u64,
 }
 
+/// What a check actually looked at, so a clean result cannot be mistaken for
+/// an unanalysable one.
+///
+/// The failure this exists to prevent shipped in 0.15.2: a check on a
+/// never-indexed workspace printed "0 blockers" because every guard received no
+/// content. Zero findings and analysed nothing printed the same words. A
+/// receipt always prints, clean runs included, because a receipt you only see
+/// when something is wrong is a warning and not a receipt.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Coverage {
+    /// Files in the index, and how many of them could actually be read back.
+    pub files: usize,
+    pub files_read: usize,
+    /// Files the walker saw but could not read, with the reason.
+    pub unreadable: Vec<String>,
+    /// Languages present in the index, ascending.
+    pub languages: Vec<String>,
+    /// Languages present that no taint rule covers. A Rust-only workspace lands
+    /// here, and the receipt says so instead of implying it was scanned.
+    pub taint_untested: Vec<String>,
+    /// Files indexed but contributing no symbols, which is what a language
+    /// without a grammar looks like.
+    pub no_grammar: Vec<String>,
+    /// False when the dependency guard could not reach its registries.
+    pub deps_online: bool,
+}
+
+impl Coverage {
+    /// One line per fact, no prose, so it reads the same in a terminal and in
+    /// the MCP tool output.
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!(
+            "analysed {} of {} indexed file(s)",
+            self.files_read, self.files
+        ));
+        if !self.languages.is_empty() {
+            out.push_str(&format!("\nlanguages: {}", self.languages.join(", ")));
+        }
+        if !self.taint_untested.is_empty() {
+            out.push_str(&format!(
+                "\nno taint rules for: {} (indexed, taint not scanned)",
+                self.taint_untested.join(", ")
+            ));
+        }
+        if !self.no_grammar.is_empty() {
+            out.push_str(&format!(
+                "\ntaint scanned, no grammar: {} (no symbols in the graph)",
+                self.no_grammar.join(", ")
+            ));
+        }
+        if !self.unreadable.is_empty() {
+            out.push_str(&format!(
+                "\nunreadable ({}): {}",
+                self.unreadable.len(),
+                self.unreadable.join(", ")
+            ));
+        }
+        if !self.deps_online {
+            out.push_str("\ndependency check was partial: registries unreachable");
+        }
+        out
+    }
+}
+
+/// Build the receipt for a graph. Counts languages from the index and the
+/// taint rules from the rule tables, so neither can drift from what the
+/// guards actually do.
+pub fn coverage_of(graph: &CodeGraph, deps_online: bool) -> Coverage {
+    use std::collections::BTreeSet;
+    let mut langs: BTreeSet<String> = BTreeSet::new();
+    let mut untested: BTreeSet<String> = BTreeSet::new();
+    let mut no_grammar: BTreeSet<String> = BTreeSet::new();
+    let mut files_read = 0usize;
+    for f in &graph.files {
+        if f.lang.is_empty() {
+            continue;
+        }
+        langs.insert(f.lang.clone());
+        // A language with no taint rule row at all, in either the shared source
+        // table or the strict sink tables, is indexed but not taint scanned.
+        let has_rules = taint::SOURCES.iter().any(|(l, _)| *l == f.lang)
+            || taint::strict_sinks(&f.lang).next().is_some();
+        if !has_rules {
+            untested.insert(f.lang.clone());
+        }
+        // Indexed with no grammar: a taint language the parser cannot extract
+        // symbols from, so it contributes findings but nothing to the graph.
+        if !parser::has_grammar(&f.lang) && taint::strict_sinks(&f.lang).next().is_some() {
+            no_grammar.insert(f.lang.clone());
+        }
+    }
+    let mut unreadable = Vec::new();
+    for f in &graph.files {
+        if std::fs::read_to_string(graph.file_path_of(&f.path)).is_ok() {
+            files_read += 1;
+        } else {
+            unreadable.push(f.path.clone());
+        }
+    }
+    unreadable.sort();
+    unreadable.dedup();
+    Coverage {
+        files: graph.files.len(),
+        files_read,
+        unreadable,
+        languages: langs.into_iter().collect(),
+        taint_untested: untested.into_iter().collect(),
+        no_grammar: no_grammar.into_iter().collect(),
+        deps_online,
+    }
+}
+
+/// Run the full workspace check and report the dependency guard's network
+/// state, which the coverage receipt needs. Kept separate from
+/// `check_workspace` so the receipt can be built from the same call rather than
+/// re-querying the registries.
+pub fn check_workspace_with_coverage(
+    root: &Path,
+    graph: &CodeGraph,
+) -> (Vec<GuardReport>, Coverage) {
+    let (reports, network_ok) = check_workspace_and_online(root, graph);
+    let cov = coverage_of(graph, network_ok);
+    (reports, cov)
+}
+
 /// Run the full workspace check: taint, edge cases, practices, dependencies.
 pub fn check_workspace(root: &Path, graph: &CodeGraph) -> Vec<GuardReport> {
+    check_workspace_and_online(root, graph).0
+}
+
+fn check_workspace_and_online(root: &Path, graph: &CodeGraph) -> (Vec<GuardReport>, bool) {
     let mut reports = check_workspace_without_deps(graph);
 
     let (dep_reports, network_ok) = crate::deps::check(root);
@@ -43,7 +174,7 @@ pub fn check_workspace(root: &Path, graph: &CodeGraph) -> Vec<GuardReport> {
         });
     }
 
-    reports
+    (reports, network_ok)
 }
 
 /// The shared local guard body behind check_workspace and the report tool.
@@ -203,6 +334,106 @@ mod liveness {
 
     fn fires(reports: &[GuardReport], guard: &str) -> bool {
         reports.iter().any(|r| r.guard == guard)
+    }
+
+    #[test]
+    fn the_receipt_reports_what_was_analysed() {
+        let dir = scratch("receipt");
+        std::fs::write(dir.join("a.js"), "export const x = 1;\n").unwrap();
+        std::fs::write(dir.join("b.py"), "y = 1\n").unwrap();
+        let (graph, _) = indexer::build_graph(&dir);
+        let cov = coverage_of(&graph, true);
+        let text = cov.render();
+        assert_eq!(cov.files, 2, "{text}");
+        assert_eq!(cov.files_read, 2, "both files must be readable: {text}");
+        assert!(cov.languages.iter().any(|l| l == "javascript"), "{text}");
+        assert!(cov.languages.iter().any(|l| l == "python"), "{text}");
+        assert!(
+            cov.taint_untested.is_empty(),
+            "js and py both have rules: {text}"
+        );
+        assert!(cov.unreadable.is_empty(), "{text}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_receipt_names_a_language_with_no_taint_rules() {
+        // The case that matters. A Rust only workspace is indexed fully, finds
+        // nothing, and would otherwise read as clean with no hint that taint
+        // never ran on it.
+        let dir = scratch("rustonly");
+        std::fs::write(dir.join("a.rs"), "fn f() -> i32 { 1 }\n").unwrap();
+        let (graph, _) = indexer::build_graph(&dir);
+        let cov = coverage_of(&graph, true);
+        let text = cov.render();
+        assert!(
+            cov.taint_untested.iter().any(|l| l == "rust"),
+            "a language with no taint rule must be named: {text}"
+        );
+        assert!(
+            text.contains("taint not scanned"),
+            "the receipt must say why, not just list it: {text}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_receipt_separates_taint_scanned_from_indexed() {
+        // Ruby is recognised so the taint guard can scan it, and has no
+        // grammar, so it contributes nothing to the graph. The receipt has to
+        // distinguish that from a language with no rules at all.
+        let dir = scratch("rubyonly");
+        std::fs::write(dir.join("a.rb"), "def f\n  1\nend\n").unwrap();
+        let (graph, _) = indexer::build_graph(&dir);
+        let cov = coverage_of(&graph, true);
+        let text = cov.render();
+        assert!(
+            cov.taint_untested.is_empty(),
+            "ruby has taint rules, so it is not in the untested list: {text}"
+        );
+        assert!(
+            cov.no_grammar.iter().any(|l| l == "ruby"),
+            "ruby has no grammar and must be reported as such: {text}"
+        );
+        assert!(text.contains("no grammar"), "{text}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_receipt_names_files_it_could_not_read() {
+        // This is the 0.15.2 shape as a receipt rather than a crash. A file the
+        // walker listed but the checker could not open must be named, not
+        // silently dropped from the analysed count.
+        let dir = scratch("unreadable");
+        let file = dir.join("a.js");
+        std::fs::write(&file, "export const x = 1;\n").unwrap();
+        let (graph, _) = indexer::build_graph(&dir);
+        let cov = coverage_of(&graph, true);
+        assert_eq!(cov.files_read, cov.files, "everything readable for now");
+        std::fs::remove_file(&file).unwrap();
+        let cov2 = coverage_of(&graph, true);
+        let text = cov2.render();
+        assert!(
+            cov2.files_read < cov2.files,
+            "a deleted file must drop the analysed count: {text}"
+        );
+        assert!(
+            cov2.unreadable.iter().any(|p| p.contains("a.js")),
+            "the unreadable file must be named: {text}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_receipt_says_when_the_dependency_check_was_partial() {
+        let dir = scratch("offline");
+        std::fs::write(dir.join("a.js"), "export const x = 1;\n").unwrap();
+        let (graph, _) = indexer::build_graph(&dir);
+        let text = coverage_of(&graph, false).render();
+        assert!(text.contains("registries unreachable"), "{text}");
+        let online = coverage_of(&graph, true).render();
+        assert!(!online.contains("registries unreachable"), "{online}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

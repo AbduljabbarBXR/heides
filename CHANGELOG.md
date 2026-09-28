@@ -2,6 +2,15 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.16.1
+
+Every `check` now ends with a receipt saying what it actually looked at. On clean runs too.
+
+* **A clean result and an unanalysable workspace printed the same words.** "no findings. the workspace is clean." was printed whether the guards had read every file or none of them, which is the 0.15.2 defect wearing a different hat. The receipt prints `analysed N of M indexed file(s)` and the languages present, so a partial run is visible instead of implied.
+* **The receipt names the languages it could not fully cover,** and separates the two ways a language can be incomplete, because they are different gaps. `no taint rules for: rust (indexed, taint not scanned)` is a language with no flow rules. `taint scanned, no grammar: ruby (no symbols in the graph)` is a language the guards can analyse but the parser cannot extract symbols from. The README table already said this; the output now says it too.
+* **Unreadable files and an unreachable dependency registry are reported,** not folded into a partial result presented as a complete one.
+* 5 tests, verified on the release binary against a clean JavaScript workspace, a Rust-only workspace, a Ruby-only workspace and one with findings. Language coverage is read from the rule tables rather than hardcoded, so it cannot drift from what the guards do.
+
 ## 0.16.0
 
 SSRF and NoSQL sink classes, and the last of Tier 0 shipped. The two classes with the highest yield in a modern app, and the two hardest to add honestly, because both produce false positives the moment they are not careful.

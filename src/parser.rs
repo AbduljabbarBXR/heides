@@ -39,6 +39,15 @@ pub fn is_indexable(path: &Path) -> bool {
     detect_language(path).is_some()
 }
 
+/// Whether a language has a tree sitter grammar, so symbols and call edges can
+/// be extracted for it. A language can be recognised and still have no grammar,
+/// which is the Ruby case: recognised so the taint guard can scan it, no
+/// grammar so it contributes nothing to the graph. The coverage receipt needs
+/// this to say which of the two a file is rather than implying parity.
+pub fn has_grammar(lang: &str) -> bool {
+    language_for(lang).is_some()
+}
+
 fn language_for(lang: &str) -> Option<tree_sitter::Language> {
     match lang {
         "rust" => Some(tree_sitter_rust::LANGUAGE.into()),

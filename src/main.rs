@@ -339,12 +339,16 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let reports = harmony::check_workspace(&root, &graph);
+            let (reports, cov) = harmony::check_workspace_with_coverage(&root, &graph);
             if let Some(p) = pulse {
                 p.finish();
             }
+            // The receipt prints on every run, clean included. 0.15.2 shipped a
+            // check that reported a clean workspace over a workspace it had
+            // analysed nothing in, and the two cases printed the same words.
             if reports.is_empty() {
                 println!("no findings. the workspace is clean.");
+                println!("{}", cov.render());
             } else if ui.grouped {
                 let mut groups: std::collections::BTreeMap<&str, Vec<&harmony::GuardReport>> =
                     std::collections::BTreeMap::new();
@@ -374,6 +378,7 @@ fn main() -> ExitCode {
                         println!("  {} {} {}", ui.severity(&r.severity), r.message, loc);
                     }
                 }
+                println!("{}", cov.render());
             } else {
                 println!("{}", harmony::summarize(&reports));
                 let heavy = reports
@@ -396,6 +401,7 @@ fn main() -> ExitCode {
                         loc
                     );
                 }
+                println!("{}", cov.render());
             }
             ExitCode::SUCCESS
         }
