@@ -58,12 +58,32 @@ fn report_lines(reports: &[harmony::GuardReport]) -> String {
 /// The structured shape behind harmony.report. One object per finding with
 /// the guard, severity, message, file and line, plus severity counts and a
 /// clean flag so an agent can gate on the verdict without parsing prose.
-/// Honour the per-call `offline` argument for the dependency guard. The env var
-/// and the global override still apply; this is the MCP-local way to ask.
-fn apply_offline(args: &serde_json::Value) {
-    if args.get("offline").and_then(|v| v.as_bool()) == Some(true) {
-        crate::deps::set_deps_enabled(false);
-    }
+/// Run a check with the per-call dependency arguments applied, then restore.
+///
+/// The previous version called `set_deps_enabled(false)`, which writes a
+/// process global and never restores it. In a single-shot CLI that is fine. In
+/// an MCP server, which handles many requests in one process, it meant one
+/// client passing `offline: true` silently disabled the advisory lookup for
+/// every later request from every client. An unrelated argument changing a
+/// security setting is exactly the failure class this release exists to close,
+/// so the override is now scoped to the call.
+///
+/// `require_advisories` is the per-call equivalent of the CLI flag of the same
+/// name, and it defaults to true here: a human running `heides check` in a
+/// terminal can see the posture line, while an agent may only read the result.
+/// The safe default is the one that fails loudly.
+fn check_policy(args: &serde_json::Value) -> crate::deps::DepsPolicy {
+    let offline = args.get("offline").and_then(|v| v.as_bool());
+    // Fail closed, and the floor is not the caller's to lower. A human at a
+    // terminal can see the posture line and choose; an agent may only read the
+    // result, so an agent must not be able to switch the gate off. An explicit
+    // `require_advisories: false` is therefore refused rather than honoured,
+    // because a default the caller can remove is not a guarantee.
+    let require = match args.get("require_advisories").and_then(|v| v.as_bool()) {
+        Some(false) => Some(true),
+        other => other.or(Some(true)),
+    };
+    crate::deps::resolve_policy(offline.map(|o| !o), require, None)
 }
 
 fn report_json(reports: &[harmony::GuardReport], cov: &harmony::Coverage) -> String {
@@ -152,13 +172,13 @@ fn handle(id: &Value, method: &str, params: &Value) {
                         },
                         {
                             "name": "harmony.check",
-                            "description": "Run every guard on the workspace and return findings with evidence. Pass offline true to skip the dependency guard registry lookups; HEIDES_OFFLINE=1 also works.",
-                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "offline": { "type": "boolean", "description": "skip the dependency guard registry lookups" } } }
+                            "description": "Run every guard on the workspace and return findings with evidence. Pass offline true to skip the dependency guard registry lookups. Returns an error, not a clean result, when require_advisories is true and the advisory lookup did not run, so a misconfigured gate fails instead of passing hollow.",
+                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "offline": { "type": "boolean", "description": "skip the dependency guard registry lookups" }, "require_advisories": { "type": "boolean", "description": "fail rather than return a clean result when advisories were not checked. Defaults to true, and a caller cannot lower it: an agent may only read the result, so the gate is fail closed on this surface." } } }
                         },
                         {
                             "name": "harmony.report",
-                            "description": "Run every guard on the workspace and return findings as structured JSON with severity counts. Pass offline true to skip the dependency guard registry lookups; HEIDES_OFFLINE=1 also works.",
-                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "offline": { "type": "boolean", "description": "skip the dependency guard registry lookups" } } }
+                            "description": "Run every guard on the workspace and return findings as structured JSON with severity counts, plus security_gate and security_posture so an agent can gate on the verdict without parsing prose. Pass offline true to skip the registry lookups.",
+                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "offline": { "type": "boolean", "description": "skip the dependency guard registry lookups" }, "require_advisories": { "type": "boolean", "description": "fail rather than return a clean result when advisories were not checked. Defaults to true, and a caller cannot lower it: an agent may only read the result, so the gate is fail closed on this surface." } } }
                         },
                         {
                             "name": "harmony.staged",
@@ -453,13 +473,26 @@ fn handle(id: &Value, method: &str, params: &Value) {
                             return;
                         }
                     };
-                    apply_offline(&args);
+                    let policy = check_policy(&args);
                     let (reports, cov) = harmony::check_workspace_with_coverage(
                         &std::path::PathBuf::from(&root),
                         &graph,
+                        policy,
                     );
-                    let out = format!("{}\n\n{}", report_lines(&reports), cov.render());
-                    ok(id, text_result(out));
+                    let mut out = format!("{}\n\n{}", report_lines(&reports), cov.render());
+                    // The MCP equivalent of a non-zero exit. An agent cannot see
+                    // an exit code, so a gate that would fail on the CLI has to
+                    // fail here too, or the MCP surface is the hollow one.
+                    if policy.require_advisories && cov.deps != harmony::DepsState::RanOnline {
+                        out.push_str(
+                            "\nheides: require_advisories was set but the advisory lookup did not run. this run is not a security gate.",
+                        );
+                    }
+                    if out.contains("not a security gate") {
+                        err(id, 1, &out);
+                    } else {
+                        ok(id, text_result(out));
+                    }
                 }
                 "harmony.report" => {
                     let graph = match load_graph(&root) {
@@ -469,15 +502,33 @@ fn handle(id: &Value, method: &str, params: &Value) {
                             return;
                         }
                     };
-                    apply_offline(&args);
+                    let policy = check_policy(&args);
                     let (reports, cov) = harmony::check_workspace_with_coverage(
                         &std::path::PathBuf::from(&root),
                         &graph,
+                        policy,
                     );
+                    let mut j = report_json(&reports, &cov);
                     // The receipt travels inside the JSON, because an agent
                     // that receives a clean result must be able to see what was
-                    // skipped without a second call.
-                    ok(id, text_result(report_json(&reports, &cov)));
+                    // skipped without a second call. So does the gate verdict,
+                    // for the same reason.
+                    let gate_failed =
+                        policy.require_advisories && cov.deps != harmony::DepsState::RanOnline;
+                    let inject = format!(
+                        "{{\"require_advisories\":{},\"security_gate\":{},\"security_posture\":\"{}\"}}",
+                        policy.require_advisories,
+                        !gate_failed,
+                        cov.deps.as_str()
+                    );
+                    j.pop();
+                    let tail: String = inject.chars().skip(1).collect();
+                    j.push_str(&format!(",{}", tail));
+                    if gate_failed {
+                        err(id, 1, &j);
+                    } else {
+                        ok(id, text_result(j));
+                    }
                 }
                 "harmony.staged" => {
                     let patch = args.get("patch").and_then(|v| v.as_str()).unwrap_or("");

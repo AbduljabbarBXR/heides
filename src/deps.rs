@@ -713,17 +713,38 @@ fn parse_package_json(text: &str) -> Vec<Dependency> {
 
 /// Query OSV for known vulnerabilities in a dependency.
 /// Returns a short summary line, or None when clean.
-fn osv_check(dep: &Dependency) -> Option<String> {
+/// What the advisory lookup actually established.
+///
+/// This is a tri-state on purpose. It used to be `Option<String>`, which
+/// returned `None` both for "this version has no known vulnerability" and for
+/// "the request failed", so an unreachable OSV made the guard report every
+/// dependency as clean. That is the same silent-partial-result failure as
+/// everywhere else in this release, in the most security relevant place
+/// possible: a network failure looked like a clean bill of health.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Advisory {
+    Found(String),
+    Clean,
+    Unreachable,
+}
+
+fn osv_check(dep: &Dependency) -> Advisory {
     let body = serde_json::json!({
         "package": { "name": dep.name, "ecosystem": dep.ecosystem },
         "version": dep.version
     });
     let url = "https://api.osv.dev/v1/query";
-    let resp = crate::web::post_json(url, &body.to_string()).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&resp).ok()?;
-    let vulns = value.get("vulns").and_then(|v| v.as_array())?;
+    let Ok(resp) = crate::web::post_json(url, &body.to_string()) else {
+        return Advisory::Unreachable;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&resp) else {
+        return Advisory::Unreachable;
+    };
+    let Some(vulns) = value.get("vulns").and_then(|v| v.as_array()) else {
+        return Advisory::Unreachable;
+    };
     if vulns.is_empty() {
-        return None;
+        return Advisory::Clean;
     }
     let first = &vulns[0];
     let id = first
@@ -734,7 +755,22 @@ fn osv_check(dep: &Dependency) -> Option<String> {
         .get("summary")
         .and_then(|v| v.as_str())
         .unwrap_or("no summary");
-    Some(format!("{}: {}", id, summary))
+    Advisory::Found(format!("{}: {}", id, summary))
+}
+
+/// How far the dependency guard got, reported per half.
+///
+/// The advisory half is the security half and the version half is the
+/// convenience half. They are tracked separately because conflating them is
+/// what made a missing "latest version" lookup mark the whole run as advisory
+/// incomplete, which would have failed `--require-advisories` on any repository
+/// containing a package whose latest version could not be resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DepsHealth {
+    /// Every pinned version was actually asked about.
+    pub advisories_ok: bool,
+    /// Every "is there a newer release" lookup answered.
+    pub versions_ok: bool,
 }
 
 /// Fetch the latest published version of a dependency.
@@ -837,6 +873,7 @@ fn canonical_ecosystem(eco: &str) -> &'static str {
 
 /// Run the dependency guard. Returns reports plus a network status flag.
 static DEPS_OVERRIDE: Mutex<Option<bool>> = Mutex::new(None);
+static REQUIRE_ADVISORIES: Mutex<bool> = Mutex::new(false);
 
 /// Whether the dependency guard is allowed to run.
 ///
@@ -864,6 +901,71 @@ pub fn set_deps_enabled(v: bool) {
     *DEPS_OVERRIDE.lock().unwrap() = Some(v);
 }
 
+/// Set by `--require-advisories`.
+///
+/// A security gate must fail rather than pass hollow. Without this, wiring
+/// `--no-deps` into a required CI status check produces a green build that
+/// never asked OSV whether a pinned version has a known vulnerability, and the
+/// only clue is a footnote in the log. With this, that misconfiguration is a
+/// non-zero exit, which is a red X instead of a silent hole.
+pub fn set_require_advisories(v: bool) {
+    *REQUIRE_ADVISORIES.lock().unwrap() = v;
+}
+
+pub fn require_advisories() -> bool {
+    *REQUIRE_ADVISORIES.lock().unwrap()
+}
+
+/// Per-call overrides for a long-lived server, set by one MCP request and
+/// dropped when it finishes.
+///
+/// The process globals above are correct for a single-shot CLI: the process
+/// exits before another caller can see them. They are wrong for an MCP server,
+/// which handles many requests in one process. Without this, one client calling
+/// `harmony.check` with `offline: true` silently disabled the advisory lookup
+/// for every later request from every client, which is a security setting
+/// changed by an unrelated argument. Scoping the override to a single call
+/// removes that class of leak entirely.
+///
+/// Implementation note. The first draft held both locks across the closure and
+/// What the dependency guard is allowed to do for one run.
+///
+/// This is a value, not a setting. It is resolved once at the boundary, from
+/// the command line or from an MCP argument, and then passed down the call
+/// chain. It used to be three process globals, and the scoped version of those
+/// globals leaked between MCP callers and raced inside the test suite. A value
+/// cannot leak and cannot race, because there is nothing shared to leak.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DepsPolicy {
+    /// Whether the registry lookups may run at all.
+    pub enabled: bool,
+    /// Whether a run that did not consult the advisories must fail.
+    pub require_advisories: bool,
+}
+
+impl Default for DepsPolicy {
+    fn default() -> Self {
+        DepsPolicy {
+            enabled: deps_enabled(),
+            require_advisories: require_advisories(),
+        }
+    }
+}
+
+/// Pure resolution, so the decision can be tested without touching process
+/// state. `override_deps` and `override_require` are the command line or MCP
+/// arguments, `offline` is the raw HEIDES_OFFLINE value.
+pub fn resolve_policy(
+    override_deps: Option<bool>,
+    override_require: Option<bool>,
+    offline: Option<&str>,
+) -> DepsPolicy {
+    DepsPolicy {
+        enabled: override_deps.unwrap_or(!offline_env_value(offline)),
+        require_advisories: override_require.unwrap_or(false),
+    }
+}
+
 fn offline_env() -> bool {
     offline_env_value(std::env::var("HEIDES_OFFLINE").ok().as_deref())
 }
@@ -874,7 +976,7 @@ fn offline_env_value(v: Option<&str>) -> bool {
     matches!(v, Some("1") | Some("true") | Some("yes"))
 }
 
-pub fn check(root: &Path) -> (Vec<DepReport>, bool) {
+pub fn check(root: &Path) -> (Vec<DepReport>, DepsHealth) {
     let deps = read_manifests(root);
     let mut reports = Vec::new();
     if deps.is_empty() {
@@ -885,7 +987,13 @@ pub fn check(root: &Path) -> (Vec<DepReport>, bool) {
             file: root.display().to_string(),
             line: 0,
         });
-        return (reports, true);
+        return (
+            reports,
+            DepsHealth {
+                advisories_ok: true,
+                versions_ok: true,
+            },
+        );
     }
 
     // Deduplicate by name and ecosystem.
@@ -897,7 +1005,10 @@ pub fn check(root: &Path) -> (Vec<DepReport>, bool) {
         }
     }
 
-    let mut network_ok = true;
+    let mut health = DepsHealth {
+        advisories_ok: true,
+        versions_ok: true,
+    };
     let mut checked = 0;
     for ((name, ecosystem), version) in &seen {
         let eco = canonical_ecosystem(ecosystem);
@@ -907,9 +1018,11 @@ pub fn check(root: &Path) -> (Vec<DepReport>, bool) {
             ecosystem: eco,
         };
         checked += 1;
-        let vuln = osv_check(&dep);
-        if let Some(vuln) = vuln {
-            reports.push(DepReport {
+        // Clean and Unreachable are different answers and must not collapse.
+        // Reporting "no vulnerabilities" when the registry was never reached
+        // is the one thing this guard must never do.
+        match osv_check(&dep) {
+            Advisory::Found(vuln) => reports.push(DepReport {
                 severity: "critical".to_string(),
                 message: format!(
                     "{} {} has a known vulnerability: {}",
@@ -917,7 +1030,20 @@ pub fn check(root: &Path) -> (Vec<DepReport>, bool) {
                 ),
                 file: "manifest".to_string(),
                 line: 0,
-            })
+            }),
+            Advisory::Clean => {}
+            Advisory::Unreachable => {
+                health.advisories_ok = false;
+                reports.push(DepReport {
+                    severity: "info".to_string(),
+                    message: format!(
+                        "could not reach the advisory service for {} {}. it is NOT known to be clean.",
+                        dep.name, dep.version
+                    ),
+                    file: "manifest".to_string(),
+                    line: 0,
+                });
+            }
         }
         match latest_version(&dep) {
             Some(latest) => {
@@ -944,7 +1070,11 @@ pub fn check(root: &Path) -> (Vec<DepReport>, bool) {
                 }
             }
             None => {
-                network_ok = false;
+                // A missing latest-version answer is the convenience half
+                // failing. It must not be allowed to mark the security half
+                // incomplete, or --require-advisories would fail on any repo
+                // holding a package whose latest release cannot be resolved.
+                health.versions_ok = false;
             }
         }
     }
@@ -957,7 +1087,7 @@ pub fn check(root: &Path) -> (Vec<DepReport>, bool) {
             line: 0,
         });
     }
-    (reports, network_ok)
+    (reports, health)
 }
 
 /// The local half of the dependency guard, with no network at all.
@@ -969,7 +1099,7 @@ pub fn check(root: &Path) -> (Vec<DepReport>, bool) {
 ///
 /// The report says how many pinned versions it read, so an offline run is
 /// visibly doing local work rather than silently doing nothing.
-pub fn check_offline(root: &Path) -> (Vec<DepReport>, bool) {
+pub fn check_offline(root: &Path) -> (Vec<DepReport>, DepsHealth) {
     let deps = read_manifests(root);
     let mut reports = Vec::new();
     if deps.is_empty() {
@@ -979,7 +1109,13 @@ pub fn check_offline(root: &Path) -> (Vec<DepReport>, bool) {
             file: root.display().to_string(),
             line: 0,
         });
-        return (reports, true);
+        return (
+            reports,
+            DepsHealth {
+                advisories_ok: true,
+                versions_ok: true,
+            },
+        );
     }
     let mut pinned: BTreeMap<(String, String), String> = BTreeMap::new();
     for d in &deps {
@@ -1007,13 +1143,86 @@ pub fn check_offline(root: &Path) -> (Vec<DepReport>, bool) {
         file: "manifest".to_string(),
         line: 0,
     });
-    (reports, true)
+    // Offline, so nothing was not checked. The caller reports Skipped, which
+    // is the honest state: the advisory lookup did not run, and this says so
+    // rather than implying both halves succeeded.
+    (
+        reports,
+        DepsHealth {
+            advisories_ok: true,
+            versions_ok: true,
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The leak this release exists to prevent, now tested on a value.
+    ///
+    /// Before this, an MCP client passing `offline: true` wrote a process
+    /// global and never restored it, so every later request from every client
+    /// silently ran without advisories. The first fix scoped the global with
+    /// three more globals and a depth counter. That still shared state, and its
+    /// own tests raced each other under the default parallel test runner.
+    ///
+    /// The policy is now a plain value built from the arguments, so the
+    /// property is structural: one caller's policy cannot appear in another
+    /// caller's result because there is no shared state to carry it.
+    #[test]
+    fn one_callers_policy_cannot_reach_another() {
+        let client_a = resolve_policy(Some(false), Some(true), None);
+        let client_b = resolve_policy(Some(true), Some(true), None);
+        assert!(!client_a.enabled, "client A asked for offline");
+        assert!(client_b.enabled, "client B did not");
+        // Independent values, so changing one cannot be observed in the other.
+        let mut a = client_a;
+        a.enabled = true;
+        a.require_advisories = false;
+        assert_ne!(a, client_a, "the local copy did change");
+        assert!(
+            a.enabled && !a.require_advisories,
+            "and holds the new values"
+        );
+        assert!(client_b.enabled, "B must be unaffected by A");
+        assert!(
+            client_a.require_advisories,
+            "A is a copy, not a shared handle, so A is unchanged too"
+        );
+    }
+
+    #[test]
+    fn policy_resolution_is_pure_and_reads_nothing() {
+        // Default with no arguments and no environment: online, not a gate.
+        let d = resolve_policy(None, None, None);
+        assert!(d.enabled, "online by default");
+        assert!(
+            !d.require_advisories,
+            "not a gate by default on the CLI path"
+        );
+        // The env var turns it off.
+        assert!(!resolve_policy(None, None, Some("1")).enabled);
+        // An explicit argument wins over the env var, in both directions.
+        assert!(resolve_policy(Some(true), None, Some("1")).enabled);
+        assert!(!resolve_policy(Some(false), None, None).enabled);
+        // require is opt in and never inferred.
+        assert!(resolve_policy(None, Some(true), None).require_advisories);
+    }
+
+    #[test]
+    fn the_cli_setters_still_control_the_process_default() {
+        // The CLI sets the default once at startup and never changes it again,
+        // so a global here is correct rather than dangerous.
+        set_deps_enabled(true);
+        assert!(deps_enabled());
+        set_require_advisories(true);
+        assert!(require_advisories());
+        assert!(DepsPolicy::default().enabled);
+        assert!(DepsPolicy::default().require_advisories);
+        set_deps_enabled(true);
+        set_require_advisories(false);
+    }
     #[test]
     fn offline_env_accepts_the_documented_values_only() {
         assert!(offline_env_value(Some("1")));

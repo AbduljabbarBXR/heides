@@ -2,6 +2,59 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.16.3
+
+A correction to 0.16.2, not a feature. `--no-deps` shipped a hollow pass, and
+that is worse than the flag's absence, and the fix had to land on both surfaces
+or the release would have closed the hole for humans and left it open for
+agents.
+
+* **The MCP surface could not fail a security gate at all.** `harmony.check` and
+  `harmony.report` accepted `offline`, but nothing corresponded to
+  `--require-advisories`. An agent asking for an offline check received a
+  normal-looking result with the posture in the text and no way to make the call
+  fail, so an agent wiring `harmony.check` into a gate got the one door that
+  stayed open. Both tools now take `require_advisories`, and when it holds and
+  the advisory lookup did not run, the tool returns a JSON-RPC error rather than
+  a result. `harmony.report` also carries `security_gate` and
+  `security_posture` inside its JSON, so an agent can gate without parsing prose
+  or making a second call.
+* **`require_advisories` defaults to true on MCP and is unset on the CLI.** A
+  human running `heides check` in a terminal sees the posture line and can
+  choose. An agent may only read the result, so the safe path is the default one
+  and a caller who wants speed opts out explicitly. This is a deliberate
+  difference between the two surfaces, not an oversight.
+* **A per-call argument no longer changes the process for the next caller.**
+  `apply_offline` called `set_deps_enabled(false)`, which writes a process global
+  and never restores it. Fine in a single-shot CLI, wrong in a server: one
+  client passing `offline: true` silently disabled the advisory lookup for every
+  later request from every client. A security setting changed by an unrelated
+  argument is the same failure class as the rest of this release. Overrides are
+  now scoped to one call through `with_scoped_deps`, which restores the previous
+  value and restores it even when the closure panics.
+* **Nesting is refused rather than handled.** A depth counter detects a nested
+  scope before any state lock is taken and runs the inner call unscoped. The
+  first draft held both locks across the closure and tested whether they were
+  already set, which deadlocked rather than failed, and hung the test suite for
+  a minute per test. A lock is never held across the call now.
+* **4 tests.** One proves an override does not outlive its call, one proves a
+  pre-existing CLI flag is restored rather than reset to the default, one proves
+  a refused nested scope leaves the outer one intact, and one proves a panic
+  inside a scope still releases it.
+ `--no-deps` shipped a hollow pass, and that is worse than the flag's absence.
+
+* **A skipped advisory lookup was indistinguishable from a clean result.** On a tree pinning `rustls 0.23.43`, the default run reported `0 blocker(s), 1 critical` with RUSTSEC-2026-0285. The same tree with `--no-deps` reported `0 blocker(s), 0 critical, 0 warning(s), 1 info` and exited `0`. The summary line was structurally identical to a genuinely clean workspace, the only clue was an info footnote, and the exit code said success. That is the same failure class as 0.15.2, in a different place.
+* **The summary line now carries the security posture,** on the same line as the counts, so it cannot be skimmed past: `0 blocker(s), 0 critical, 0 warning(s), 1 info. ADVISORIES NOT CHECKED`. An unreachable registry says `ADVISORIES INCOMPLETE`, so a silent network failure cannot read as a pass either. And the clean-workspace message no longer prints alone when the advisory guard did not run: it says `no findings, but the advisory lookup did not run.`
+* **`--require-advisories` makes a security gate fail rather than pass hollow.** If advisories were skipped or the registry was unreachable, the exit is non-zero. Wiring `--no-deps` into a required CI status check is now a red X instead of a silent hole, which is the difference between fixing the problem and documenting it.
+* **The 0.16.2 changelog wording was wrong and is corrected above.** It grouped the known-CVE lookup with the "a newer version exists" reminder as two conveniences given up. Only one is a convenience. The security one is gone when the flag is set, and there is no cache to recover it until the offline advisory database in Tier 4.
+* **What this does not fix,** stated plainly so it is not later mistaken for a resolution: the hole still exists. A summary line and an exit code make it impossible to miss and impossible to pass silently by accident. They do not make the vulnerability known. Only the offline advisory cache does that, and it is Tier 4. Until it lands, `--no-deps` is a speed flag and nothing else.
+* The default, with no flags, remains the security gate. It was deliberately not made offline by default: a silent-offline security guard is the exact bug class the last three releases were spent closing, and slow is not a safety property.
+* **An unreachable advisory service used to report every dependency as clean.** `osv_check` returned `Option<String>`, and `None` meant both "this version has no known vulnerability" and "the request failed". A network failure therefore produced a zero-critical run that read as a clean bill of health, in the one guard where that is worst. It is a tri-state now, `Found` / `Clean` / `Unreachable`, and an unreachable lookup says `it is NOT known to be clean` rather than staying silent. This is the more serious of the two defects found while writing the first, and it is a better example of the failure class: a failure that looks exactly like success.
+* **The security half and the convenience half shared one health flag.** A dependency whose *latest version* could not be resolved set the same boolean that drove the advisory posture, so `--require-advisories` would have failed on any repository holding such a package. The flag would have become unusable, which is how people end up dropping it. `DepsHealth` now tracks `advisories_ok` and `versions_ok` separately: only the advisory half drives the posture, and a missed update reminder gets its own note saying advisory results are complete.
+* **The advisory posture is a value, not a setting.** `DepsPolicy` is resolved at the boundary and passed down. The previous attempt scoped three process globals with a depth counter, which fixed the MCP leak but still shared state, and its own tests raced: three failed under the default parallel `cargo test` and passed single threaded. A value cannot leak and cannot race. `SCOPE_DEPTH` and the scoped globals are gone.
+* **MCP is fail closed.** `require_advisories` defaults to true and an explicit `false` is refused rather than honoured, because a default the caller can remove is not a guarantee and an agent may only read the result.
+* Verified with 4 consecutive parallel runs of the lib suite, 131 tests, 0 failures, 0 warnings, and on the release binary: the miswired gate exits 1, the fast gate exits 0, and the online security gate still reports RUSTSEC-2026-0285.
+
 ## 0.16.2
 
 The dependency guard stops reaching for the network unless asked, which makes a claim the README already made true.
@@ -10,7 +63,7 @@ The dependency guard stops reaching for the network unless asked, which makes a 
 * **The offline path is not the empty path.** Manifest parsing and pinned version extraction are local, so an offline check still reads every pinned version: 94 across crates.io on this repository, reported as an info line naming the count and the ecosystems, so the work is visible rather than assumed.
 * **A skipped dependency check is stated, never implied.** The coverage receipt gained a third state. "Could not reach the registry" and "skipped on request" are different facts, and collapsing them would recreate the exact failure the receipt exists to prevent: a partial run reported as a complete one.
 * **`harmony.check` and `harmony.report` over MCP accept `offline: true`,** and `harmony.report` now carries the full receipt inside its JSON, so an agent receiving a clean result can see what was skipped without a second call. Previously the MCP tools ignored the setting and hit the network regardless.
-* What `--no-deps` gives up, stated plainly: the known-CVE lookup and the "a newer version exists" reminder. It gives up no local check. Taint, the spine, `staged`, `query`, `describe`, frameworks, scaffold, the edge and practice guards and the whole graph are pure local analysis and are unaffected.
+* What `--no-deps` gives up, stated plainly. **The known-CVE lookup is the security half, not a convenience, and it is genuinely given up.** A skipped advisory lookup means a known vulnerability in a pinned version is not reported, and there is no cache to fall back on until Tier 4. The "a newer version exists" reminder is the convenience half. No local check is given up: taint, the spine, `staged`, `query`, `describe`, frameworks, scaffold, the edge and practice guards and the whole graph are pure local analysis and are unaffected.
 * 5 tests. The accepted `HEIDES_OFFLINE` values are tested through a pure helper rather than by mutating process environment state, which is unsafe on this toolchain.
 
 ## 0.16.1

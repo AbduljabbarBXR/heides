@@ -54,6 +54,13 @@ fn main() -> ExitCode {
             heides::deps::set_deps_enabled(false);
             continue;
         }
+        // The security gate. Fails rather than passing hollow when the
+        // advisory lookup did not run, whether it was skipped or the registry
+        // was unreachable.
+        if a == "--require-advisories" {
+            heides::deps::set_require_advisories(true);
+            continue;
+        }
         if !Ui::consume_flag(a) {
             cleaned.push(a.clone());
         }
@@ -350,7 +357,8 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let (reports, cov) = harmony::check_workspace_with_coverage(&root, &graph);
+            let policy = heides::deps::DepsPolicy::default();
+            let (reports, cov) = harmony::check_workspace_with_coverage(&root, &graph, policy);
             if let Some(p) = pulse {
                 p.finish();
             }
@@ -358,7 +366,14 @@ fn main() -> ExitCode {
             // check that reported a clean workspace over a workspace it had
             // analysed nothing in, and the two cases printed the same words.
             if reports.is_empty() {
-                println!("no findings. the workspace is clean.");
+                // "clean" is a claim about advisories too, so it never prints
+                // alone when the advisory guard did not run.
+                if cov.deps == harmony::DepsState::RanOnline {
+                    println!("no findings. the workspace is clean.");
+                } else {
+                    println!("no findings, but the advisory lookup did not run.");
+                }
+                println!("{}", harmony::summarize_with(&reports, cov.deps));
                 println!("{}", cov.render());
             } else if ui.grouped {
                 let mut groups: std::collections::BTreeMap<&str, Vec<&harmony::GuardReport>> =
@@ -366,7 +381,7 @@ fn main() -> ExitCode {
                 for r in &reports {
                     groups.entry(r.guard.as_str()).or_default().push(r);
                 }
-                println!("{}", harmony::summarize(&reports));
+                println!("{}", harmony::summarize_with(&reports, cov.deps));
                 for (guard, items) in &groups {
                     let b = items.iter().filter(|r| r.severity == "blocker").count();
                     let c = items.iter().filter(|r| r.severity == "critical").count();
@@ -391,7 +406,7 @@ fn main() -> ExitCode {
                 }
                 println!("{}", cov.render());
             } else {
-                println!("{}", harmony::summarize(&reports));
+                println!("{}", harmony::summarize_with(&reports, cov.deps));
                 let heavy = reports
                     .iter()
                     .any(|r| r.severity == "blocker" || r.severity == "critical");
@@ -413,6 +428,15 @@ fn main() -> ExitCode {
                     );
                 }
                 println!("{}", cov.render());
+            }
+            // A security gate that did not consult the advisories must not
+            // report success. This is the whole point of --require-advisories:
+            // the failure is mechanical, not a note someone has to read.
+            if policy.require_advisories && cov.deps != harmony::DepsState::RanOnline {
+                eprintln!(
+                    "heides: --require-advisories was set but the advisory lookup did not run. this run is not a security gate."
+                );
+                return ExitCode::FAILURE;
             }
             ExitCode::SUCCESS
         }
