@@ -156,3 +156,139 @@ pub fn summarize(reports: &[GuardReport]) -> String {
         blockers, critical, warnings, infos
     )
 }
+
+#[cfg(test)]
+mod liveness {
+    use super::*;
+    use crate::{deps, indexer};
+    use std::path::{Path, PathBuf};
+
+    /// Every module that has a guard has a unit test for it, and every one of
+    /// those unit tests calls `scan_file` with an inline string. None of them
+    /// proved a guard can fire through this pipeline from a real file on disk,
+    /// which is why 0.15.2 shipped a guard that reported nothing: the guard was
+    /// correct and it was handed no content.
+    ///
+    /// A liveness test is two halves. Plant a known bad input and assert the
+    /// guard fires, which catches a guard that has quietly stopped working.
+    /// Plant a known good input and assert silence, which catches a guard that
+    /// has started reporting everything. A guard is only trustworthy with both.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "heides_liveness_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let _ = tag;
+        dir
+    }
+
+    /// Run the real pipeline: index files from disk, then check them.
+    fn run(dir: &Path) -> Vec<GuardReport> {
+        let (graph, _) = indexer::build_graph(dir);
+        assert!(!graph.files.is_empty(), "scratch dir must hold a file");
+        check_workspace_without_deps(&graph)
+    }
+
+    fn guards(reports: &[GuardReport]) -> Vec<&str> {
+        let mut g: Vec<&str> = reports.iter().map(|r| r.guard.as_str()).collect();
+        g.sort();
+        g.dedup();
+        g
+    }
+
+    fn fires(reports: &[GuardReport], guard: &str) -> bool {
+        reports.iter().any(|r| r.guard == guard)
+    }
+
+    #[test]
+    fn taint_guard_fires_from_a_file_on_disk() {
+        let dir = scratch("taint");
+        std::fs::write(
+            dir.join("a.js"),
+            "function load(req) {\n  const q = req.query.id;\n  return db.query(q);\n}\n",
+        )
+        .unwrap();
+        let reports = run(&dir);
+        assert!(
+            fires(&reports, "security.taint"),
+            "security.taint must fire end to end, got {:?}",
+            guards(&reports)
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn edge_guard_fires_from_a_file_on_disk() {
+        let dir = scratch("edge");
+        std::fs::write(
+            dir.join("a.rs"),
+            "fn f(o: Option<i32>) -> i32 {\n    o.unwrap()\n}\n",
+        )
+        .unwrap();
+        let reports = run(&dir);
+        assert!(
+            fires(&reports, "edge.cases"),
+            "edge.cases must fire end to end, got {:?}",
+            guards(&reports)
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn practice_guard_fires_from_a_file_on_disk() {
+        let dir = scratch("practice");
+        std::fs::write(
+            dir.join("a.py"),
+            "API_KEY = 'sk-abc123def456ghi789jkl012mno345pqr678'\n",
+        )
+        .unwrap();
+        let reports = run(&dir);
+        assert!(
+            fires(&reports, "best.practice"),
+            "best.practice must fire end to end, got {:?}",
+            guards(&reports)
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_dependency_guard_reports_when_it_cannot_see_a_manifest() {
+        // The dependency guard is the one guard that does not read source, so
+        // its liveness shape is different. A directory with no manifest must
+        // still produce a report, the one that says so, rather than nothing.
+        let dir = scratch("deps");
+        std::fs::write(dir.join("a.js"), "export const x = 1;\n").unwrap();
+        let (reports, _) = deps::check(&dir);
+        assert!(
+            reports
+                .iter()
+                .any(|r| r.message.contains("no dependency manifests")),
+            "a manifest-less directory must be reported, not silently clean, got {reports:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_clean_workspace_stays_silent_on_every_guard() {
+        // The other half. A guard that fires on idiomatic code is worse than
+        // one that does not fire, because it is the guard people learn to skip.
+        let dir = scratch("clean");
+        std::fs::write(
+            dir.join("a.js"),
+            "export function add(a, b) {\n  return a + b;\n}\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("b.py"), "def add(a, b):\n    return a + b\n").unwrap();
+        let reports = run(&dir);
+        assert!(
+            reports.is_empty(),
+            "idiomatic code must produce no findings, got {reports:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

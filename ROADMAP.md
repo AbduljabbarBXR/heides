@@ -135,7 +135,7 @@ missing rule: a guard that silently reports nothing.
 | Fix | State |
 |---|---|
 | `check` on a never indexed workspace reported zero findings and called the workspace clean. `build_graph` stored relative paths but never the root, so every content read failed and the taint, edge and practice guards received nothing | shipped in 0.15.2, 2 regression tests |
-| Every guard has a liveness test: plant a known-bad input, assert it fires | **partly done.** taint and the indexer are pinned. `edge.cases`, `best.practice` and `dependency` are not |
+| Every guard has a liveness test: plant a known-bad input, assert it fires, and assert a known-good input stays silent | shipped. `harmony.rs` liveness module, 5 tests running the real index-then-check pipeline on files on disk. The positive tests were proven to fail by reintroducing the 0.15.2 defect |
 | `check` reports what it analysed: files, languages, and what it skipped and why, so silence is never mistaken for a clean repo | not started |
 | `--no-deps` and `HEIDES_OFFLINE` so `check` stops doing per-dependency HTTP nobody asked for | not started |
 | Findings are filtered, not merely emitted: collapse by message, provable separated from advisory, `--all` to expand, MCP defaults collapsed | not started |
