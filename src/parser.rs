@@ -22,6 +22,12 @@ pub fn detect_language(path: &Path) -> Option<String> {
         "go" => "go",
         "java" => "java",
         "cs" => "csharp",
+        // Ruby has no tree sitter grammar yet, so language_for returns None and
+        // the symbol and call layers yield nothing for it. The file still has
+        // to be recognised, because the taint guard works on lines and does not
+        // need a grammar. A .rb file that parses to no symbols is still worth
+        // scanning.
+        "rb" => "ruby",
         "html" | "htm" => "html",
         "css" => "css",
         _ => return None,

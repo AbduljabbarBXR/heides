@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::spine::CodeGraph;
 use crate::taint::{
     SINKS, SOURCES, TaintReport, assigned_var, function_blocks, leading_spaces, make_report,
-    regex_hit,
+    regex_hit, strict_class, strict_hit, strict_sinks,
 };
 
 const MAX_HOPS: usize = 8;
@@ -868,6 +868,31 @@ pub fn run_workspace(graph: &CodeGraph, contents: &HashMap<String, String>) -> V
                         && seen.insert(format!("{}:{}:{}", fi.key.0, lno, kind))
                     {
                         dyn_out.push((fi.key.0.clone(), lno, kind.to_string(), p));
+                    }
+                }
+                // SSRF and NoSQL, same strict gate as the intra file pass. The
+                // dynamic flow is only a real flow when a tainted name reaches
+                // the line or the line reads a source, so the metadata class
+                // upgrade and the co occurrence list are shared with taint.rs.
+                for rule in strict_sinks(&fi.lang) {
+                    if !strict_hit(rule, line) {
+                        continue;
+                    }
+                    let mut prov: Option<Prov> = None;
+                    for (name, p) in tainted.iter() {
+                        if line.contains(name.as_str()) {
+                            prov = Some(p.clone());
+                            break;
+                        }
+                    }
+                    if prov.is_none() && line_is_source(line, &fi.lang) {
+                        prov = Some(prov_source(&fi.key.0, lno));
+                    }
+                    if let Some(p) = prov {
+                        let kind = strict_class(rule, line);
+                        if seen.insert(format!("{}:{}:{}", fi.key.0, lno, kind)) {
+                            dyn_out.push((fi.key.0.clone(), lno, kind.to_string(), p));
+                        }
                     }
                 }
             }

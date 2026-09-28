@@ -54,15 +54,29 @@ positives). That rule also blinds SQL detection for `better-sqlite3`,
 
 ### 2.2 Sink and source coverage is thin
 
-`SOURCES` has 14 entries, `SINKS` has 21. Missing classes:
+`SOURCES` had 14 entries and `SINKS` 21 when this was written. Missing classes,
+with the state as of 0.16.0:
 
-- **NoSQL injection** (Mongo `find`/`aggregate`, Firestore)
-- **SSRF** (`fetch`/`axios`/`requests` with attacker-controlled URL)
-- **Path traversal** beyond the filesystem write sinks
-- **Command injection** via framework-specific APIs
-- **Open redirect, XXE, unsafe deserialization, crypto misuse**
-- **Sources**: GraphQL resolvers, WebSocket, message queues (Kafka/SQS/Rabbit),
-  file uploads, `localStorage`, framework routing params
+| Class | State |
+|---|---|
+| **NoSQL injection** (Mongo `find`/`aggregate`, Firestore) | shipped in 0.16.0, 7 languages, co-occurrence gated so `items.find(` stays silent |
+| **SSRF** (`fetch`/`axios`/`requests` with attacker-controlled URL) | shipped in 0.16.0, 7 languages, plus a cloud-metadata class |
+| **Path traversal** beyond the filesystem write sinks | open |
+| **Command injection** via framework-specific APIs | open |
+| **Open redirect, XXE, unsafe deserialization, crypto misuse** | open |
+| **Sources**: GraphQL resolvers, WebSocket, message queues (Kafka/SQS/Rabbit), file uploads | open. `localStorage` and framework routing params were already present |
+
+Two coverage defects were found while building the 0.16.0 sinks and are fixed,
+because both meant whole languages were invisible rather than a rule being weak:
+
+- **TypeScript was never taint scanned.** `parser.rs` mapped `.ts` and `.tsx` to
+  `typescript`, and the source and sink tables had no `typescript` rows, so every
+  TypeScript file was skipped in silence. `.ts` now maps to the JavaScript rows.
+- **Ruby could not taint at all,** for three separate reasons: no `rb` extension
+  in `detect_language`, no source row, and `function_blocks` which understood
+  braces but not `def` and `end`. All three are fixed. Ruby still has no grammar,
+  so it contributes no symbols to the graph.
+
 
 ### 2.3 Query and plan weaknesses
 
@@ -78,6 +92,9 @@ positives). That rule also blinds SQL detection for `better-sqlite3`,
 
 - npm package version is `0.14.5` but `install.js:15` hardcodes
   `BIN_VERSION = "0.14.4"`. `heides --version` and the npm version disagree.
+  **Resolved in 0.15.0:** `BIN_VERSION` is derived from `package.json`, a test
+  fails the build if they drift, and `HEIDES_VERSION` covers both install paths.
+  Kept here as the worked example of why a version split matters.
 
 ### 2.5 Dependency ecosystem
 
@@ -97,7 +114,7 @@ Ordered by value. Each tier lists the work and the performance safeguard.
 | Fix | Where | State |
 |---|---|---|
 | SQL sinks learn `run`, `raw`, `literal`, `prepare`, `execSQL`, gorm `Raw`, EF `FromSqlRaw`, php `prepare`, python `executescript`, plus receiver-scoped matching so a bare `run(` in a task runner stays silent | `taint.rs` | shipped, 6 regression tests |
-| NoSQL and SSRF sink classes | `taint.rs` | not started |
+| NoSQL and SSRF sink classes, with a stricter gate than SQL so a constant URL and a literal query object stay silent | `taint.rs` | shipped in 0.16.0, 7 languages each, 22 tests including the false-positive halves |
 | One version across the binary and npm, `BIN_VERSION` derived from `package.json`, lock asserted in CI, `v` prefixes stripped, `HEIDES_VERSION` honoured by npm too | `install.js`, `scripts/install.sh` | shipped, `npm test` covers it |
 | `query search` matches literals and comments, not only symbol names, index version 8 | `spine.rs` | shipped, 6 tests |
 | `plan` returns grounded evidence with file and line, capped at 12, and says so when nothing exists | `grounding.rs` | shipped, 4 tests |
@@ -108,6 +125,27 @@ Two defects were found by running the release binary on a fixture rather than by
 the suite, and both are fixed: evidence named only the first file when a symbol
 existed in two, and the taint report printed `source at line 0` for the common
 same-line shape.
+
+### Tier 0b — trustworthiness, the part that matters in production
+
+Feature work stopped here on purpose. Everything above this line adds detection.
+Everything below it addresses the failure mode that is far more dangerous than a
+missing rule: a guard that silently reports nothing.
+
+| Fix | State |
+|---|---|
+| `check` on a never indexed workspace reported zero findings and called the workspace clean. `build_graph` stored relative paths but never the root, so every content read failed and the taint, edge and practice guards received nothing | shipped in 0.15.2, 2 regression tests |
+| Every guard has a liveness test: plant a known-bad input, assert it fires | **partly done.** taint and the indexer are pinned. `edge.cases`, `best.practice` and `dependency` are not |
+| `check` reports what it analysed: files, languages, and what it skipped and why, so silence is never mistaken for a clean repo | not started |
+| `--no-deps` and `HEIDES_OFFLINE` so `check` stops doing per-dependency HTTP nobody asked for | not started |
+| Findings are filtered, not merely emitted: collapse by message, provable separated from advisory, `--all` to expand, MCP defaults collapsed | not started |
+| The `unwrap` rule is a substring match, not a proof, which contradicts the contract in `RULES.md`. Make it provable: skip `#[cfg(test)]` and `tests/`, report the enclosing function | not started |
+| Decide whether unprovable style advice may speak in the same voice as a proven hazard | not started |
+
+**The general rule this section exists to enforce:** heides must be fully useful
+with the network unplugged, and any check that wants the network must say so up
+front and be skippable. A clean result and an unanalysable repository must never
+print the same words.
 
 ### Tier 1 — the database layer (highest value)
 
