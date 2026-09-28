@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 #[derive(Debug, Clone)]
 pub struct DepReport {
@@ -835,6 +836,44 @@ fn canonical_ecosystem(eco: &str) -> &'static str {
 }
 
 /// Run the dependency guard. Returns reports plus a network status flag.
+static DEPS_OVERRIDE: Mutex<Option<bool>> = Mutex::new(None);
+
+/// Whether the dependency guard is allowed to run.
+///
+/// `check` used to reach the network for this one guard without being asked, one
+/// HTTP request per dependency, which is why a check took 165 seconds. The
+/// README claims analysis never needs the network, and every other guard
+/// honours that. This makes the claim true for the last holdout without
+/// removing any real protection: lockfile parsing, pinned version extraction
+/// and every local check are pure local analysis. What `--no-deps` gives up is
+/// the "a newer version exists" reminder, and on a cold cache the known-CVE
+/// lookup.
+///
+/// A skipped dependency check is stated in the coverage receipt, because a
+/// partial result presented as a complete one is the exact failure this project
+/// is trying to stop shipping.
+pub fn deps_enabled() -> bool {
+    if let Some(v) = *DEPS_OVERRIDE.lock().unwrap() {
+        return v;
+    }
+    !offline_env()
+}
+
+/// Set by `--no-deps`. Wins over the environment.
+pub fn set_deps_enabled(v: bool) {
+    *DEPS_OVERRIDE.lock().unwrap() = Some(v);
+}
+
+fn offline_env() -> bool {
+    offline_env_value(std::env::var("HEIDES_OFFLINE").ok().as_deref())
+}
+
+/// Split out from `offline_env` so the accepted values are testable without
+/// mutating process environment state, which is unsafe on this toolchain.
+fn offline_env_value(v: Option<&str>) -> bool {
+    matches!(v, Some("1") | Some("true") | Some("yes"))
+}
+
 pub fn check(root: &Path) -> (Vec<DepReport>, bool) {
     let deps = read_manifests(root);
     let mut reports = Vec::new();
@@ -921,9 +960,80 @@ pub fn check(root: &Path) -> (Vec<DepReport>, bool) {
     (reports, network_ok)
 }
 
+/// The local half of the dependency guard, with no network at all.
+///
+/// Everything a lockfile or manifest can tell you without a registry still
+/// holds: which manifests exist, which dependencies are pinned, and to what
+/// version. Only the two registry lookups are given up, the known-CVE query
+/// and the "a newer version exists" reminder.
+///
+/// The report says how many pinned versions it read, so an offline run is
+/// visibly doing local work rather than silently doing nothing.
+pub fn check_offline(root: &Path) -> (Vec<DepReport>, bool) {
+    let deps = read_manifests(root);
+    let mut reports = Vec::new();
+    if deps.is_empty() {
+        reports.push(DepReport {
+            severity: "info".to_string(),
+            message: "no dependency manifests found (Cargo.toml, Cargo.lock, package.json, go.mod, requirements.txt, pyproject.toml, pom.xml, composer.lock)".to_string(),
+            file: root.display().to_string(),
+            line: 0,
+        });
+        return (reports, true);
+    }
+    let mut pinned: BTreeMap<(String, String), String> = BTreeMap::new();
+    for d in &deps {
+        let key = (d.name.clone(), d.ecosystem.to_string());
+        if d.version != "?" && !pinned.contains_key(&key) {
+            pinned.insert(key, d.version.clone());
+        }
+    }
+    let mut ecosystems: std::collections::BTreeSet<&str> =
+        deps.iter().map(|d| d.ecosystem).collect();
+    let eco_list: Vec<&str> = std::mem::take(&mut ecosystems).into_iter().collect();
+    let eco_count = if eco_list.len() == 1 {
+        "1 ecosystem".to_string()
+    } else {
+        format!("{} ecosystems", eco_list.len())
+    };
+    reports.push(DepReport {
+        severity: "info".to_string(),
+        message: format!(
+            "read {} pinned version(s) across {} ({}). advisory lookup skipped, run without --no-deps to enable it",
+            pinned.len(),
+            eco_count,
+            eco_list.join(", ")
+        ),
+        file: "manifest".to_string(),
+        line: 0,
+    });
+    (reports, true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn offline_env_accepts_the_documented_values_only() {
+        assert!(offline_env_value(Some("1")));
+        assert!(offline_env_value(Some("true")));
+        assert!(offline_env_value(Some("yes")));
+        assert!(!offline_env_value(Some("0")));
+        assert!(!offline_env_value(Some("false")));
+        assert!(!offline_env_value(Some("")));
+        assert!(!offline_env_value(None), "unset must mean online");
+    }
+
+    #[test]
+    fn the_deps_override_wins_over_the_environment() {
+        set_deps_enabled(true);
+        assert!(deps_enabled(), "default is on");
+        set_deps_enabled(false);
+        assert!(!deps_enabled(), "an explicit opt out must hold");
+        set_deps_enabled(true);
+        assert!(deps_enabled());
+    }
 
     #[test]
     fn parses_go_mod() {

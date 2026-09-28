@@ -16,6 +16,11 @@ fn print_usage() {
     println!();
     println!("A deterministic harness that gives AI agents senses, memory and judgment for code.");
     println!();
+    // Flags are deliberately not listed here. The battle suite enforces that
+    // help output contains no hyphen at all, and every flag name has one, so
+    // documenting a flag in this banner is not possible under that contract.
+    // The existing flags follow the same rule. They are documented in the
+    // README instead.
     println!("Commands");
     println!("  scan [dir]      map the codebase into the persistent spine index");
     println!("  status [dir]    report the state of the spine index");
@@ -43,6 +48,12 @@ fn main() -> ExitCode {
     let mut cleaned: Vec<String> = Vec::with_capacity(args.len());
     cleaned.push(args[0].clone());
     for a in args.iter().skip(1) {
+        // The dependency guard is the only one that wants the network. Both the
+        // flag and the environment turn it off, and either one is enough.
+        if a == "--no-deps" {
+            heides::deps::set_deps_enabled(false);
+            continue;
+        }
         if !Ui::consume_flag(a) {
             cleaned.push(a.clone());
         }

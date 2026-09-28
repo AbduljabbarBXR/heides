@@ -58,7 +58,15 @@ fn report_lines(reports: &[harmony::GuardReport]) -> String {
 /// The structured shape behind harmony.report. One object per finding with
 /// the guard, severity, message, file and line, plus severity counts and a
 /// clean flag so an agent can gate on the verdict without parsing prose.
-fn report_json(reports: &[harmony::GuardReport]) -> String {
+/// Honour the per-call `offline` argument for the dependency guard. The env var
+/// and the global override still apply; this is the MCP-local way to ask.
+fn apply_offline(args: &serde_json::Value) {
+    if args.get("offline").and_then(|v| v.as_bool()) == Some(true) {
+        crate::deps::set_deps_enabled(false);
+    }
+}
+
+fn report_json(reports: &[harmony::GuardReport], cov: &harmony::Coverage) -> String {
     let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     for r in reports {
         *counts.entry(&r.severity).or_insert(0) += 1;
@@ -77,6 +85,15 @@ fn report_json(reports: &[harmony::GuardReport]) -> String {
         .collect();
     serde_json::to_string_pretty(&json!({
         "clean": reports.is_empty(),
+        "coverage": {
+            "files": cov.files,
+            "files_read": cov.files_read,
+            "languages": cov.languages,
+            "taint_untested": cov.taint_untested,
+            "no_grammar": cov.no_grammar,
+            "unreadable": cov.unreadable,
+            "receipt": cov.render(),
+        },
         "counts": {
             "blocker": counts.get("blocker").copied().unwrap_or(0),
             "critical": counts.get("critical").copied().unwrap_or(0),
@@ -135,13 +152,13 @@ fn handle(id: &Value, method: &str, params: &Value) {
                         },
                         {
                             "name": "harmony.check",
-                            "description": "Run every guard on the workspace and return findings with evidence.",
-                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" } } }
+                            "description": "Run every guard on the workspace and return findings with evidence. Pass offline true to skip the dependency guard registry lookups; HEIDES_OFFLINE=1 also works.",
+                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "offline": { "type": "boolean", "description": "skip the dependency guard registry lookups" } } }
                         },
                         {
                             "name": "harmony.report",
-                            "description": "Run every guard on the workspace and return findings as structured JSON with severity counts.",
-                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" } } }
+                            "description": "Run every guard on the workspace and return findings as structured JSON with severity counts. Pass offline true to skip the dependency guard registry lookups; HEIDES_OFFLINE=1 also works.",
+                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "offline": { "type": "boolean", "description": "skip the dependency guard registry lookups" } } }
                         },
                         {
                             "name": "harmony.staged",
@@ -436,9 +453,13 @@ fn handle(id: &Value, method: &str, params: &Value) {
                             return;
                         }
                     };
-                    let reports =
-                        harmony::check_workspace(&std::path::PathBuf::from(&root), &graph);
-                    ok(id, text_result(report_lines(&reports)));
+                    apply_offline(&args);
+                    let (reports, cov) = harmony::check_workspace_with_coverage(
+                        &std::path::PathBuf::from(&root),
+                        &graph,
+                    );
+                    let out = format!("{}\n\n{}", report_lines(&reports), cov.render());
+                    ok(id, text_result(out));
                 }
                 "harmony.report" => {
                     let graph = match load_graph(&root) {
@@ -448,9 +469,15 @@ fn handle(id: &Value, method: &str, params: &Value) {
                             return;
                         }
                     };
-                    let reports =
-                        harmony::check_workspace(&std::path::PathBuf::from(&root), &graph);
-                    ok(id, text_result(report_json(&reports)));
+                    apply_offline(&args);
+                    let (reports, cov) = harmony::check_workspace_with_coverage(
+                        &std::path::PathBuf::from(&root),
+                        &graph,
+                    );
+                    // The receipt travels inside the JSON, because an agent
+                    // that receives a clean result must be able to see what was
+                    // skipped without a second call.
+                    ok(id, text_result(report_json(&reports, &cov)));
                 }
                 "harmony.staged" => {
                     let patch = args.get("patch").and_then(|v| v.as_str()).unwrap_or("");
