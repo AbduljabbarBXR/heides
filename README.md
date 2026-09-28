@@ -15,6 +15,19 @@ heides staged patch.diff    # judge a patch before it lands
 heides mcp                  # expose it to any MCP client
 ```
 
+Every guard except one is local analysis. The dependency guard is the only one
+that queries a registry, and it says so instead of doing it behind your back:
+
+```sh
+heides check --no-deps       # or HEIDES_OFFLINE=1
+```
+
+On this repository that is the difference between 217 seconds and 2. Manifest
+parsing and pinned version extraction are local, so an offline check still reads
+all 94 pinned versions and reports them. What it gives up is the known-CVE
+lookup and the "a newer version exists" reminder, and the coverage receipt says
+the lookup was skipped rather than reporting a partial run as a complete one.
+
 ## Why it exists
 
 An AI agent is powerful and blind. It can write a perfect function and still break three callers it never read, because it has no persistent map of the code. Linters and tests catch that after the change lands, and only on paths that happen to run. The classic failure: an agent changes a signature, the unexercised call sites break, the suite stays green, and production breaks at two in the morning.
@@ -201,7 +214,7 @@ Stated plainly, and tracked with citations and a resolution column in `ROADMAP.m
 * No open redirect, XXE, unsafe deserialization or crypto misuse rules.
 * A handful of ecosystems are not read for dependencies: Ruby, .NET, Swift, Gradle, Dart, and no transitive resolution from lockfiles.
 * Languages not indexed: C, C++, SQL, shell, Kotlin, Swift, Scala, Dart, Dockerfile. Ruby is taint scanned but has no grammar, so it contributes no symbols to the graph. Rust is indexed but not taint scanned.
-* `deps` needs the network to reach OSV, and degrades gracefully when it cannot. `check` reaches the network for that one guard without being asked, which is a known inconsistency with the offline claim above.
+* `deps` queries OSV for advisories and the registries for latest versions. It is skippable with `--no-deps` or `HEIDES_OFFLINE=1`, and the receipt states when it was skipped. There is still no cached advisory database, so an offline check cannot know about a CVE it has never seen, which is Tier 4.
 * `staged` validates conflicts only; it does not run taint over the post-patch tree, so a patch that introduces a flow is not yet caught by the gate.
 
 

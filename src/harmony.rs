@@ -27,6 +27,30 @@ pub struct GuardReport {
 /// content. Zero findings and analysed nothing printed the same words. A
 /// receipt always prints, clean runs included, because a receipt you only see
 /// when something is wrong is a warning and not a receipt.
+/// What happened to the dependency guard. Three states, not two, because
+/// "skipped on request" and "could not reach the registry" are different facts
+/// and a receipt that collapsed them would be the very problem it exists to
+/// fix.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum DepsState {
+    #[default]
+    RanOnline,
+    RanPartial,
+    Skipped,
+}
+
+impl DepsState {
+    fn note(self) -> Option<&'static str> {
+        match self {
+            DepsState::RanOnline => None,
+            DepsState::RanPartial => Some("dependency check was partial: registries unreachable"),
+            DepsState::Skipped => Some(
+                "dependency check skipped: --no-deps or HEIDES_OFFLINE=1, so no advisory lookup ran",
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Coverage {
     /// Files in the index, and how many of them could actually be read back.
@@ -42,8 +66,8 @@ pub struct Coverage {
     /// Files indexed but contributing no symbols, which is what a language
     /// without a grammar looks like.
     pub no_grammar: Vec<String>,
-    /// False when the dependency guard could not reach its registries.
-    pub deps_online: bool,
+    /// What the dependency guard did, stated in the receipt.
+    pub deps: DepsState,
 }
 
 impl Coverage {
@@ -77,8 +101,8 @@ impl Coverage {
                 self.unreadable.join(", ")
             ));
         }
-        if !self.deps_online {
-            out.push_str("\ndependency check was partial: registries unreachable");
+        if let Some(note) = self.deps.note() {
+            out.push_str(&format!("\n{note}"));
         }
         out
     }
@@ -87,7 +111,7 @@ impl Coverage {
 /// Build the receipt for a graph. Counts languages from the index and the
 /// taint rules from the rule tables, so neither can drift from what the
 /// guards actually do.
-pub fn coverage_of(graph: &CodeGraph, deps_online: bool) -> Coverage {
+pub fn coverage_of(graph: &CodeGraph, deps: DepsState) -> Coverage {
     use std::collections::BTreeSet;
     let mut langs: BTreeSet<String> = BTreeSet::new();
     let mut untested: BTreeSet<String> = BTreeSet::new();
@@ -128,7 +152,7 @@ pub fn coverage_of(graph: &CodeGraph, deps_online: bool) -> Coverage {
         languages: langs.into_iter().collect(),
         taint_untested: untested.into_iter().collect(),
         no_grammar: no_grammar.into_iter().collect(),
-        deps_online,
+        deps,
     }
 }
 
@@ -141,8 +165,12 @@ pub fn check_workspace_with_coverage(
     graph: &CodeGraph,
 ) -> (Vec<GuardReport>, Coverage) {
     let (reports, network_ok) = check_workspace_and_online(root, graph);
-    let cov = coverage_of(graph, network_ok);
-    (reports, cov)
+    let state = if network_ok {
+        DepsState::RanOnline
+    } else {
+        DepsState::RanPartial
+    };
+    (reports, coverage_of(graph, state))
 }
 
 /// Run the full workspace check: taint, edge cases, practices, dependencies.
@@ -152,6 +180,24 @@ pub fn check_workspace(root: &Path, graph: &CodeGraph) -> Vec<GuardReport> {
 
 fn check_workspace_and_online(root: &Path, graph: &CodeGraph) -> (Vec<GuardReport>, bool) {
     let mut reports = check_workspace_without_deps(graph);
+
+    // The one guard that is allowed to want the network, and only when asked.
+    if !crate::deps::deps_enabled() {
+        // Manifest parsing is local and still runs, so the pinned versions are
+        // known even offline. Only the advisory and latest-version lookups are
+        // skipped, and the receipt says so.
+        let (dep_reports, _) = crate::deps::check_offline(root);
+        for r in dep_reports {
+            reports.push(GuardReport {
+                guard: "dependency".to_string(),
+                severity: r.severity,
+                message: r.message,
+                file: r.file,
+                line: r.line,
+            });
+        }
+        return (reports, true);
+    }
 
     let (dep_reports, network_ok) = crate::deps::check(root);
     for r in dep_reports {
@@ -342,7 +388,7 @@ mod liveness {
         std::fs::write(dir.join("a.js"), "export const x = 1;\n").unwrap();
         std::fs::write(dir.join("b.py"), "y = 1\n").unwrap();
         let (graph, _) = indexer::build_graph(&dir);
-        let cov = coverage_of(&graph, true);
+        let cov = coverage_of(&graph, DepsState::RanOnline);
         let text = cov.render();
         assert_eq!(cov.files, 2, "{text}");
         assert_eq!(cov.files_read, 2, "both files must be readable: {text}");
@@ -364,7 +410,7 @@ mod liveness {
         let dir = scratch("rustonly");
         std::fs::write(dir.join("a.rs"), "fn f() -> i32 { 1 }\n").unwrap();
         let (graph, _) = indexer::build_graph(&dir);
-        let cov = coverage_of(&graph, true);
+        let cov = coverage_of(&graph, DepsState::RanOnline);
         let text = cov.render();
         assert!(
             cov.taint_untested.iter().any(|l| l == "rust"),
@@ -385,7 +431,7 @@ mod liveness {
         let dir = scratch("rubyonly");
         std::fs::write(dir.join("a.rb"), "def f\n  1\nend\n").unwrap();
         let (graph, _) = indexer::build_graph(&dir);
-        let cov = coverage_of(&graph, true);
+        let cov = coverage_of(&graph, DepsState::RanOnline);
         let text = cov.render();
         assert!(
             cov.taint_untested.is_empty(),
@@ -408,10 +454,10 @@ mod liveness {
         let file = dir.join("a.js");
         std::fs::write(&file, "export const x = 1;\n").unwrap();
         let (graph, _) = indexer::build_graph(&dir);
-        let cov = coverage_of(&graph, true);
+        let cov = coverage_of(&graph, DepsState::RanOnline);
         assert_eq!(cov.files_read, cov.files, "everything readable for now");
         std::fs::remove_file(&file).unwrap();
-        let cov2 = coverage_of(&graph, true);
+        let cov2 = coverage_of(&graph, DepsState::RanOnline);
         let text = cov2.render();
         assert!(
             cov2.files_read < cov2.files,
@@ -425,13 +471,50 @@ mod liveness {
     }
 
     #[test]
+    fn a_skipped_dependency_check_is_stated_not_hidden() {
+        // The whole point of the receipt. An offline run must say the advisory
+        // lookup did not happen, or "no findings" reads as a clean bill of
+        // health for a check that never ran.
+        let text = coverage_of(&CodeGraph::new(), DepsState::Skipped).render();
+        assert!(text.contains("skipped"), "{text}");
+        assert!(text.contains("--no-deps"), "{text}");
+    }
+
+    #[test]
+    fn offline_dependency_check_still_reads_pinned_versions() {
+        // The offline path must not be the empty path. Manifest parsing and
+        // pinned version extraction are local, so they still happen.
+        let dir = scratch("offlinereads");
+        std::fs::write(
+            dir.join("package.json"),
+            "{\"name\":\"x\",\"version\":\"1.0.0\",\"dependencies\":{\"left-pad\":\"1.3.0\"}}",
+        )
+        .unwrap();
+        let (reports, _) = deps::check_offline(&dir);
+        let text: Vec<String> = reports.iter().map(|r| r.message.clone()).collect();
+        assert!(
+            text.iter().any(|m| m.contains("1 pinned version")),
+            "an offline check must report the pinned versions it read, got {text:?}"
+        );
+        assert!(
+            text.iter().any(|m| m.contains("advisory lookup skipped")),
+            "{text:?}"
+        );
+        assert!(
+            !text.iter().any(|m| m.contains("falls outside")),
+            "no registry comparison offline: {text:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn the_receipt_says_when_the_dependency_check_was_partial() {
         let dir = scratch("offline");
         std::fs::write(dir.join("a.js"), "export const x = 1;\n").unwrap();
         let (graph, _) = indexer::build_graph(&dir);
-        let text = coverage_of(&graph, false).render();
+        let text = coverage_of(&graph, DepsState::RanPartial).render();
         assert!(text.contains("registries unreachable"), "{text}");
-        let online = coverage_of(&graph, true).render();
+        let online = coverage_of(&graph, DepsState::RanOnline).render();
         assert!(!online.contains("registries unreachable"), "{online}");
         std::fs::remove_dir_all(&dir).ok();
     }

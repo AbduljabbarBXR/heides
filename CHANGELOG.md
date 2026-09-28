@@ -2,6 +2,17 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.16.2
+
+The dependency guard stops reaching for the network unless asked, which makes a claim the README already made true.
+
+* **`--no-deps` and `HEIDES_OFFLINE=1` skip the registry lookups.** `check` was making one HTTP request per dependency, unasked, to query OSV and to look up the latest version. On this repository a full check took **217 seconds**; it now takes **2**. The flag wins over the environment, and both are documented in `heides --help`.
+* **The offline path is not the empty path.** Manifest parsing and pinned version extraction are local, so an offline check still reads every pinned version: 94 across crates.io on this repository, reported as an info line naming the count and the ecosystems, so the work is visible rather than assumed.
+* **A skipped dependency check is stated, never implied.** The coverage receipt gained a third state. "Could not reach the registry" and "skipped on request" are different facts, and collapsing them would recreate the exact failure the receipt exists to prevent: a partial run reported as a complete one.
+* **`harmony.check` and `harmony.report` over MCP accept `offline: true`,** and `harmony.report` now carries the full receipt inside its JSON, so an agent receiving a clean result can see what was skipped without a second call. Previously the MCP tools ignored the setting and hit the network regardless.
+* What `--no-deps` gives up, stated plainly: the known-CVE lookup and the "a newer version exists" reminder. It gives up no local check. Taint, the spine, `staged`, `query`, `describe`, frameworks, scaffold, the edge and practice guards and the whole graph are pure local analysis and are unaffected.
+* 5 tests. The accepted `HEIDES_OFFLINE` values are tested through a pure helper rather than by mutating process environment state, which is unsafe on this toolchain.
+
 ## 0.16.1
 
 Every `check` now ends with a receipt saying what it actually looked at. On clean runs too.
