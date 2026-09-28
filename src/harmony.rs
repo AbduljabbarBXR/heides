@@ -198,7 +198,7 @@ fn check_workspace_and_state(
         // Manifest parsing is local and still runs, so the pinned versions are
         // known even offline. Only the advisory and latest-version lookups are
         // skipped, and the receipt says so.
-        let (dep_reports, _) = crate::deps::check_offline(root);
+        let (dep_reports, _health) = crate::deps::check_offline(root);
         for r in dep_reports {
             reports.push(GuardReport {
                 guard: "dependency".to_string(),
@@ -211,7 +211,7 @@ fn check_workspace_and_state(
         return (reports, DepsState::Skipped);
     }
 
-    let (dep_reports, network_ok) = crate::deps::check(root);
+    let (dep_reports, health) = crate::deps::check(root);
     for r in dep_reports {
         reports.push(GuardReport {
             guard: "dependency".to_string(),
@@ -221,18 +221,22 @@ fn check_workspace_and_state(
             line: r.line,
         });
     }
-    if !network_ok {
+    // Only the advisory half drives the security posture. A missing
+    // "latest version" answer is the convenience half failing and must not be
+    // allowed to fail --require-advisories, or the flag becomes unusable on
+    // any repository holding a package whose latest release is unresolvable.
+    if !health.versions_ok && health.advisories_ok {
         reports.push(GuardReport {
             guard: "dependency".to_string(),
             severity: "info".to_string(),
-            message: "network was unavailable for the dependency check. results are partial."
+            message: "some latest version lookups did not answer, so upgrade reminders are partial. advisory results are complete."
                 .to_string(),
             file: String::new(),
             line: 0,
         });
     }
 
-    let state = if network_ok {
+    let state = if health.advisories_ok {
         DepsState::RanOnline
     } else {
         DepsState::RanPartial

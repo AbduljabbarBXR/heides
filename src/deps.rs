@@ -713,17 +713,38 @@ fn parse_package_json(text: &str) -> Vec<Dependency> {
 
 /// Query OSV for known vulnerabilities in a dependency.
 /// Returns a short summary line, or None when clean.
-fn osv_check(dep: &Dependency) -> Option<String> {
+/// What the advisory lookup actually established.
+///
+/// This is a tri-state on purpose. It used to be `Option<String>`, which
+/// returned `None` both for "this version has no known vulnerability" and for
+/// "the request failed", so an unreachable OSV made the guard report every
+/// dependency as clean. That is the same silent-partial-result failure as
+/// everywhere else in this release, in the most security relevant place
+/// possible: a network failure looked like a clean bill of health.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Advisory {
+    Found(String),
+    Clean,
+    Unreachable,
+}
+
+fn osv_check(dep: &Dependency) -> Advisory {
     let body = serde_json::json!({
         "package": { "name": dep.name, "ecosystem": dep.ecosystem },
         "version": dep.version
     });
     let url = "https://api.osv.dev/v1/query";
-    let resp = crate::web::post_json(url, &body.to_string()).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&resp).ok()?;
-    let vulns = value.get("vulns").and_then(|v| v.as_array())?;
+    let Ok(resp) = crate::web::post_json(url, &body.to_string()) else {
+        return Advisory::Unreachable;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&resp) else {
+        return Advisory::Unreachable;
+    };
+    let Some(vulns) = value.get("vulns").and_then(|v| v.as_array()) else {
+        return Advisory::Unreachable;
+    };
     if vulns.is_empty() {
-        return None;
+        return Advisory::Clean;
     }
     let first = &vulns[0];
     let id = first
@@ -734,7 +755,22 @@ fn osv_check(dep: &Dependency) -> Option<String> {
         .get("summary")
         .and_then(|v| v.as_str())
         .unwrap_or("no summary");
-    Some(format!("{}: {}", id, summary))
+    Advisory::Found(format!("{}: {}", id, summary))
+}
+
+/// How far the dependency guard got, reported per half.
+///
+/// The advisory half is the security half and the version half is the
+/// convenience half. They are tracked separately because conflating them is
+/// what made a missing "latest version" lookup mark the whole run as advisory
+/// incomplete, which would have failed `--require-advisories` on any repository
+/// containing a package whose latest version could not be resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DepsHealth {
+    /// Every pinned version was actually asked about.
+    pub advisories_ok: bool,
+    /// Every "is there a newer release" lookup answered.
+    pub versions_ok: bool,
 }
 
 /// Fetch the latest published version of a dependency.
@@ -940,7 +976,7 @@ fn offline_env_value(v: Option<&str>) -> bool {
     matches!(v, Some("1") | Some("true") | Some("yes"))
 }
 
-pub fn check(root: &Path) -> (Vec<DepReport>, bool) {
+pub fn check(root: &Path) -> (Vec<DepReport>, DepsHealth) {
     let deps = read_manifests(root);
     let mut reports = Vec::new();
     if deps.is_empty() {
@@ -951,7 +987,13 @@ pub fn check(root: &Path) -> (Vec<DepReport>, bool) {
             file: root.display().to_string(),
             line: 0,
         });
-        return (reports, true);
+        return (
+            reports,
+            DepsHealth {
+                advisories_ok: true,
+                versions_ok: true,
+            },
+        );
     }
 
     // Deduplicate by name and ecosystem.
@@ -963,7 +1005,10 @@ pub fn check(root: &Path) -> (Vec<DepReport>, bool) {
         }
     }
 
-    let mut network_ok = true;
+    let mut health = DepsHealth {
+        advisories_ok: true,
+        versions_ok: true,
+    };
     let mut checked = 0;
     for ((name, ecosystem), version) in &seen {
         let eco = canonical_ecosystem(ecosystem);
@@ -973,9 +1018,11 @@ pub fn check(root: &Path) -> (Vec<DepReport>, bool) {
             ecosystem: eco,
         };
         checked += 1;
-        let vuln = osv_check(&dep);
-        if let Some(vuln) = vuln {
-            reports.push(DepReport {
+        // Clean and Unreachable are different answers and must not collapse.
+        // Reporting "no vulnerabilities" when the registry was never reached
+        // is the one thing this guard must never do.
+        match osv_check(&dep) {
+            Advisory::Found(vuln) => reports.push(DepReport {
                 severity: "critical".to_string(),
                 message: format!(
                     "{} {} has a known vulnerability: {}",
@@ -983,7 +1030,20 @@ pub fn check(root: &Path) -> (Vec<DepReport>, bool) {
                 ),
                 file: "manifest".to_string(),
                 line: 0,
-            })
+            }),
+            Advisory::Clean => {}
+            Advisory::Unreachable => {
+                health.advisories_ok = false;
+                reports.push(DepReport {
+                    severity: "info".to_string(),
+                    message: format!(
+                        "could not reach the advisory service for {} {}. it is NOT known to be clean.",
+                        dep.name, dep.version
+                    ),
+                    file: "manifest".to_string(),
+                    line: 0,
+                });
+            }
         }
         match latest_version(&dep) {
             Some(latest) => {
@@ -1010,7 +1070,11 @@ pub fn check(root: &Path) -> (Vec<DepReport>, bool) {
                 }
             }
             None => {
-                network_ok = false;
+                // A missing latest-version answer is the convenience half
+                // failing. It must not be allowed to mark the security half
+                // incomplete, or --require-advisories would fail on any repo
+                // holding a package whose latest release cannot be resolved.
+                health.versions_ok = false;
             }
         }
     }
@@ -1023,7 +1087,7 @@ pub fn check(root: &Path) -> (Vec<DepReport>, bool) {
             line: 0,
         });
     }
-    (reports, network_ok)
+    (reports, health)
 }
 
 /// The local half of the dependency guard, with no network at all.
@@ -1035,7 +1099,7 @@ pub fn check(root: &Path) -> (Vec<DepReport>, bool) {
 ///
 /// The report says how many pinned versions it read, so an offline run is
 /// visibly doing local work rather than silently doing nothing.
-pub fn check_offline(root: &Path) -> (Vec<DepReport>, bool) {
+pub fn check_offline(root: &Path) -> (Vec<DepReport>, DepsHealth) {
     let deps = read_manifests(root);
     let mut reports = Vec::new();
     if deps.is_empty() {
@@ -1045,7 +1109,13 @@ pub fn check_offline(root: &Path) -> (Vec<DepReport>, bool) {
             file: root.display().to_string(),
             line: 0,
         });
-        return (reports, true);
+        return (
+            reports,
+            DepsHealth {
+                advisories_ok: true,
+                versions_ok: true,
+            },
+        );
     }
     let mut pinned: BTreeMap<(String, String), String> = BTreeMap::new();
     for d in &deps {
@@ -1073,7 +1143,16 @@ pub fn check_offline(root: &Path) -> (Vec<DepReport>, bool) {
         file: "manifest".to_string(),
         line: 0,
     });
-    (reports, true)
+    // Offline, so nothing was not checked. The caller reports Skipped, which
+    // is the honest state: the advisory lookup did not run, and this says so
+    // rather than implying both halves succeeded.
+    (
+        reports,
+        DepsHealth {
+            advisories_ok: true,
+            versions_ok: true,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -1101,10 +1180,15 @@ mod tests {
         let mut a = client_a;
         a.enabled = true;
         a.require_advisories = false;
+        assert_ne!(a, client_a, "the local copy did change");
+        assert!(
+            a.enabled && !a.require_advisories,
+            "and holds the new values"
+        );
         assert!(client_b.enabled, "B must be unaffected by A");
         assert!(
             client_a.require_advisories,
-            "A is a copy, not a shared handle"
+            "A is a copy, not a shared handle, so A is unchanged too"
         );
     }
 

@@ -67,6 +67,21 @@ it consults OSV, and if the registry is unreachable the summary says
 `ADVISORIES INCOMPLETE` so a silent network failure cannot read as a pass
 either. The offline advisory cache that removes the tradeoff is Tier 4.
 
+An unreachable advisory service never reports a dependency as clean. It says so
+explicitly, because the two are not the same answer and the old behaviour
+collapsed them:
+
+```text
+[info] could not reach the advisory service for serde 1.0.0. it is NOT known to be clean.
+```
+
+The two halves of this guard are also tracked separately, deliberately. Advisory
+coverage is the security half and it alone drives the posture. The "a newer
+version exists" reminder is a convenience, and a reminder that did not answer
+produces its own note rather than failing a security gate. Collapsing the two
+once made `--require-advisories` unusable on ordinary repositories, which is how
+people end up dropping the flag.
+
 ## Why it exists
 
 An AI agent is powerful and blind. It can write a perfect function and still break three callers it never read, because it has no persistent map of the code. Linters and tests catch that after the change lands, and only on paths that happen to run. The classic failure: an agent changes a signature, the unexercised call sites break, the suite stays green, and production breaks at two in the morning.
