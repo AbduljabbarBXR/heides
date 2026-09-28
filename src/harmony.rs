@@ -344,6 +344,169 @@ pub fn check_staged(
 }
 
 /// Summarize reports by severity for a quick overview line.
+static EXPAND_ALL: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+static HIDE_ADVICE: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+
+/// Set by `--all`, the command line reads these once at startup and never
+/// changes them again, so a global here is correct rather than dangerous.
+pub fn set_expand_all(v: bool) {
+    *EXPAND_ALL.lock().unwrap() = v;
+}
+
+pub fn set_hide_advice(v: bool) {
+    *HIDE_ADVICE.lock().unwrap() = v;
+}
+
+pub fn expand_all() -> bool {
+    *EXPAND_ALL.lock().unwrap()
+}
+
+pub fn hide_advice() -> bool {
+    *HIDE_ADVICE.lock().unwrap()
+}
+
+/// Whether a finding is evidence or advice.
+///
+/// They are printed in separate sections and never in the same voice. A taint
+/// finding is a path through code, reproducible from the file and line. A
+/// "function spans N lines" is a style opinion, and an agent cannot act on a
+/// style opinion the same way it acts on a proven sink. Mixing them in one
+/// ranked list is how the important finding hides inside the wall.
+///
+/// One honest caveat: `edge.cases` holds the `unwrap` rule, which is still a
+/// syntactic substring match rather than a proof. It is being made provable in
+/// its own change, and until then it is classed as evidence with that
+/// limitation stated rather than quietly demoted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bucket {
+    Proof,
+    Advice,
+}
+
+pub fn bucket(guard: &str) -> Bucket {
+    match guard {
+        "best.practice" => Bucket::Advice,
+        _ => Bucket::Proof,
+    }
+}
+
+/// One line of output: either a finding, or several identical ones folded.
+#[derive(Debug)]
+pub enum Line<'a> {
+    One(&'a GuardReport),
+    Many {
+        severity: &'a str,
+        message: &'a str,
+        guard: &'a str,
+        count: usize,
+        first: &'a GuardReport,
+        /// Distinct files, capped for display. Folding must not hide which
+        /// files to open, which the battle suite caught: a folded line that
+        /// named only the first file made a PHP finding invisible because an
+        /// earlier file had produced the same sentence.
+        files: Vec<&'a str>,
+        /// How many distinct files there are in total, before the cap.
+        file_count: usize,
+    },
+}
+
+/// Fold identical findings together, keeping the count and the first evidence.
+///
+/// 126 instances of one sentence is not 126 findings, it is one finding with a
+/// count. Nothing is deleted: the count and the first file and line are kept,
+/// and `--all` prints every one. Folding is keyed on guard plus message so two
+/// guards saying similar things stay separate, and it walks the input in order
+/// so the output is byte identical across runs.
+pub fn collapse<'a>(reports: &[&'a GuardReport], expand: bool) -> Vec<Line<'a>> {
+    let mut out: Vec<Line<'a>> = Vec::new();
+    // Keys only. The position in this vec is the position in `out`, and the
+    // count lives in `out`. Storing the count here as well meant the count was
+    // used as the index, which the folding tests caught immediately.
+    let mut seen: Vec<(&'a str, &'a str)> = Vec::new();
+    for r in reports {
+        if expand {
+            out.push(Line::One(r));
+            continue;
+        }
+        match seen
+            .iter()
+            .position(|(g, m)| *g == r.guard.as_str() && *m == r.message.as_str())
+        {
+            Some(pos) => {
+                if let Line::Many {
+                    count,
+                    files,
+                    file_count,
+                    ..
+                } = &mut out[pos]
+                {
+                    *count += 1;
+                    if *file_count <= FILE_LIST_CAP && !files.contains(&r.file.as_str()) {
+                        *file_count += 1;
+                        files.push(r.file.as_str());
+                    } else if *file_count > FILE_LIST_CAP {
+                        *file_count += 1;
+                    }
+                }
+            }
+            None => {
+                seen.push((r.guard.as_str(), r.message.as_str()));
+                out.push(Line::Many {
+                    severity: r.severity.as_str(),
+                    message: r.message.as_str(),
+                    guard: r.guard.as_str(),
+                    count: 1,
+                    first: r,
+                    files: vec![r.file.as_str()],
+                    file_count: 1,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// How many distinct files a folded line names before it says "and N more".
+pub const FILE_LIST_CAP: usize = 4;
+
+/// Where a folded finding lives, for display. Names the first few files rather
+/// than only the first, because "one finding" that is actually in twelve files
+/// is useless to whoever has to go and look.
+pub fn folded_location(first: &GuardReport, files: &[&str], file_count: usize) -> String {
+    if files.is_empty() {
+        return String::new();
+    }
+    let mut out = format!(" at {}", files.join(", "));
+    if file_count > files.len() {
+        out.push_str(&format!(" and {} more", file_count - files.len()));
+    }
+    if let Some(first_line) = first.file.as_str().strip_prefix(files[0])
+        && !first_line.is_empty()
+    {
+        out.push_str(&format!(":{first_line}"));
+    }
+    out
+}
+
+/// Drop the advisory findings, for a gate that only wants evidence.
+pub fn without_advice(reports: &[GuardReport]) -> Vec<&GuardReport> {
+    reports
+        .iter()
+        .filter(|r| bucket(&r.guard) == Bucket::Proof)
+        .collect()
+}
+
+/// How many findings were folded, for the summary line.
+pub fn folded_count(lines: &[Line<'_>]) -> usize {
+    lines
+        .iter()
+        .map(|l| match l {
+            Line::One(_) => 1,
+            Line::Many { count, .. } => *count,
+        })
+        .sum()
+}
+
 /// The headline. Counts alone, and counts alone are a lie when a guard did not
 /// run: "0 critical" reads identically whether the advisory lookup found
 /// nothing or was skipped. The posture travels with the numbers, on the same
@@ -502,6 +665,139 @@ mod liveness {
             "the unreadable file must be named: {text}"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn rep(guard: &str, sev: &str, msg: &str, file: &str, line: u64) -> GuardReport {
+        GuardReport {
+            guard: guard.to_string(),
+            severity: sev.to_string(),
+            message: msg.to_string(),
+            file: file.to_string(),
+            line,
+        }
+    }
+
+    #[test]
+    fn identical_findings_fold_into_one_with_a_count() {
+        // 126 identical lines is not 126 findings, it is one finding with a
+        // count. This is the whole point of the change.
+        let reports: Vec<GuardReport> = (1..=5)
+            .map(|i| {
+                rep(
+                    "edge.cases",
+                    "warning",
+                    "unwrap can panic.",
+                    &format!("f{i}.rs"),
+                    i,
+                )
+            })
+            .collect();
+        let lines = collapse(&reports.iter().collect::<Vec<_>>(), false);
+        assert_eq!(lines.len(), 1, "five identical findings must fold to one");
+        match &lines[0] {
+            Line::Many { count, first, .. } => {
+                assert_eq!(*count, 5, "the count is kept, nothing is deleted");
+                assert_eq!(first.file, "f1.rs", "first evidence is kept");
+            }
+            other => panic!("expected a folded line, got {other:?}"),
+        }
+        assert_eq!(folded_count(&lines), 5, "the fold must not lose findings");
+    }
+
+    #[test]
+    fn expand_prints_every_finding() {
+        let reports: Vec<GuardReport> = (1..=5)
+            .map(|i| {
+                rep(
+                    "edge.cases",
+                    "warning",
+                    "unwrap can panic.",
+                    &format!("f{i}.rs"),
+                    i,
+                )
+            })
+            .collect();
+        let refs = reports.iter().collect::<Vec<_>>();
+        let lines = collapse(&refs, true);
+        assert_eq!(lines.len(), 5, "--all must not fold");
+        assert!(lines.iter().all(|l| matches!(l, Line::One(_))));
+        assert_eq!(folded_count(&lines), 5);
+    }
+
+    #[test]
+    fn the_same_sentence_from_two_guards_stays_separate() {
+        let reports = [
+            rep("edge.cases", "warning", "same text", "a.rs", 1),
+            rep("best.practice", "info", "same text", "b.rs", 2),
+        ];
+        let refs = reports.iter().collect::<Vec<_>>();
+        assert_eq!(
+            collapse(&refs, false).len(),
+            2,
+            "different guards are different findings"
+        );
+    }
+
+    #[test]
+    fn evidence_and_advice_are_never_mixed() {
+        assert_eq!(bucket("best.practice"), Bucket::Advice);
+        for g in ["security.taint", "edge.cases", "dependency", "staged.apply"] {
+            assert_eq!(bucket(g), Bucket::Proof, "{g} is evidence");
+        }
+        let reports = vec![
+            rep(
+                "best.practice",
+                "info",
+                "function spans 40 lines",
+                "a.rs",
+                1,
+            ),
+            rep(
+                "security.taint",
+                "critical",
+                "reaches an SQL sink",
+                "b.rs",
+                2,
+            ),
+        ];
+        let kept = without_advice(&reports);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(
+            kept[0].guard, "security.taint",
+            "advice is dropped, evidence stays"
+        );
+    }
+
+    #[test]
+    fn folding_is_byte_identical_across_runs() {
+        // The determinism suite requires byte identical output. Folding walks
+        // the input in order, so it must not depend on hash order.
+        let build = || {
+            let reports: Vec<GuardReport> = (1..=20)
+                .map(|i| {
+                    let m = if i % 3 == 0 { "alpha" } else { "beta" };
+                    rep("edge.cases", "warning", m, &format!("f{i}.rs"), i)
+                })
+                .collect();
+            collapse(&reports.iter().collect::<Vec<_>>(), false)
+                .iter()
+                .map(|l| match l {
+                    Line::One(r) => format!("{}|{}|{}", r.message, r.file, r.line),
+                    Line::Many {
+                        message,
+                        count,
+                        first,
+                        files,
+                        file_count,
+                        ..
+                    } => format!(
+                        "{message}|x{count}|{}",
+                        folded_location(first, files, *file_count)
+                    ),
+                })
+                .collect::<Vec<String>>()
+        };
+        assert_eq!(build(), build(), "folding must be stable");
     }
 
     #[test]

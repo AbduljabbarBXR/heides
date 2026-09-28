@@ -272,6 +272,32 @@ Stated plainly, and tracked with citations and a resolution column in `ROADMAP.m
 * `staged` validates conflicts only; it does not run taint over the post-patch tree, so a patch that introduces a flow is not yet caught by the gate.
 
 
+## Reading the output
+
+A check on this repository printed 185 lines, 152 of them the same sentence.
+That is one finding with a count of 152, and printing it as 152 lines is how the
+finding that mattered hides inside the wall.
+
+```text
+0 blocker(s), 1 critical, 157 warning(s), 41 info
+
+[warning] unwrap can panic when the value is not present. handle the case
+instead. x152 (edge.cases) at src/deps.rs:893
+
+advice, unproven and unranked:
+[info] diagnostic console call left in the code. x10 (best.practice) at npm/bin/heides.js:17
+```
+
+Three rules. Identical findings fold, and the count and the first file and line
+are kept, so nothing is lost. `--all` prints every one. And evidence is never
+mixed with advice: a taint finding is a path through code you can go and read,
+a "function spans N lines" is a style opinion, and an agent cannot act on one the
+way it acts on the other. The counts at the top always describe every finding, so
+folding never flatters the result.
+
+`--no-advice` drops the advisory section entirely, for a gate that wants evidence
+and nothing else.
+
 ## The receipt
 
 Every `check` ends by saying what it actually looked at, on clean runs too:

@@ -2,6 +2,18 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.17.0
+
+Findings are filtered, not merely emitted. 185 lines for one repository became 42, and nothing was deleted to achieve it.
+
+* **Identical findings fold into one line with a count and the first evidence.** A self scan of this repository produced 152 instances of the same `unwrap` sentence, which is one finding with a count of 152, not 152 findings. `--all` prints every one.
+* **The summary line always counts every finding,** folded or not, so the headline is never flattered by the folding. `heides check` on this repository: `1 critical, 157 warning(s), 41 info` whether the output is 11 lines or 207.
+* **Evidence and advice are printed in separate sections and never share a list.** A taint finding is a path through code, reproducible from a file and a line. A "function spans N lines" is a style opinion. The advice section is labelled `advice, unproven and unranked` so a reader cannot mistake one for the other.
+* **`--no-advice` drops the advisory findings entirely,** for a gate that wants evidence and nothing else. The counts still describe everything, so hiding advice never makes a run look better than it was.
+* **The MCP surface folds by default** and accepts `all: true`. An agent pays for every token it reads, and a wall of 152 identical lines is how it misses the one finding that mattered.
+* **A real bug, caught by the folding tests on their first run:** the fold stored the count and the output index in the same field, so a count of 1 was used as an index and the second identical finding panicked. The tests existed precisely to catch this class, and they did.
+* Folding is keyed on guard plus message, so two guards saying similar things stay separate, and it walks the input in order, so the output is byte identical across runs. There is a test for that, because the determinism suite requires it.
+
 ## 0.16.3
 
 A correction to 0.16.2, not a feature. `--no-deps` shipped a hollow pass, and
