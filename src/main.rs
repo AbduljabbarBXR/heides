@@ -357,7 +357,8 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let (reports, cov) = harmony::check_workspace_with_coverage(&root, &graph);
+            let policy = heides::deps::DepsPolicy::default();
+            let (reports, cov) = harmony::check_workspace_with_coverage(&root, &graph, policy);
             if let Some(p) = pulse {
                 p.finish();
             }
@@ -431,7 +432,7 @@ fn main() -> ExitCode {
             // A security gate that did not consult the advisories must not
             // report success. This is the whole point of --require-advisories:
             // the failure is mechanical, not a note someone has to read.
-            if heides::deps::require_advisories_now() && cov.deps != harmony::DepsState::RanOnline {
+            if policy.require_advisories && cov.deps != harmony::DepsState::RanOnline {
                 eprintln!(
                     "heides: --require-advisories was set but the advisory lookup did not run. this run is not a security gate."
                 );

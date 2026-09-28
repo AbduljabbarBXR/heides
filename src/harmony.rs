@@ -170,24 +170,31 @@ pub fn coverage_of(graph: &CodeGraph, deps: DepsState) -> Coverage {
 /// state, which the coverage receipt needs. Kept separate from
 /// `check_workspace` so the receipt can be built from the same call rather than
 /// re-querying the registries.
+/// The policy is a value passed in, not a process global, so one caller's
+/// choice cannot appear in another caller's result.
 pub fn check_workspace_with_coverage(
     root: &Path,
     graph: &CodeGraph,
+    policy: crate::deps::DepsPolicy,
 ) -> (Vec<GuardReport>, Coverage) {
-    let (reports, state) = check_workspace_and_state(root, graph);
+    let (reports, state) = check_workspace_and_state(root, graph, policy);
     (reports, coverage_of(graph, state))
 }
 
 /// Run the full workspace check: taint, edge cases, practices, dependencies.
 pub fn check_workspace(root: &Path, graph: &CodeGraph) -> Vec<GuardReport> {
-    check_workspace_and_state(root, graph).0
+    check_workspace_and_state(root, graph, crate::deps::DepsPolicy::default()).0
 }
 
-fn check_workspace_and_state(root: &Path, graph: &CodeGraph) -> (Vec<GuardReport>, DepsState) {
+fn check_workspace_and_state(
+    root: &Path,
+    graph: &CodeGraph,
+    policy: crate::deps::DepsPolicy,
+) -> (Vec<GuardReport>, DepsState) {
     let mut reports = check_workspace_without_deps(graph);
 
     // The one guard that is allowed to want the network, and only when asked.
-    if !crate::deps::deps_allowed_now() {
+    if !policy.enabled {
         // Manifest parsing is local and still runs, so the pinned versions are
         // known even offline. Only the advisory and latest-version lookups are
         // skipped, and the receipt says so.
@@ -524,13 +531,18 @@ mod liveness {
         let dir = scratch("skipstate");
         std::fs::write(dir.join("a.js"), "export const x = 1;\n").unwrap();
         let (graph, _) = indexer::build_graph(&dir);
-        let (_, cov) = check_workspace_with_coverage(&dir, &graph);
+        // An explicit policy, not the process default, so this test cannot race
+        // any other test that reads or writes a global.
+        let (_, cov) = check_workspace_with_coverage(
+            &dir,
+            &graph,
+            crate::deps::resolve_policy(Some(false), None, None),
+        );
         assert_eq!(
             cov.deps,
             DepsState::Skipped,
             "a skipped dependency check must not report itself as online"
         );
-        crate::deps::set_deps_enabled(true);
         std::fs::remove_dir_all(&dir).ok();
     }
 

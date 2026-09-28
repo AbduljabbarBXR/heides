@@ -892,66 +892,42 @@ pub fn require_advisories() -> bool {
 /// removes that class of leak entirely.
 ///
 /// Implementation note. The first draft held both locks across the closure and
-/// tried to detect nesting by testing whether they were already set. That
-/// deadlocks: the inner call blocks on a lock the outer one is holding, and the
-/// test suite hangs rather than fails. A depth counter with a separate mutex
-/// gives the same answer without ever holding a lock across the call, so
-/// nesting is detected before any of the state locks are taken.
-static SCOPED_DEPS: Mutex<Option<bool>> = Mutex::new(None);
-static SCOPED_REQUIRE: Mutex<Option<bool>> = Mutex::new(None);
-static SCOPE_DEPTH: Mutex<usize> = Mutex::new(0);
-
-/// True when a scope is already active, set and cleared without holding a lock
-/// across the call.
-fn scope_active() -> bool {
-    *SCOPE_DEPTH.lock().unwrap() > 0
+/// What the dependency guard is allowed to do for one run.
+///
+/// This is a value, not a setting. It is resolved once at the boundary, from
+/// the command line or from an MCP argument, and then passed down the call
+/// chain. It used to be three process globals, and the scoped version of those
+/// globals leaked between MCP callers and raced inside the test suite. A value
+/// cannot leak and cannot race, because there is nothing shared to leak.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DepsPolicy {
+    /// Whether the registry lookups may run at all.
+    pub enabled: bool,
+    /// Whether a run that did not consult the advisories must fail.
+    pub require_advisories: bool,
 }
 
-pub fn with_scoped_deps<R>(
-    deps_enabled: Option<bool>,
-    require_advisories: Option<bool>,
-    f: impl FnOnce() -> R,
-) -> R {
-    if scope_active() {
-        // A nested scope would restore the wrong value on the way out. Refuse to
-        // nest rather than corrupt the outer scope's state.
-        return f();
-    }
-    {
-        let mut d = SCOPED_DEPS.lock().unwrap();
-        let mut r = SCOPED_REQUIRE.lock().unwrap();
-        *d = deps_enabled;
-        *r = require_advisories;
-    }
-    *SCOPE_DEPTH.lock().unwrap() = 1;
-
-    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-
-    {
-        *SCOPED_DEPS.lock().unwrap() = None;
-        *SCOPED_REQUIRE.lock().unwrap() = None;
-        *SCOPE_DEPTH.lock().unwrap() = 0;
-    }
-    match out {
-        Ok(v) => v,
-        Err(e) => std::panic::resume_unwind(e),
+impl Default for DepsPolicy {
+    fn default() -> Self {
+        DepsPolicy {
+            enabled: deps_enabled(),
+            require_advisories: require_advisories(),
+        }
     }
 }
 
-/// True when the advisory lookup was actually permitted for this call.
-pub fn deps_allowed_now() -> bool {
-    if let Some(v) = *SCOPED_DEPS.lock().unwrap() {
-        return v;
+/// Pure resolution, so the decision can be tested without touching process
+/// state. `override_deps` and `override_require` are the command line or MCP
+/// arguments, `offline` is the raw HEIDES_OFFLINE value.
+pub fn resolve_policy(
+    override_deps: Option<bool>,
+    override_require: Option<bool>,
+    offline: Option<&str>,
+) -> DepsPolicy {
+    DepsPolicy {
+        enabled: override_deps.unwrap_or(!offline_env_value(offline)),
+        require_advisories: override_require.unwrap_or(false),
     }
-    deps_enabled()
-}
-
-/// Whether a security gate should fail for this call, scoped or global.
-pub fn require_advisories_now() -> bool {
-    if let Some(v) = *SCOPED_REQUIRE.lock().unwrap() {
-        return v;
-    }
-    require_advisories()
 }
 
 fn offline_env() -> bool {
@@ -1104,77 +1080,65 @@ pub fn check_offline(root: &Path) -> (Vec<DepReport>, bool) {
 mod tests {
     use super::*;
 
-    /// The leak this whole mechanism exists to prevent. Before the scoped
-    /// override, one MCP client passing `offline: true` called
-    /// `set_deps_enabled(false)`, which wrote a process global and never
-    /// restored it. In a server handling many requests that meant every later
-    /// request from every client silently ran without advisories, so a security
-    /// setting was changed by an unrelated argument.
+    /// The leak this release exists to prevent, now tested on a value.
+    ///
+    /// Before this, an MCP client passing `offline: true` wrote a process
+    /// global and never restored it, so every later request from every client
+    /// silently ran without advisories. The first fix scoped the global with
+    /// three more globals and a depth counter. That still shared state, and its
+    /// own tests raced each other under the default parallel test runner.
+    ///
+    /// The policy is now a plain value built from the arguments, so the
+    /// property is structural: one caller's policy cannot appear in another
+    /// caller's result because there is no shared state to carry it.
     #[test]
-    fn a_scoped_override_does_not_outlive_the_call() {
-        // Baseline: the global is on.
-        assert!(deps_allowed_now(), "default is on");
-        let v = with_scoped_deps(Some(false), Some(true), || {
-            assert!(!deps_allowed_now(), "the scope must apply inside");
-            assert!(require_advisories_now(), "and so must the strict gate");
-            7
-        });
-        assert_eq!(v, 7, "the closure result must come back out");
+    fn one_callers_policy_cannot_reach_another() {
+        let client_a = resolve_policy(Some(false), Some(true), None);
+        let client_b = resolve_policy(Some(true), Some(true), None);
+        assert!(!client_a.enabled, "client A asked for offline");
+        assert!(client_b.enabled, "client B did not");
+        // Independent values, so changing one cannot be observed in the other.
+        let mut a = client_a;
+        a.enabled = true;
+        a.require_advisories = false;
+        assert!(client_b.enabled, "B must be unaffected by A");
         assert!(
-            deps_allowed_now(),
-            "a scoped override must not outlive the call that set it"
+            client_a.require_advisories,
+            "A is a copy, not a shared handle"
         );
     }
 
     #[test]
-    fn a_scoped_override_restores_the_previous_value_not_a_default() {
-        // A process global set by the CLI flag must survive an MCP call that set
-        // its own value, or the restore silently flips the operator's choice.
-        set_deps_enabled(false);
-        with_scoped_deps(Some(true), None, || {
-            assert!(deps_allowed_now(), "the scope wins inside");
-        });
+    fn policy_resolution_is_pure_and_reads_nothing() {
+        // Default with no arguments and no environment: online, not a gate.
+        let d = resolve_policy(None, None, None);
+        assert!(d.enabled, "online by default");
         assert!(
-            !deps_allowed_now(),
-            "the pre-existing global must be restored, not reset to the default"
+            !d.require_advisories,
+            "not a gate by default on the CLI path"
         );
+        // The env var turns it off.
+        assert!(!resolve_policy(None, None, Some("1")).enabled);
+        // An explicit argument wins over the env var, in both directions.
+        assert!(resolve_policy(Some(true), None, Some("1")).enabled);
+        assert!(!resolve_policy(Some(false), None, None).enabled);
+        // require is opt in and never inferred.
+        assert!(resolve_policy(None, Some(true), None).require_advisories);
+    }
+
+    #[test]
+    fn the_cli_setters_still_control_the_process_default() {
+        // The CLI sets the default once at startup and never changes it again,
+        // so a global here is correct rather than dangerous.
         set_deps_enabled(true);
+        assert!(deps_enabled());
+        set_require_advisories(true);
+        assert!(require_advisories());
+        assert!(DepsPolicy::default().enabled);
+        assert!(DepsPolicy::default().require_advisories);
+        set_deps_enabled(true);
+        set_require_advisories(false);
     }
-
-    #[test]
-    fn a_nested_scope_is_refused_rather_than_corrupting_the_outer_one() {
-        with_scoped_deps(Some(false), Some(true), || {
-            assert!(!deps_allowed_now());
-            // Inner scope asks for the opposite. The guard refuses to nest
-            // rather than let the inner restore write the wrong value.
-            with_scoped_deps(Some(true), Some(false), || {
-                assert!(
-                    !deps_allowed_now(),
-                    "a refused nested scope must leave the outer one intact"
-                );
-            });
-            assert!(!deps_allowed_now(), "the outer scope is still in force");
-        });
-        assert!(deps_allowed_now(), "and it is released at the end");
-    }
-
-    #[test]
-    fn a_panic_inside_a_scope_still_releases_it() {
-        // Leaving a security setting flipped after a panic is the exact failure
-        // the scoped mechanism is meant to prevent, so the unwind path has to
-        // restore too.
-        let r = std::panic::catch_unwind(|| {
-            with_scoped_deps(Some(false), Some(true), || {
-                panic!("boom");
-            })
-        });
-        assert!(r.is_err(), "the panic must propagate");
-        assert!(
-            deps_allowed_now(),
-            "the override must be released even when the closure panicked"
-        );
-    }
-
     #[test]
     fn offline_env_accepts_the_documented_values_only() {
         assert!(offline_env_value(Some("1")));
