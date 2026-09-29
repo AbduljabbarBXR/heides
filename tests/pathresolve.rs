@@ -35,7 +35,10 @@ fn check_matches_across_working_directories() {
     assert!(ok_scan, "scan from parent must succeed");
 
     // Check from inside the repo, the invocation that used to read nothing.
-    let (ok_inside, inside) = run(&child, &["check", "."]);
+    // The fixture holds a critical mark_safe finding, so check exits non-zero.
+    // This test is about path resolution, not about the exit contract, so it
+    // passes --exit-zero and asserts the findings instead.
+    let (ok_inside, inside) = run(&child, &["check", ".", "--exit-zero"]);
     assert!(ok_inside, "check from inside must succeed");
     assert!(
         inside.contains("mark_safe") && inside.contains("view.py"),
@@ -43,7 +46,7 @@ fn check_matches_across_working_directories() {
     );
 
     // Check from the parent, the same index must report the same finding.
-    let (ok_parent, parent_out) = run(&parent, &["check", "child"]);
+    let (ok_parent, parent_out) = run(&parent, &["check", "child", "--exit-zero"]);
     assert!(ok_parent, "check from parent must succeed");
     assert!(
         parent_out.contains("mark_safe") && parent_out.contains("view.py"),
