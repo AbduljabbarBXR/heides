@@ -100,6 +100,28 @@ assert.ok(
   "a present binary must be executed, not replaced: " + out2
 );
 
+// The published tarball must not contain a platform binary.
+//
+// 0.19.0 shipped a baked-in Linux x64 binary, because a stale local build sat in
+// bin/ and `files: ["bin/"]` packed it. Every user on another platform then got
+// a launcher that would exec the wrong architecture. npm cannot unpublish with
+// a 2FA-bypass token, so this had to be fixed forward in 0.19.1.
+const pkgFiles = require("./package.json").files;
+assert.ok(
+  pkgFiles.includes("bin/heides.js"),
+  "the launcher must still be published"
+);
+assert.ok(
+  !pkgFiles.includes("bin/"),
+  "packing all of bin/ would ship whatever binary is lying around: " +
+    JSON.stringify(pkgFiles)
+);
+const npmignore = fs.readFileSync(path.join(__dirname, ".npmignore"), "utf8");
+assert.ok(
+  npmignore.includes("bin/heides"),
+  ".npmignore must exclude the platform binary as a second line of defence"
+);
+
 // The platform table must stay in install.js. Duplicating it here would create
 // two places to keep in sync, and the Termux android-arm64 case is exactly the
 // one that breaks quietly when it is copied.
