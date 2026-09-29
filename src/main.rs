@@ -562,7 +562,13 @@ fn main() -> ExitCode {
             match harmony::check_staged(&root, &graph, &patch_text) {
                 Ok(reports) => {
                     if reports.is_empty() {
-                        println!("patch is safe to apply. no conflicts detected.");
+                        // Name the guards explicitly. "safe" was a claim about
+                        // secrets, injections and edge cases when it only ever
+                        // meant "no textual conflict", and a hand reads that
+                        // word as the whole verdict.
+                        println!(
+                            "no conflicts detected, and the guards found nothing in the patched files."
+                        );
                     } else {
                         println!("{}", harmony::summarize(&reports));
                         for r in &reports {

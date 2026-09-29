@@ -31,6 +31,20 @@ pub(crate) const SOURCES: [(&str, &str); 16] = [
     ("python", r"\binput\s*\("),
     ("python", r"\bos\.environ\b"),
     ("python", r"\brequest\.(args|form|json|values)\b"),
+    // A python function parameter is deliberately NOT a source here, and the
+    // corpus gate is why. `read_config(path)` calling `open(path)` and
+    // `render_message(user, message)` calling `escape` then `mark_safe` are
+    // both idiomatic, correct, and flagged by a blanket parameter rule. It also
+    // fails the other way: a parameter is only untrusted if some caller passes
+    // user input, and this scanner does not know the callers yet, so the rule
+    // is simultaneously too noisy on internal helpers and too blind on real
+    // entry points.
+    //
+    // Doing it properly needs interprocedural argument tracking: taint a
+    // parameter only where a caller supplies a tainted argument, which is what
+    // `crate::interproc` already does for python function symbols. Until that
+    // exists the honest answer is a documented gap, not a false positive on
+    // every well written helper.
     ("php", r"\b\$_\(GET|POST|REQUEST|COOKIE|SERVER)\b"),
     ("go", r"\b(r\.URL\.Query|FormValue|os\.Getenv)\b"),
     (
@@ -586,9 +600,14 @@ pub fn scan_file(path: &Path, content: &str) -> Vec<TaintReport> {
             let mut reads_source = false;
             for (l, pat) in SOURCES {
                 if l == lang && regex_hit(pat, line) {
-                    reads_source = true;
-                    if let Some(var) = assigned_var(line) {
-                        tainted.push((var, i));
+                    if let Some(names) = source_taints(line, &lang) {
+                        reads_source = true;
+                        tainted.extend(names.into_iter().map(|n| (n, i)));
+                    } else {
+                        // A source read whose value is not bound to a name, a
+                        // bare `input()` passed inline for instance. The line
+                        // still reads untrusted input.
+                        reads_source = true;
                     }
                 }
             }
@@ -902,6 +921,131 @@ pub(crate) fn leading_spaces(line: &str) -> usize {
     line.chars().take_while(|c| *c == ' ' || *c == '\t').count()
 }
 
+/// Names the parameters of a python `def` line, so they can be treated as
+/// untrusted inputs. Drops defaults, annotations, `*args`/`**kwargs` markers and
+/// `self`/`cls`, and returns None when the line is not a def.
+///
+/// `self` and `cls` are excluded on purpose: they are not user input, and
+/// tainting every method body through `self` would bury the real findings under
+/// noise.
+///
+/// Returns `Some` for every line that is a def, including one with no
+/// parameters, so the caller can tell "a def that binds nothing" apart from
+/// "not a def at all".
+pub(crate) fn def_params(line: &str) -> Option<Vec<String>> {
+    let trimmed = line.trim_start();
+    let rest = trimmed
+        .strip_prefix("async ")
+        .unwrap_or(trimmed)
+        .trim_start();
+    let rest = rest.strip_prefix("def ")?;
+    let Some(open) = rest.find('(') else {
+        // A `def` with no parameter list. Not valid python, but the line still
+        // matches the source row, and it must report that it binds nothing
+        // rather than None, which the caller reads as "not a source" and would
+        // then satisfy the strict gate with no input in the file.
+        return Some(Vec::new());
+    };
+    // The closing paren has to be the *matching* one. Taking the first `)`
+    // truncates the list at the end of the first nested call, so
+    // `def f(a, b=call(x, y), c):` parses as two parameters and loses `c`.
+    let after = &rest[open + 1..];
+    let mut depth = 0i32;
+    let mut end = None;
+    for (idx, ch) in after.char_indices() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' if depth == 0 => {
+                end = Some(idx);
+                break;
+            }
+            ')' | ']' | '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    let inner = &after[..end?];
+    if inner.trim().is_empty() {
+        return Some(Vec::new());
+    }
+    let mut out = Vec::new();
+    for part in split_top_level_commas(inner) {
+        let name = part
+            .split(':')
+            .next()
+            .unwrap_or(part.as_str())
+            .split('=')
+            .next()
+            .unwrap_or(part.as_str())
+            .trim()
+            .trim_start_matches('*')
+            .to_string();
+        if name.is_empty() {
+            continue;
+        }
+        if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            continue;
+        }
+        if matches!(name.as_str(), "self" | "cls") {
+            continue;
+        }
+        out.push(name);
+    }
+    Some(out)
+}
+
+/// Split on commas that are not nested inside brackets, so a default of
+/// `f(a, b=call(x, y))` does not split in the wrong place.
+fn split_top_level_commas(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0i32;
+    for ch in s.chars() {
+        match ch {
+            '(' | '[' | '{' => {
+                depth += 1;
+                cur.push(ch);
+            }
+            ')' | ']' | '}' => {
+                depth -= 1;
+                cur.push(ch);
+            }
+            ',' if depth == 0 => {
+                out.push(cur.clone());
+                cur.clear();
+            }
+            _ => cur.push(ch),
+        }
+    }
+    if !cur.trim().is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// The names one source line introduces as tainted.
+///
+/// Python `def` lines are resolved first and on their own terms, because
+/// `assigned_var` cannot be consulted first for them. A def carrying a default
+/// or an annotation contains an `=`, so `assigned_var` returns a value and the
+/// parameter list is never read: `def f(x: int = 5)` returns `int`, the
+/// annotation type, which is never a value, and the real parameter `x` goes
+/// untainted. This helper is the single place that decides, so the
+/// interprocedural engine resolves a source line exactly the way the intra file
+/// pass does.
+///
+/// Note that a def only reaches here through the interprocedural path, where
+/// the parameter list is recovered to seed an argument. The intra file pass
+/// does not treat a def as a source, for the reason recorded on the python
+/// rows of `SOURCES`.
+pub(crate) fn source_taints(line: &str, lang: &str) -> Option<Vec<String>> {
+    if lang == "python"
+        && let Some(params) = def_params(line)
+    {
+        return Some(params);
+    }
+    assigned_var(line).map(|v| vec![v])
+}
+
 pub(crate) fn assigned_var(line: &str) -> Option<String> {
     let trimmed = line.trim();
     let eq = trimmed.find('=')?;
@@ -1000,6 +1144,142 @@ pub(crate) fn function_blocks(lines: &[&str], lang: &str) -> Vec<(usize, usize, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The regression this source row was written for. `def f(x: int = 5):`
+    /// contains an `=`, so `assigned_var` answers `int`, the annotation type,
+    /// and the parameter `x` was never tainted. Parameters with defaults are
+    /// the common case in real code, so this was the majority of handlers.
+    #[test]
+    fn a_parameter_with_an_annotation_and_default_is_still_tainted() {
+        let src = "def render(x: int = 5):\n    return str(x)\n";
+        assert_eq!(
+            source_taints(src, "python"),
+            Some(vec!["x".to_string()]),
+            "the parameter, not the annotation type"
+        );
+    }
+
+    #[test]
+    fn a_parameter_with_a_plain_default_is_still_tainted() {
+        let src = "def f(x=1):\n    return x\n";
+        assert_eq!(source_taints(src, "python"), Some(vec!["x".to_string()]));
+    }
+
+    #[test]
+    fn every_parameter_of_a_multi_parameter_def_is_tainted() {
+        // `def nested(a, b=(1, 2)):` returns `b` from assigned_var, which
+        // silently dropped `a`.
+        let src = "def nested(a, b=(1, 2)):\n    return a + b\n";
+        assert_eq!(
+            source_taints(src, "python"),
+            Some(vec!["a".to_string(), "b".to_string()]),
+            "both parameters, not just the defaulted one"
+        );
+    }
+
+    #[test]
+    fn a_zero_argument_def_binds_nothing() {
+        // A def with no parameters is not a source. Returning an empty vec
+        // rather than None is deliberate: the caller must be able to tell
+        // "this line is a def, and it binds nothing" from "this line is not a
+        // source at all", and must not set reads_source for it.
+        assert_eq!(
+            source_taints("def notadef:", "python"),
+            Some(vec![]),
+            "a def with no parameters must not claim to read input"
+        );
+    }
+
+    #[test]
+    fn def_params_handles_the_shapes_real_python_uses() {
+        assert_eq!(def_params("def f(cmd):"), Some(vec!["cmd".to_string()]));
+        assert_eq!(
+            def_params("async def f(url):"),
+            Some(vec!["url".to_string()]),
+            "async def is a def"
+        );
+        assert_eq!(
+            def_params("def f(self, value):"),
+            Some(vec!["value".to_string()]),
+            "self is not user input"
+        );
+        assert_eq!(
+            def_params("def f(cls, value):"),
+            Some(vec!["value".to_string()]),
+            "cls is not user input"
+        );
+        assert_eq!(
+            def_params("def f(a, b, c):"),
+            Some(vec!["a".to_string(), "b".to_string(), "c".to_string()])
+        );
+        assert_eq!(def_params("x = 1"), None, "not a def");
+        assert_eq!(def_params("class C:"), None, "not a def");
+    }
+
+    #[test]
+    fn def_params_drops_star_args_and_keeps_their_names() {
+        assert_eq!(
+            def_params("def f(a, *args, **kwargs):"),
+            Some(vec![
+                "a".to_string(),
+                "args".to_string(),
+                "kwargs".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn def_params_splits_on_top_level_commas_only() {
+        // A nested default must not be split, or the tail of it is mistaken
+        // for a parameter name.
+        let got = def_params("def f(a, b=call(x, y), c):").expect("a def");
+        assert!(
+            got.contains(&"a".to_string()) && got.contains(&"c".to_string()),
+            "the outer parameters survive: {got:?}"
+        );
+        assert!(
+            !got.iter().any(|n| n.contains('(') || n.contains(')')),
+            "no fragment of a nested default may become a name: {got:?}"
+        );
+    }
+
+    /// The decision this test pins, stated as the limit it is. A python
+    /// parameter is not a source, so `def go(cmd): os.system(cmd)` is silent
+    /// in the intra file pass even though it is the shape we would want to
+    /// catch. It is caught instead when a caller passes a tainted argument,
+    /// which is what `crate::interproc` does. Asserting the opposite would
+    /// re-introduce the false positives on `read_config(path)` and on
+    /// `escape`-then-`mark_safe` that the clean corpus forbids.
+    #[test]
+    fn a_python_parameter_alone_is_not_a_source() {
+        let src = "def go(cmd):\n    os.system(cmd)\n";
+        let reports = scan_file(std::path::Path::new("a.py"), src);
+        assert!(
+            !reports
+                .iter()
+                .any(|r| r.message.contains("sink") || r.message.contains("command")),
+            "a parameter is not untrusted on its own, so this must stay quiet: {:?}",
+            reports
+        );
+    }
+
+    /// The vacuous-gate guard, kept because it is the reason a def with no
+    /// parameters reports `Some(vec![])` rather than `None`. A def that claims
+    /// to be a source while binding nothing would satisfy the strict gate with
+    /// no input anywhere in the file, opening SSRF and NoSQL findings out of
+    /// nothing.
+    #[test]
+    fn a_zero_argument_def_does_not_open_a_strict_finding() {
+        let src = "def go():\n    requests.get(url)\n";
+        let reports = scan_file(std::path::Path::new("a.py"), src);
+        assert!(
+            !reports
+                .iter()
+                .any(|r| r.message.contains("SSRF") || r.message.contains("NoSQL")),
+            "a def with no parameters carries no input, so there is no flow to report: {:?}",
+            reports
+        );
+    }
 
     #[test]
     fn detects_sql_taint_js() {

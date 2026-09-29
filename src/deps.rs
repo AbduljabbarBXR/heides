@@ -441,81 +441,197 @@ fn parse_requirements_txt(text: &str) -> Vec<Dependency> {
     deps
 }
 
-/// Parse pyproject.toml project dependencies, multiline arrays and the
-/// single line inline array form both work.
-fn parse_pyproject_toml(text: &str) -> Vec<Dependency> {
-    let mut deps = Vec::new();
-    let mut in_deps = false;
-    for line in text.lines() {
-        let t = line.trim();
-        if t.starts_with('[') && t.ends_with(']') {
-            in_deps = t.starts_with("[project.dependencies]");
-            continue;
-        }
-        if !in_deps {
-            continue;
-        }
-        if t.starts_with(']') || t.is_empty() {
-            in_deps = false;
-            continue;
-        }
-        // Inline array lines carry every entry in brackets on one line,
-        // peel them and treat each quoted entry as its own requirement.
-        let inner = if t.starts_with("dependencies = [") {
-            t.trim_start_matches("dependencies = [")
-                .trim_end_matches(']')
-                .trim_end_matches(',')
-                .to_string()
-        } else {
-            t.trim_end_matches(',').to_string()
-        };
-        for entry in split_quoted_list(&inner) {
-            if let Some((name, version)) = split_python_req(&entry) {
-                deps.push(Dependency {
-                    name,
-                    version,
-                    ecosystem: "PyPI",
-                });
-            }
-        }
-    }
-    deps
+/// Which pyproject section a line belongs to, and what a key inside it means.
+///
+/// The section decides how a `key = value` line is read, and getting that
+/// wrong is the whole reason this parser needed rewriting. In `[project]` a
+/// bare `name = "app"` is the project name, not a dependency, so only
+/// `dependencies` may be read there. In `[project.dependencies]` every key is a
+/// requirement. Treating `[project]` as a requirement table would invent a
+/// dependency called `name`.
+#[derive(Clone, Copy, PartialEq)]
+enum PySection {
+    Other,
+    /// `[project]`: only the `dependencies` key holds requirements.
+    Project,
+    /// `[project.dependencies]`: every key is one requirement.
+    RequirementTable,
+    /// `[project.optional-dependencies]`, `[project.dependency-groups]`: every
+    /// key names a group whose value is a list of requirements.
+    ListGroups,
+    /// `[build-system]`: only `requires`.
+    BuildSystem,
 }
 
-/// Split a python style list body into its quoted string entries.
-fn split_quoted_list(body: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut quote = None;
-    for ch in body.chars() {
-        match quote {
-            Some(q) => {
-                if ch == q {
-                    quote = None;
-                } else {
-                    cur.push(ch);
-                }
-            }
-            None => {
-                if ch == '\'' || ch == '"' {
-                    quote = Some(ch);
-                } else if ch == ',' {
-                    let entry = cur.trim().to_string();
-                    if !entry.is_empty() {
-                        out.push(entry);
-                    }
-                    cur.clear();
-                } else {
-                    cur.push(ch);
-                }
-            }
+fn py_section(header: &str) -> PySection {
+    match header {
+        "[project]" => PySection::Project,
+        "[project.dependencies]" => PySection::RequirementTable,
+        "[build-system]" | "[build-system.requires]" => PySection::BuildSystem,
+        h if h.starts_with("[project.optional-dependencies")
+            || h.starts_with("[project.dependency-groups") =>
+        {
+            PySection::ListGroups
+        }
+        _ => PySection::Other,
+    }
+}
+
+/// Strip one layer of matching surrounding quotes, if present.
+fn unquote(s: &str) -> Option<String> {
+    let t = s.trim();
+    for q in ['"', '\''] {
+        if t.len() >= 2 && t.starts_with(q) && t.ends_with(q) {
+            return Some(t[1..t.len() - 1].to_string());
         }
     }
-    let entry = cur.trim().to_string();
-    if !entry.is_empty() {
-        out.push(entry);
+    None
+}
+
+/// Every quoted string inside a bracketed list, in order, brackets discarded.
+///
+/// The brackets have to come off first. The first version appended the raw body
+/// including `[` and `]`, so `["a==1", "b==2"]` yielded the entries
+/// `[a==1` and `b==2]`. The first then had its name truncated at the bracket to
+/// nothing and was discarded, so a two dependency file reported one, and the
+/// second carried a trailing `]` in its version, which was sent to the advisory
+/// API as if it were part of a semver.
+fn quoted_entries(list: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut saw_quote = false;
+    for ch in list.chars() {
+        match quote {
+            Some(q) if ch == q => {
+                out.push(std::mem::take(&mut cur));
+                quote = None;
+            }
+            Some(_) => cur.push(ch),
+            None if ch == '"' || ch == '\'' => {
+                quote = Some(ch);
+                saw_quote = true;
+            }
+            // A bracket outside quotes is punctuation, never content. Anything
+            // else outside quotes is whitespace or a trailing comma.
+            None => {}
+        }
     }
+    // A quote left open means the list was truncated. Discard the fragment
+    // rather than reading half a requirement as a whole one.
+    let _ = saw_quote;
     out
+}
+
+fn push_py_req(deps: &mut Vec<Dependency>, entry: &str) {
+    if let Some((name, version)) = split_python_req(entry) {
+        deps.push(Dependency {
+            name,
+            version,
+            ecosystem: "PyPI",
+        });
+    }
+}
+
+fn parse_pyproject_toml(text: &str) -> Vec<Dependency> {
+    let mut deps: Vec<Dependency> = Vec::new();
+    let lines: Vec<&str> = text.lines().collect();
+    let mut section = PySection::Other;
+    // Set while a `key = [` line is still collecting its entries below.
+    let mut collecting = false;
+
+    for (idx, raw) in lines.iter().enumerate() {
+        let t = raw.trim();
+
+        // A header only ends a section when we are not in the middle of a
+        // multi line list, or a `]` inside the list would be read as a header.
+        if !collecting && t.starts_with('[') && t.ends_with(']') && t.len() > 2 {
+            section = py_section(t);
+            continue;
+        }
+
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+
+        if collecting {
+            if t.contains(']') {
+                collecting = false;
+            }
+            if let Some(entry) = unquote(t.trim_end_matches(']').trim().trim_end_matches(',')) {
+                push_py_req(&mut deps, &entry);
+            }
+            continue;
+        }
+
+        if section == PySection::Other {
+            continue;
+        }
+
+        // A bare quoted entry, the shape a requirements table also accepts.
+        // The trailing comma is part of the TOML list, not of the requirement,
+        // and unquoting before stripping it never matches.
+        if let Some(entry) = unquote(t.trim_end_matches(',').trim()) {
+            push_py_req(&mut deps, &entry);
+            continue;
+        }
+
+        let Some((key, value)) = t.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim();
+
+        // PEP 735 group includes are references to other groups, not
+        // requirements. Reading one as a dependency would report `dev` as a
+        // package that needs an advisory lookup.
+        if key == "include-group" {
+            continue;
+        }
+
+        // Which keys carry requirements depends on the section.
+        let wanted = match section {
+            PySection::Project => key == "dependencies",
+            PySection::BuildSystem => key == "requires",
+            PySection::RequirementTable | PySection::ListGroups => true,
+            PySection::Other => false,
+        };
+        if !wanted {
+            continue;
+        }
+
+        if value.starts_with('[') {
+            if value.contains(']') {
+                for entry in quoted_entries(value) {
+                    push_py_req(&mut deps, &entry);
+                }
+            } else {
+                // A multi line list. Take the rest of the document up to the
+                // closing bracket and pull every quoted entry out of it, which
+                // avoids tracking continuation state per line.
+                let mut body = value.to_string();
+                for cont in lines.iter().skip(idx + 1) {
+                    let c = cont.trim();
+                    body.push(' ');
+                    body.push_str(c);
+                    if c.contains(']') {
+                        break;
+                    }
+                }
+                for entry in quoted_entries(&body) {
+                    push_py_req(&mut deps, &entry);
+                }
+                collecting = false;
+            }
+        } else if let Some(v) = unquote(value) {
+            // `name = "version"`, the shape a requirements table uses.
+            push_py_req(&mut deps, &format!("{key}=={v}"));
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    deps.retain(|d| seen.insert(d.name.clone()));
+    deps
 }
 
 /// Read one xml tag pair from a single line, so dependency blocks that
@@ -1281,6 +1397,88 @@ mod tests {
         assert_eq!(deps.len(), 2);
         assert_eq!(deps[1].name, "sqlalchemy");
         assert_eq!(deps[1].version, "2.0.29");
+    }
+
+    /// The fix this release exists for. A modern pyproject puts dependencies
+    /// as a KEY inside `[project]`, and the old parser only read the legacy
+    /// table, so the file was located, opened, parsed to nothing, and then
+    /// reported as "no dependency manifests found" while naming the very file
+    /// it had just found. That silently disabled dependency checking for the
+    /// whole PyPI ecosystem.
+    #[test]
+    fn parses_the_modern_pep621_project_dependencies() {
+        let toml = "[project]\nname = \"app\"\nversion = \"1.0.0\"\ndependencies = [\n  \"attrs>=23.1.0\",\n  \"httpx==0.27.0\",\n]\n";
+        let deps = parse_pyproject_toml(toml);
+        assert_eq!(deps.len(), 2, "the modern form must yield dependencies");
+        assert_eq!(deps[0].name, "attrs");
+        assert_eq!(deps[0].version, ">=23.1.0");
+        assert_eq!(deps[0].ecosystem, "PyPI");
+        assert_eq!(deps[1].name, "httpx");
+        assert_eq!(
+            deps[1].version, "0.27.0",
+            "an exact pin keeps a clean version for the OSV query"
+        );
+    }
+
+    #[test]
+    fn parses_pep621_on_a_single_line() {
+        let toml = "[project]\nname = \"app\"\ndependencies = [\"django==4.2.11\", \"requests>=2.31.0\"]\n";
+        let deps = parse_pyproject_toml(toml);
+        assert_eq!(deps.len(), 2, "a single line list must parse too");
+        assert_eq!(deps[0].name, "django");
+        assert_eq!(deps[1].name, "requests");
+    }
+
+    #[test]
+    fn parses_pep735_optional_dependency_groups() {
+        // These are real requirements too, and they ship in most modern repos.
+        let toml = "[project]\nname = \"app\"\n\n[project.optional-dependencies]\ntest = [\"pytest==8.0.0\"]\ndocs = [\"sphinx==7.2.6\"]\n";
+        let deps = parse_pyproject_toml(toml);
+        assert_eq!(deps.len(), 2, "{deps:?}");
+        assert!(deps.iter().any(|d| d.name == "pytest"), "{deps:?}");
+        assert!(deps.iter().any(|d| d.name == "sphinx"), "{deps:?}");
+    }
+
+    #[test]
+    fn parses_build_system_requirements() {
+        let toml = "[build-system]\nrequires = [\"setuptools>=68\", \"wheel\"]\nbuild-backend = \"setuptools.build_meta\"\n";
+        let deps = parse_pyproject_toml(toml);
+        assert!(
+            deps.iter()
+                .any(|d| d.name == "setuptools" && d.version == ">=68"),
+            "the pinned build requirement must be reported: {deps:?}"
+        );
+        // `wheel` carries no version, so there is no pinned version to look
+        // up. Dropping it matches how requirements.txt already behaves, and
+        // inventing a version would query the advisory service for something
+        // that was never pinned.
+        assert!(
+            !deps.iter().any(|d| d.name == "wheel"),
+            "an unpinned requirement is not a pinnable version: {deps:?}"
+        );
+    }
+
+    /// The legacy table must keep working. It is still what a large amount of
+    /// published code uses, and quietly regressing it would be worse than the
+    /// bug being fixed.
+    #[test]
+    fn the_legacy_dependencies_table_still_parses() {
+        let toml = "[project]\nname = \"app\"\n\n[project.dependencies]\ndjango = \"4.2.11\"\n";
+        let deps = parse_pyproject_toml(toml);
+        assert_eq!(deps.len(), 1, "{deps:?}");
+        assert_eq!(deps[0].name, "django");
+    }
+
+    /// An unrelated tool table must not be mined for dependencies. `[tool.poetry]`
+    /// has its own layout, and scraping it would invent versions.
+    #[test]
+    fn an_unrelated_table_yields_nothing() {
+        let toml = "[project]\nname = \"app\"\n\n[tool.ruff]\nline-length = 100\n";
+        let deps = parse_pyproject_toml(toml);
+        assert!(
+            deps.is_empty(),
+            "a tool table is not a dependency table: {deps:?}"
+        );
     }
 
     #[test]

@@ -354,9 +354,17 @@ fn battle_serial() {
     let safe_patch = "diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -2,2 +2,2 @@\n-    println!(\"{}\", x);\n+    println!(\"value {}\", x);\n";
     b.write("safe.patch", safe_patch);
     let (out, _, _) = b.cli(&["staged", "safe.patch"]);
+    // Asserted as "not blocked" rather than as a specific success string. The
+    // success line only prints when the guards find nothing in the patched
+    // content, and this fixture carries a real unwrap on purpose. What the
+    // test protects is that a body only change is not rejected.
+    b.check("staged allows a body only change", !out.contains("blocker"));
+    // The success line used to read "patch is safe to apply", which was a
+    // claim about secrets and injections that the run never made. It now says
+    // what it actually did, and the guards' verdict is what carries the weight.
     b.check(
-        "staged allows a body only change",
-        out.contains("safe to apply"),
+        "staged does not claim the patch is safe, only that nothing conflicts",
+        !out.contains("safe to apply"),
     );
 
     // 10. Staged apply: deleting a called file must be blocked
@@ -372,10 +380,7 @@ fn battle_serial() {
     let new_patch = "diff --git a/src/fresh.rs b/src/fresh.rs\n--- /dev/null\n+++ b/src/fresh.rs\n@@ -0,0 +1,2 @@\n+pub fn fresh() -> i32 { 7 }\n+pub fn fresh2() -> i32 { 8 }\n";
     b.write("new.patch", new_patch);
     let (out, _, _) = b.cli(&["staged", "new.patch"]);
-    b.check(
-        "staged accepts a brand new file",
-        out.contains("safe to apply") || out.contains("no conflicts"),
-    );
+    b.check("staged accepts a brand new file", !out.contains("blocker"));
 
     // 11b. Staged apply: a rename that updates every caller inside the same
     // patch is safe. A real agent produced exactly this shape on a real
@@ -383,9 +388,12 @@ fn battle_serial() {
     let rename_patch = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,1 +1,1 @@\n-pub fn add(a: i32, b: i32) -> i32 { a + b }\n+pub fn compute(a: i32, b: i32) -> i32 { a + b }\ndiff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -2,1 +2,1 @@\n-    let x = add(1, 2);\n+    let x = compute(1, 2);\n";
     b.write("rename.patch", rename_patch);
     let (out, _, _) = b.cli(&["staged", "rename.patch"]);
+    // The in patch caller update is the whole point of this case, so it must
+    // not be blocked. The fixture keeps a real unwrap in the patched content,
+    // so the run reports a guard warning rather than the clean success line.
     b.check(
         "staged allows a rename with every caller updated in one patch",
-        out.contains("safe to apply"),
+        !out.lines().any(|l| l.contains("[blocker]")),
     );
 
     // 11c. The same rename without the caller update must block.
@@ -404,7 +412,7 @@ fn battle_serial() {
     let (out, _, _) = b.cli(&["staged", "route.patch"]);
     b.check(
         "staged allows editing a route next to sibling POST exports",
-        out.contains("safe to apply"),
+        out.contains("no conflicts detected"),
     );
 
     // 12. Staged apply: bad diff is rejected

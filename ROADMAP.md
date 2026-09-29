@@ -99,9 +99,11 @@ because both meant whole languages were invisible rather than a rule being weak:
 ### 2.5 Dependency ecosystem
 
 `deps.rs` parses Cargo, package.json, go.mod, requirements/pyproject, pom.xml,
-composer. Missing: Ruby (Gemfile.lock), .NET (packages.lock), Swift
-(Package.resolved), Gradle, Dart (pubspec), transitive resolution from lockfiles,
-and offline OSV caching (it queries `api.osv.dev` live).
+composer. `pyproject.toml` now reads PEP 621, PEP 735 and `[build-system]
+requires`, which it previously missed entirely. Missing: Ruby (Gemfile.lock),
+.NET (packages.lock), Swift (Package.resolved), Gradle, Dart (pubspec),
+transitive resolution from lockfiles, and offline OSV caching (it queries
+`api.osv.dev` live).
 
 ---
 
@@ -139,7 +141,10 @@ missing rule: a guard that silently reports nothing.
 | `check` reports what it analysed: files, languages, and what it skipped and why, so silence is never mistaken for a clean repo. Prints on every run, clean included, because a receipt you only see when something is wrong is a warning and not a receipt | shipped. `harmony::Coverage`, 5 tests, verified on the release binary across a clean, a Rust-only, a Ruby-only and a findings workspace |
 | `--no-deps` and `HEIDES_OFFLINE` so `check` stops doing per-dependency HTTP nobody asked for | shipped in 0.16.2, 217s to 2s on this repo, still reads all 94 pinned versions offline, honoured by `harmony.check` and `harmony.report` over MCP. Corrected in 0.16.3: the summary line carries the posture, `--require-advisories` exits non-zero when advisories did not run, the posture is a value rather than a process global, MCP is fail closed, an unreachable advisory service no longer reports dependencies as clean, and advisory coverage is tracked separately from the update reminder so a missed reminder cannot fail a security gate |
 | Findings are filtered, not merely emitted: collapse by message, provable separated from advisory, `--all` to expand, MCP defaults collapsed | shipped in 0.17.0. 185 lines to 42 on this repo, the summary line still counts everything, `--no-advice` drops the advisory section, MCP folds unless asked not to |
-| The `unwrap` rule is a substring match, not a proof. Skip `#[cfg(test)]` and `tests/`, name the enclosing function, and state the limitation in `RULES.md` instead of claiming proof | shipped in 0.18.0. Test code is silent, 152 findings down to the real ones, each naming its function. `RULES.md` now says plainly it is a syntactic match, because heides has no type information |
+| The `unwrap` rule is a substring match, not a proof. Skip `#[cfg(test)]` and `tests/`, and state the limitation in `RULES.md` instead of claiming proof | shipped in 0.18.0. Test code is silent, 152 findings down to the real ones. `RULES.md` says plainly it is a syntactic match, because heides has no type information. Naming the enclosing function was tried and reverted: it made every message unique and stopped identical findings folding, turning one line of 152 into 152 lines |
+| `npm install heides` installed the launcher but not the binary, so every command failed with `binary not found`, and the advice to reinstall was the operation that had just failed | shipped in 0.19.0. The launcher runs `install.js` itself when the binary is absent. The platform table stays in `install.js`, so the Termux case has one owner |
+| `pyproject.toml` in the modern `[project]` form parsed to nothing and was then reported as no manifest found, silently disabling PyPI dependency checking | shipped in 0.19.0. PEP 621, PEP 735 and `[build-system] requires` are read; the legacy table is still covered by a test |
+| A python function parameter reaching a sink, with no source, went unreported | **not shipped, deliberately.** A blanket "every parameter is untrusted" rule was implemented and reverted: the clean corpus gate flagged idiomatic `read_config(path)` calling `open(path)`, and an `escape`-then-`mark_safe` helper. It is also too blind where it matters, because a parameter is only untrusted if a caller passes user input. Needs interprocedural argument seeding, which `interproc.rs` already does for python symbols |
 | Decide whether unprovable style advice may speak in the same voice as a proven hazard | shipped in 0.17.0. Advice is a separate section labelled `advice, unproven and unranked`, and `--no-advice` removes it |
 
 **The general rule this section exists to enforce:** heides must be fully useful
