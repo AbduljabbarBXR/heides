@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::spine::CodeGraph;
 use crate::taint::{
     SINKS, SOURCES, TaintReport, assigned_var, function_blocks, leading_spaces, make_report,
-    regex_hit, strict_class, strict_hit, strict_sinks,
+    regex_hit, source_taints, strict_class, strict_hit, strict_sinks,
 };
 
 const MAX_HOPS: usize = 8;
@@ -510,12 +510,17 @@ fn analyze(fi: &mut FnInfo, lines: &[&str]) {
     for &li in &fi.body {
         let line = lines.get(li).copied().unwrap_or("");
         let lno = li + 1;
-        // Source reads assign a tainted variable.
+        // Source reads bind a tainted variable. `source_taints` for the same
+        // reason as below: a python def binds its parameters, and asking
+        // `assigned_var` for one yields the annotation type of a defaulted
+        // parameter instead of any name.
         if line_is_source(line, &fi.lang)
-            && let Some(v) = assigned_var(line)
+            && let Some(names) = source_taints(line, &fi.lang)
         {
-            source_vars.insert(v.clone());
-            tainted.entry(v).or_insert(usize::MAX);
+            for v in names {
+                source_vars.insert(v.clone());
+                tainted.entry(v).or_insert(usize::MAX);
+            }
         }
         // Sinks reached by any tainted name on this line.
         for (l, pat, kind) in SINKS {
@@ -737,12 +742,19 @@ pub fn run_workspace(graph: &CodeGraph, contents: &HashMap<String, String>) -> V
             let line = ls.get(li).copied().unwrap_or("");
             let lno = li + 1;
             // A source read on this line makes its assigned variable tainted.
+            // `source_taints` rather than `assigned_var` directly, because a
+            // python def carries its parameters rather than an assignment, and
+            // asking `assigned_var` for one returns the annotation type of a
+            // defaulted parameter rather than any name. The two layers resolve
+            // a source line identically because they call the same function.
             if line_is_source(line, &fi.lang)
-                && let Some(v) = assigned_var(line)
+                && let Some(names) = source_taints(line, &fi.lang)
             {
-                tainted
-                    .entry(v.clone())
-                    .or_insert_with(|| prov_source(&fi.key.0, lno));
+                for v in names {
+                    tainted
+                        .entry(v)
+                        .or_insert_with(|| prov_source(&fi.key.0, lno));
+                }
             }
             // Resolve local calls on this line and propagate.
             let callees_here: Vec<String> = calls_by_line

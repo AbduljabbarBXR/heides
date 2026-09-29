@@ -184,6 +184,13 @@ Or install from npm, no Rust toolchain needed:
 npm install -g heides
 ```
 
+If the binary is missing when you run `heides`, the launcher downloads it on the spot and says
+so. This is not a fallback you should ever need: npm 11.16 and newer block dependency
+lifecycle scripts by default, and on npm 11.17 the `--allow-scripts` flag aborts the install
+outright, so the postinstall hook that fetches the binary never runs. Rather than tell you to
+reinstall, which is the thing that just failed, the launcher runs the same installer the hook
+would have. The platform table lives in `install.js`, so there is one copy of it.
+
 Or with cargo:
 
 ```sh

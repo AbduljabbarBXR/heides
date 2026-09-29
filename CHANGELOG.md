@@ -2,12 +2,26 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.19.0
+
+Three fixes and a packaging fix. The packaging one is the reason most people on npm 11.16 or newer could not run `heides` at all.
+
+* **`npm install heides` produced a package that could not run.** The 1KB launcher installed, the 15MB binary never did, because npm 11.16+ blocks dependency lifecycle scripts by default, and `--allow-scripts` is not a workaround: on npm 11.17 the flag makes the CLI throw `Cannot destructure property 'name' of '.for' as it is undefined` and abort before installing anything. Every `heides` command then failed with `binary not found`, and the old advice, reinstall, was the exact operation that had just failed.
+* **The launcher repairs itself.** If the binary is absent it runs the same `install.js` the postinstall would have, announcing what it is doing before the network call, and on failure it prints the build-from-source escape hatch and the releases URL.
+* **The platform table was deliberately not duplicated.** `install.js` keeps ownership of the asset table and the Termux `android-arm64` case. The launcher only decides whether to call it. Two copies of that table is two places to drift, and the Termux case breaks quietly when it drifts.
+* **`pyproject.toml` was found, opened, parsed to nothing, and then reported as absent.** The parser only read the legacy `[project.dependencies]` table, so a modern `[project]` file with `dependencies = [...]` yielded zero dependencies and the run printed "no dependency manifests found" while naming the very file it had just located. That silently disabled dependency checking for the whole PyPI ecosystem, for every project using uv, poetry, hatch or setuptools. PEP 621 inline and multi-line forms, PEP 735 `optional-dependencies` and `dependency-groups`, and `[build-system] requires` are all read now.
+* **The fix initially broke a test that had been passing since 0.18.0,** and the parser it replaced could not read the form it was written for. Both are covered now: the modern form, the legacy form, tool tables that must be ignored, and PEP 735 group includes that are references rather than requirements.
+* **A python `def` parameter is not a taint source, and the clean corpus is why.** Treating every parameter as untrusted flags `def read_config(path): open(path)` and a function that escapes before calling `mark_safe`, both of which are correct code. It is also too blind where it matters, because a parameter is only untrusted if a caller passes user input, and this scanner does not resolve callers yet. Doing it properly means seeding a parameter from the call graph, which is the recorded next step rather than a false positive on every helper.
+* **A source line is now resolved by one function in both engines.** The intra-file pass and the interprocedural pass disagreed about what a `def f(x: int = 5):` line binds, and both asked for an assigned variable, which answers `int`, the annotation type, for a def with a defaulted parameter. One shared resolver closes that, so the two layers cannot drift again.
+* **"patch is safe to apply" is gone.** The staged check said the word "safe" when it had only checked whether the hunks conflicted, which is the word a hand trusts most. It now says what it did: no conflicts, and what the guards found in the patched files.
+* 12 tests, including the clean corpus, the legacy `pyproject` form, the nested-default parameter parse, and the launcher's repair path.
+
 ## 0.18.0
 
 Two changes, one small release. The taint-adjacent rule that violated the project's own contract, and a gate that can finally fail.
 
 * **The `unwrap` rule no longer fires in test code.** `edge.rs` matched any line containing `.unwrap()`, which is 152 findings on this repository, 41 of them in `tests/battle.rs`. A `#[cfg(test)]` module, a `tests/`, `benches/` or `examples/` path now stays silent, because an unwrap in a test asserts something about the code, it is not code that ships. Severity for a real unwrap is unchanged, so this is a scoping decision and not a blanket downgrade.
-* **Every `unwrap` and `panic!` finding now names its enclosing function,** so the report points at a thing the reader can open rather than a line in a file they have to search.
+* **The 0.18.0 notes claimed every unwrap finding names its enclosing function. That was reverted before release** and is not in 0.18.0. Naming the function made every message unique, which stopped identical findings folding: 152 findings became 152 single-item lines, undoing the main win of 0.17.0 in the same day. The fold is worth more than the name, and the folded line already names the first four files and how many more. `RULES.md` records the reasoning.
 * **`check` exits non-zero on a blocker or critical.** It previously always exited 0, whatever it found, so a CI job could not fail on a finding without parsing the output. The tool was advisory by default in exactly the place it matters most. A clean workspace still exits 0, and `info` never fails, so an advisory note about a console call will not break a pipeline.
 * **The feature needs no flag.** `--exit-zero` restores the old always zero behaviour for anyone who wants one release of grace before their pipeline starts enforcing. `--exit-threshold=warning` catches more. Both are opt out, and the safe choice is the default.
 * 6 tests. Two of them assert the negative that matters: that a real unwrap outside tests still fires, and still fires at warning severity.

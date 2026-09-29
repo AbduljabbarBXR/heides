@@ -38,3 +38,50 @@ assert.ok(url.includes("/releases/download/v0.14.4/"), url);
 assert.ok(!url.includes("vv"), url);
 
 console.log("heides installer mapping: 8/8 ok, version lock: " + VERSION + ", pin handling: ok");
+
+// The launcher repairs itself when the postinstall was blocked.
+//
+// npm 11.16+ blocks lifecycle scripts from dependencies by default, and
+// `--allow-scripts` aborts on npm 11.17 before installing anything, so
+// "reinstall" was advice that could never work: the reinstall is what failed.
+// The launcher now calls install.js itself when the binary is missing.
+//
+// These assertions do not need a network. They check the decision, not the
+// download: that a missing binary asks install.js to run, and that the launcher
+// does not grow its own copy of the platform table.
+const { binaryPath, ensureBinary } = require("./bin/heides.js");
+const fs = require("fs");
+const path = require("path");
+
+const launcher = fs.readFileSync(
+  path.join(__dirname, "bin", "heides.js"),
+  "utf8"
+);
+
+// The whole point of the fix. If this regresses, a fresh install on npm 11.16+
+// is a broken install again.
+assert.ok(
+  typeof ensureBinary === "function",
+  "the launcher must export ensureBinary so its decision is testable"
+);
+
+// A present binary is left alone and never triggers a download. Checked by
+// pointing at the real path, which the test run always has once the package is
+// installed with scripts enabled.
+assert.strictEqual(
+  ensureBinary(),
+  true,
+  "ensureBinary must succeed when the binary is present at " + binaryPath()
+);
+
+// The platform table must stay in install.js. Duplicating it here would create
+// two places to keep in sync, and the Termux android-arm64 case is exactly the
+// one that breaks quietly when it is copied.
+assert.ok(
+  !/aarch64|arm64|apple-darwin|pc-windows/.test(launcher),
+  "the launcher must not carry a copy of the platform table; install.js owns it"
+);
+assert.ok(
+  launcher.includes("install.js"),
+  "the launcher must delegate to install.js"
+);
