@@ -10,10 +10,16 @@ One binary. No cloud, no model, no account. It runs on a laptop, on a server, in
 
 ```sh
 heides scan                 # map the codebase once
-heides check                # run every guard
+heides check                # run every guard, exit non-zero on a blocker or critical
 heides staged patch.diff    # judge a patch before it lands
 heides mcp                  # expose it to any MCP client
 ```
+
+`check` is a gate, not a report. It exits non-zero when it finds a blocker or a
+critical, so CI fails on a real SQL injection or a known CVE without anyone
+parsing the output. A clean workspace exits 0, and advisory findings never fail
+a pipeline. `--exit-zero` restores the old always zero behaviour, and
+`--exit-threshold=warning` makes it stricter.
 
 Every guard except one is local analysis. The dependency guard is the only one
 that queries a registry, and it says so instead of doing it behind your back:

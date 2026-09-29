@@ -344,6 +344,28 @@ pub fn check_staged(
 }
 
 /// Summarize reports by severity for a quick overview line.
+static EXIT_ZERO: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+static EXIT_THRESHOLD: std::sync::Mutex<Threshold> = std::sync::Mutex::new(Threshold::Critical);
+
+/// Set by `--exit-zero`. The command line reads these once at startup.
+pub fn set_exit_zero(v: bool) {
+    *EXIT_ZERO.lock().unwrap() = v;
+}
+
+pub fn exit_zero() -> bool {
+    *EXIT_ZERO.lock().unwrap()
+}
+
+pub fn set_exit_threshold(t: Threshold) {
+    *EXIT_THRESHOLD.lock().unwrap() = t;
+}
+
+/// The default is blocker and critical, so `info` and `warning` findings do not
+/// break a pipeline on upgrade.
+pub fn exit_threshold() -> Threshold {
+    *EXIT_THRESHOLD.lock().unwrap()
+}
+
 static EXPAND_ALL: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
 static HIDE_ADVICE: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
 
@@ -363,6 +385,59 @@ pub fn expand_all() -> bool {
 
 pub fn hide_advice() -> bool {
     *HIDE_ADVICE.lock().unwrap()
+}
+
+/// How severe a finding has to be before `check` exits non-zero.
+///
+/// `check` used to always exit 0, whatever it found, so a CI job could not
+/// fail on a finding without parsing the output. That makes the tool advisory
+/// by default in exactly the place it matters most. The default is blocker and
+/// critical. `info` never fails: an advisory note about a console call should
+/// not break anyone's pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Threshold {
+    Info,
+    Warning,
+    Critical,
+    Blocker,
+}
+
+impl Threshold {
+    pub fn rank(self) -> u8 {
+        match self {
+            Threshold::Info => 0,
+            Threshold::Warning => 1,
+            Threshold::Critical => 2,
+            Threshold::Blocker => 3,
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Threshold> {
+        match s {
+            "info" => Some(Threshold::Info),
+            "warning" => Some(Threshold::Warning),
+            "critical" => Some(Threshold::Critical),
+            "blocker" => Some(Threshold::Blocker),
+            _ => None,
+        }
+    }
+}
+
+/// True when the findings are severe enough to fail the gate.
+pub fn exceeds(reports: &[GuardReport], threshold: Threshold) -> bool {
+    reports
+        .iter()
+        .any(|r| threshold.rank() <= severity_rank(&r.severity))
+}
+
+fn severity_rank(s: &str) -> u8 {
+    match s {
+        "info" => 0,
+        "warning" => 1,
+        "critical" => 2,
+        "blocker" => 3,
+        _ => 0,
+    }
 }
 
 /// Whether a finding is evidence or advice.
@@ -961,6 +1036,47 @@ mod liveness {
             "a manifest-less directory must be reported, not silently clean, got {reports:?}"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_exit_threshold_fails_on_critical_by_default() {
+        let critical = rep(
+            "security.taint",
+            "critical",
+            "reaches a SQL sink",
+            "a.rs",
+            1,
+        );
+        let warning = [rep("edge.cases", "warning", "unwrap can panic.", "a.rs", 2)];
+        let info = [rep("best.practice", "info", "console call.", "a.rs", 3)];
+        // Default is critical, so a warning does not break a pipeline.
+        assert!(exceeds(&[critical], Threshold::Critical));
+        assert!(!exceeds(&warning, Threshold::Critical));
+        assert!(!exceeds(&info, Threshold::Critical));
+        assert!(!exceeds(&[], Threshold::Critical));
+        // Widening the threshold is opt in and works.
+        assert!(exceeds(&warning, Threshold::Warning));
+        assert!(exceeds(&info, Threshold::Info));
+        // And a lower threshold catches more.
+        let blocker = [rep(
+            "security.taint",
+            "blocker",
+            "breaks a signature",
+            "a.rs",
+            1,
+        )];
+        assert!(exceeds(&blocker, Threshold::Blocker));
+    }
+
+    #[test]
+    fn threshold_parsing_rejects_nonsense() {
+        assert_eq!(Threshold::parse("critical"), Some(Threshold::Critical));
+        assert_eq!(Threshold::parse("nope"), None);
+        assert_eq!(
+            Threshold::parse("CRITICAL"),
+            None,
+            "the values are lowercase"
+        );
     }
 
     #[test]

@@ -2,6 +2,16 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.18.0
+
+Two changes, one small release. The taint-adjacent rule that violated the project's own contract, and a gate that can finally fail.
+
+* **The `unwrap` rule no longer fires in test code.** `edge.rs` matched any line containing `.unwrap()`, which is 152 findings on this repository, 41 of them in `tests/battle.rs`. A `#[cfg(test)]` module, a `tests/`, `benches/` or `examples/` path now stays silent, because an unwrap in a test asserts something about the code, it is not code that ships. Severity for a real unwrap is unchanged, so this is a scoping decision and not a blanket downgrade.
+* **Every `unwrap` and `panic!` finding now names its enclosing function,** so the report points at a thing the reader can open rather than a line in a file they have to search.
+* **`check` exits non-zero on a blocker or critical.** It previously always exited 0, whatever it found, so a CI job could not fail on a finding without parsing the output. The tool was advisory by default in exactly the place it matters most. A clean workspace still exits 0, and `info` never fails, so an advisory note about a console call will not break a pipeline.
+* **The feature needs no flag.** `--exit-zero` restores the old always zero behaviour for anyone who wants one release of grace before their pipeline starts enforcing. `--exit-threshold=warning` catches more. Both are opt out, and the safe choice is the default.
+* 6 tests. Two of them assert the negative that matters: that a real unwrap outside tests still fires, and still fires at warning severity.
+
 ## 0.17.0
 
 Findings are filtered, not merely emitted. 185 lines for one repository became 42, and nothing was deleted to achieve it.

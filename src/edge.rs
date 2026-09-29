@@ -33,14 +33,25 @@ pub fn scan_file(path: &Path, content: &str) -> Vec<EdgeReport> {
         let trimmed = line.trim_start();
         match lang.as_str() {
             "rust" => {
-                if trimmed.contains(".unwrap()") {
+                if trimmed.contains(".unwrap()") && !is_test_context(path, &lines, i) {
+                    // The message is deliberately stable and does not name the
+                    // function. Naming it made every instance a unique message,
+                    // which stopped them folding: 152 findings became 152
+                    // single-item lines. The fold is worth more than the name,
+                    // and the folded line already names the first four files
+                    // and how many more, so the reader still knows where to
+                    // look. A future per-function view can use the file list
+                    // rather than changing the message, which would unbreak
+                    // folding for everyone.
                     reports.push(rep(
                         path,
                         line_no,
                         "warning",
                         "unwrap can panic when the value is not present. handle the case instead.",
                     ));
-                } else if trimmed.contains("panic!(") {
+                } else if trimmed.contains("panic!(") && !is_test_context(path, &lines, i) {
+                    // Same reasoning as the unwrap rule: a stable message, so
+                    // these still fold.
                     reports.push(rep(
                         path,
                         line_no,
@@ -265,6 +276,42 @@ fn leading_spaces(line: &str) -> usize {
     line.chars().take_while(|c| *c == ' ' || *c == '\t').count()
 }
 
+/// True when this file is test code, or this line sits inside a test module.
+///
+/// A `#[cfg(test)]` module or a `tests/` path holds assertions about the code,
+/// not code that runs in production. Flagging an `unwrap` there says nothing
+/// about the shipped binary, and 41 of the 152 findings on this repository were
+/// in `tests/battle.rs` alone. Silence in test code is a scoping decision, not
+/// a downgrade: the severity for a real unwrap is unchanged.
+pub(crate) fn is_test_context(path: &Path, lines: &[&str], at: usize) -> bool {
+    let p = path.to_string_lossy().replace('\\', "/");
+    if p.contains("/tests/")
+        || p.starts_with("tests/")
+        || p.contains("/benches/")
+        || p.contains("/examples/")
+        || p.ends_with("_test.rs")
+    {
+        return true;
+    }
+    // Walk back to the start of the enclosing item. `mod tests` with the usual
+    // `#[cfg(test)]` attribute above it is the shape almost every Rust file uses.
+    let mut i = at;
+    while i > 0 {
+        i -= 1;
+        let t = lines[i].trim_start();
+        if t.starts_with('}') {
+            // Left the module, so we are back in the parent scope.
+            return false;
+        }
+        if (t.starts_with("mod ") || t.starts_with("pub mod "))
+            && (lines[i].contains("cfg(test)") || t.contains("tests"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn rep(path: &Path, line: u64, severity: &str, message: &str) -> EdgeReport {
     EdgeReport {
         severity: severity.to_string(),
@@ -277,6 +324,56 @@ fn rep(path: &Path, line: u64, severity: &str, message: &str) -> EdgeReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unwrap_in_a_test_module_is_silent() {
+        let src = "#[cfg(test)]\nmod tests {\n    fn t() {\n        let o: Option<i32> = None;\n        o.unwrap();\n    }\n}\n";
+        let reports = scan_file(std::path::Path::new("a.rs"), src);
+        assert!(
+            reports.is_empty(),
+            "an unwrap inside a cfg(test) module is a test assertion, not shipped code: {reports:?}"
+        );
+    }
+
+    #[test]
+    fn unwrap_in_a_tests_path_is_silent() {
+        let src = "fn helper() {\n    let o: Option<i32> = None;\n    o.unwrap();\n}\n";
+        let reports = scan_file(std::path::Path::new("tests/battle.rs"), src);
+        assert!(reports.is_empty(), "{reports:?}");
+    }
+
+    #[test]
+    fn unwrap_outside_tests_still_fires() {
+        let src = "fn load_config() -> i32 {\n    let o: Option<i32> = None;\n    o.unwrap()\n}\n";
+        let reports = scan_file(std::path::Path::new("src/lib.rs"), src);
+        assert_eq!(reports.len(), 1, "{reports:?}");
+    }
+
+    #[test]
+    fn identical_unwraps_keep_one_message_so_they_can_fold() {
+        // Naming the function in the message made every instance unique and
+        // stopped them folding, which turned one line of 152 into 152 lines.
+        // The message must stay stable for the fold to work.
+        let a = scan_file(
+            std::path::Path::new("src/a.rs"),
+            "fn one() {\n    let o: Option<i32> = None;\n    o.unwrap()\n}\n",
+        );
+        let b = scan_file(
+            std::path::Path::new("src/b.rs"),
+            "fn two() {\n    let o: Option<i32> = None;\n    o.unwrap()\n}\n",
+        );
+        assert_eq!(a[0].message, b[0].message, "the message must be stable");
+    }
+
+    #[test]
+    fn a_real_unwrap_keeps_its_severity() {
+        // Scoping test code is not a blanket downgrade. A genuine unwrap is
+        // still a warning.
+        let src = "pub fn parse(v: &str) -> i32 {\n    v.parse().unwrap()\n}\n";
+        let reports = scan_file(std::path::Path::new("src/lib.rs"), src);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].severity, "warning");
+    }
 
     #[test]
     fn flags_unwrap() {

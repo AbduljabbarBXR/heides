@@ -264,9 +264,23 @@ fn battle_serial() {
         out.contains("call(s) out") && out.contains("maybe"),
     );
 
-    // 7. Full check catches every planted bug class
+    // 7. Full check catches every planted bug class.
+    //
+    // This fixture holds planted SQL injections, shell injection and more, so a
+    // non-zero exit is the correct answer. It used to assert the check exited
+    // clean, which was only ever true because `check` always exited 0. Now it
+    // asserts the gate actually fails on a dirty workspace, which is the
+    // behaviour worth protecting, and --exit-zero restores the old answer.
     let (out, _, ok) = b.cli(&["check"]);
-    b.check("check exits clean", ok);
+    b.check(
+        "check fails the gate on a workspace with real findings",
+        !ok,
+    );
+    let (out0, _, ok0) = b.cli(&["check", "--exit-zero"]);
+    b.check(
+        "check --exit-zero restores the old behaviour",
+        ok0 && out0 == out,
+    );
     b.check("check catches SQL taint", out.contains("SQL"));
     b.check("check catches shell taint", out.contains("shell"));
     b.check(
@@ -680,6 +694,18 @@ fn battle_serial() {
     );
 
     let (out, _, ok) = run_in(&["check"]);
+    // The planted bugs here are all warnings, and the default threshold is
+    // critical, so the gate correctly passes. Lowering the threshold is what
+    // makes a warning-only workspace fail, and that is asserted separately.
+    b.check(
+        "scale check passes the default threshold, because nothing is critical",
+        ok,
+    );
+    let (_, _, ok_warn) = run_in(&["check", "--exit-threshold=warning"]);
+    b.check(
+        "scale check fails when the threshold is lowered to warning",
+        !ok_warn,
+    );
     // This used to count how many times each sentence appeared in the output,
     // which is exactly what folding reduces. The intent is that every planted
     // bug is accounted for, so it now asserts the reported count on the folded
@@ -691,7 +717,7 @@ fn battle_serial() {
     };
     b.check(
         "scale check catches every planted bug",
-        ok && counted("JSON.parse can throw", 200)
+        counted("JSON.parse can throw", 200)
             && counted("debug output left", 2)
             && counted("unwrap can panic", 10),
     );

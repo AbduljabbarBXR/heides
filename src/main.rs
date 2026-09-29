@@ -124,6 +124,25 @@ fn main() -> ExitCode {
         // The dependency guard is the only one that wants the network. Both the
         // flag and the environment turn it off, and either one is enough.
         // Fold identical findings by default; --all prints every one.
+        // A gate that cannot fail is advisory by default, which is why
+        // --exit-zero exists: it restores the old always zero behaviour for
+        // anyone who needs it, without making the safe choice the unusual one.
+        if a == "--exit-zero" {
+            heides::harmony::set_exit_zero(true);
+            continue;
+        }
+        if let Some(rest) = a.strip_prefix("--exit-threshold=") {
+            match heides::harmony::Threshold::parse(rest) {
+                Some(t) => heides::harmony::set_exit_threshold(t),
+                None => {
+                    eprintln!(
+                        "heides: unknown --exit-threshold value. use blocker, critical, warning or info."
+                    );
+                    return ExitCode::FAILURE;
+                }
+            }
+            continue;
+        }
         if a == "--all" {
             heides::harmony::set_expand_all(true);
             continue;
@@ -499,6 +518,16 @@ fn main() -> ExitCode {
             if policy.require_advisories && cov.deps != harmony::DepsState::RanOnline {
                 eprintln!(
                     "heides: --require-advisories was set but the advisory lookup did not run. this run is not a security gate."
+                );
+                return ExitCode::FAILURE;
+            }
+            // The advisory half failing is a failure in its own right, and it is
+            // reported through the posture line above.
+            if !heides::harmony::exit_zero()
+                && harmony::exceeds(&reports, heides::harmony::exit_threshold())
+            {
+                eprintln!(
+                    "heides: findings at or above the exit threshold. use --exit-zero for the old behaviour."
                 );
                 return ExitCode::FAILURE;
             }
