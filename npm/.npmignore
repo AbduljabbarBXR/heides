@@ -1,0 +1,6 @@
+# The platform binary is downloaded at install time by install.js. If a stale or
+# locally built one is left in bin/, packing it would ship that architecture to
+# every user, and `files: ["bin/"]` would include it. 0.19.0 shipped a baked-in
+# Linux x64 binary for exactly this reason. The launcher only needs the JS.
+bin/heides
+bin/heides.exe

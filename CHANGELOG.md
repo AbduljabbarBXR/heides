@@ -2,6 +2,23 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.19.1
+
+A packaging accident, caught before it was pushed further.
+
+* **0.19.0 on npm shipped a baked-in Linux x64 binary.** `files: ["bin/"]` packed
+  whatever was in `bin/`, and a stale local build was sitting there. The launcher
+  checks for the binary next to itself, so on macOS and Windows it would have
+  found the Linux one and tried to run it. The tarball was 3.3 MB against the
+  intended 4.7 kB.
+* **npm would not let it be removed.** Unpublishing is refused for granular
+  tokens that bypass two-factor authentication, and deprecating a version you
+  want gone is not a fix. So this had to be corrected forward.
+* **`files` now names `bin/heides.js` explicitly** rather than the directory, and
+  `.npmignore` excludes the platform binary as a second line of defence.
+* **A test asserts it.** The launcher must be published and the binary must not
+  be, and `npm test` fails if either changes.
+
 ## 0.19.0
 
 Three fixes and a packaging fix. The packaging one is the reason most people on npm 11.16 or newer could not run `heides` at all.
