@@ -12,6 +12,8 @@ pub mod grounding;
 pub mod harmony;
 pub mod indexer;
 pub mod interproc;
+pub mod lockgraph;
+pub mod lockparse;
 pub mod parser;
 pub mod practice;
 pub mod server;

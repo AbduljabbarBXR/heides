@@ -988,6 +988,46 @@ fn main() -> ExitCode {
             }
         }
         "deps" => {
+            // `heides deps tree` is transitive resolution; bare `heides deps` is
+            // the advisory check, now annotated with depth so a finding four
+            // levels down reads differently from one on a direct dependency.
+            if arg2 == "tree" {
+                let root = PathBuf::from(arg3.unwrap_or("."));
+                let graphs = deps::read_lock_graphs(&root);
+                if graphs.is_empty() {
+                    println!("no lockfile found under {}", root.display());
+                    println!(
+                        "looked for package-lock.json, yarn.lock, pnpm-lock.yaml, poetry.lock, go.sum, Gemfile.lock, Cargo.lock"
+                    );
+                    return ExitCode::SUCCESS;
+                }
+                for g in &graphs {
+                    let (reachable, orphan) = g.reachability();
+                    println!(
+                        "{}: {} package(s), {} reachable, {} unreachable",
+                        g.source,
+                        g.nodes.len(),
+                        reachable,
+                        orphan
+                    );
+                    for n in g.deepest(2) {
+                        println!(
+                            "  {} {} ({} levels, {})",
+                            n.name,
+                            n.version,
+                            n.depth.unwrap_or(0),
+                            n.path.join(" -> ")
+                        );
+                    }
+                    for n in g.nodes.iter().filter(|n| n.depth.is_none()) {
+                        println!(
+                            "  {} {} is in the lockfile but nothing reaches it",
+                            n.name, n.version
+                        );
+                    }
+                }
+                return ExitCode::SUCCESS;
+            }
             let root = PathBuf::from(arg2);
             let pulse = Stopwatch::start(&ui, "deps check");
             let (reports, _network) = deps::check(&root);

@@ -24,11 +24,12 @@ struct Session {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_id: i64,
-    binary: PathBuf,
 }
 
 impl Session {
     fn start(root: &Path) -> Session {
+        // The binary under test, not whatever is on PATH, so the suite tests
+        // this build rather than an installed release.
         let binary = PathBuf::from(env!("CARGO_BIN_EXE_heides"));
         let mut child = Command::new(&binary)
             .arg("mcp")
@@ -45,7 +46,6 @@ impl Session {
             stdin,
             stdout,
             next_id: 0,
-            binary,
         };
         s.request("initialize", serde_json::json!({}));
         s
