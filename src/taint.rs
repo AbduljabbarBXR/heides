@@ -96,9 +96,14 @@ pub(crate) const SINKS: &[(&str, &str, &str)] = &[
         r"\b(cursor|cur|conn|connection|db|session|engine|tx|transaction|pool)\s*\.\s*(execute|executemany|executescript|raw|query|run)\s*\(",
         "SQL",
     ),
+    // `subprocess.run(`, `.call(`, `.check_output(` and `.Popen(` all reach a
+    // shell when shell=True, and none of them matched the previous row, which
+    // only accepted a bare `subprocess(`. The trailing part is deliberately
+    // loose: this dialect is a literal substring matcher, so the alternatives
+    // are spelled out rather than expressed as a character class or a wildcard.
     (
         "python",
-        r"\b(os\.system|subprocess|eval|exec)\s*\(",
+        r"\b(os\.system|subprocess\.(run|call|check_call|check_output|Popen)|eval|exec)\s*\(",
         "shell",
     ),
     ("python", r"\bopen\s*\(", "filesystem"),

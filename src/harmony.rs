@@ -330,7 +330,7 @@ pub fn check_staged(
 ) -> Result<Vec<GuardReport>, String> {
     let parsed = crate::staged::parse_patch(patch_text)?;
     let findings = crate::staged::check_patch(graph, root, &parsed);
-    let reports = findings
+    let mut reports: Vec<GuardReport> = findings
         .into_iter()
         .map(|r| GuardReport {
             guard: "staged.apply".to_string(),
@@ -340,6 +340,50 @@ pub fn check_staged(
             line: r.line,
         })
         .collect();
+
+    // Reconstruct the post-patch content for every touched file and run the
+    // same guards `check` runs over it, so a patch that introduces a secret or
+    // an injection is reported before it lands. Findings are tagged [staged]
+    // so a hand can tell "this is the change you just made" from a
+    // pre-existing finding in the same file.
+    let applied = crate::staged::apply_in_memory(&parsed, root);
+    for (path, maybe_text) in &applied {
+        let Some(text) = maybe_text else {
+            continue; // deleted file, nothing to scan
+        };
+        let key = path.trim_start_matches("./").replace('\\', "/");
+        let p = Path::new(&key);
+        let lang = crate::parser::detect_language(p).unwrap_or_default();
+
+        for r in crate::taint::scan_file(p, text) {
+            reports.push(GuardReport {
+                guard: "security.taint".to_string(),
+                severity: r.severity,
+                message: format!("[staged] {}", r.message),
+                file: r.file,
+                line: r.line,
+            });
+        }
+        for r in crate::edge::scan_file(p, text) {
+            reports.push(GuardReport {
+                guard: "edge.cases".to_string(),
+                severity: r.severity,
+                message: format!("[staged] {}", r.message),
+                file: r.file,
+                line: r.line,
+            });
+        }
+        for r in crate::practice::scan_file(p, text, &lang) {
+            reports.push(GuardReport {
+                guard: "best.practice".to_string(),
+                severity: r.severity,
+                message: format!("[staged] {}", r.message),
+                file: r.file,
+                line: r.line,
+            });
+        }
+    }
+
     Ok(reports)
 }
 
@@ -634,6 +678,169 @@ mod liveness {
         std::fs::create_dir_all(&dir).unwrap();
         let _ = tag;
         dir
+    }
+
+    /// `staged` must run the security guards, not only conflict detection.
+    ///
+    /// This is a regression test for a real regression. `check_staged` had a
+    /// working second pass that reconstructed post-patch content and ran the
+    /// taint, edge and practice guards over it, and a branch split dropped that
+    /// pass while keeping the reworded success message. The result was a
+    /// pre-commit gate that printed "the guards found nothing in the patched
+    /// files" while having run no guard at all, on a patch containing
+    /// `shell=True`, `verify=False`, an `eval` and a GitHub token.
+    ///
+    /// The wording and the behaviour have to be tested together, because the
+    /// wording is what makes the absence believable.
+    #[test]
+    fn staged_runs_the_security_guards_on_patched_content() {
+        let dir = scratch("staged_guards");
+        std::fs::write(dir.join("app.py"), "def helper():\n    return 1\n").unwrap();
+        let (graph, _) = indexer::build_graph(&dir);
+
+        // input() is a real source, so this fixture tests the staged path and
+        // not the separate, deliberate decision that a parameter is not one.
+        let patch = "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,8 @@\n def helper():\n+    return 1\n+\n+def danger():\n+    cmd = input()\n+    import subprocess\n+    subprocess.run(cmd, shell=True)\n+    token = \"ghp_abcdefghijklmnopqrstuvwxyz0123456789\"\n+    eval(cmd)\n";
+        let reports = check_staged(&dir, &graph, patch).expect("the patch must parse");
+
+        // The headline defect: only staged.apply findings means no guard ran.
+        assert!(
+            reports.iter().any(|r| r.guard != "staged.apply"),
+            "staged must run the security guards, not only conflict detection: {:?}",
+            reports
+        );
+        let joined: Vec<String> = reports.iter().map(|r| r.message.clone()).collect();
+        assert!(
+            joined.iter().any(|m| m.contains("shell")),
+            "a shell=True introduced by the patch must be caught: {:?}",
+            joined
+        );
+        assert!(
+            joined
+                .iter()
+                .any(|m| m.contains("secret") || m.contains("credential")),
+            "a hardcoded token introduced by the patch must be caught: {:?}",
+            joined
+        );
+        // Findings from the patched pass are marked, so a hand can tell the
+        // change being made from a pre-existing finding in the same file.
+        assert!(
+            reports
+                .iter()
+                .filter(|r| r.guard != "staged.apply")
+                .all(|r| r.message.starts_with("[staged]")),
+            "patched-pass findings must be tagged [staged]: {:?}",
+            reports
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The two paths must agree. `check` reads the file from disk and `staged`
+    /// reads the same content from a patch, so anything one finds and the other
+    /// does not is a bug in one of them. This is the assertion whose absence let
+    /// the staged pass disappear unnoticed.
+    ///
+    /// Both the patch and the file are built from the same string, so the
+    /// comparison cannot fail because the fixture drifted between the two.
+    #[test]
+    fn staged_and_check_agree_on_the_same_content() {
+        let dir = scratch("staged_agree");
+        std::fs::write(dir.join("app.py"), "def helper():\n    return 1\n").unwrap();
+        let (graph, _) = indexer::build_graph(&dir);
+
+        // One body, used to build both the patch and the file on disk, and the
+        // whole original kept as context so the hunk header counts are real.
+        let added: Vec<&str> = vec![
+            "",
+            "def danger():",
+            "    cmd = input()",
+            "    import subprocess",
+            "    subprocess.run(cmd, shell=True)",
+        ];
+        let original_lines: Vec<&str> = vec!["def helper():", "    return 1"];
+        let mut patched = String::new();
+        for l in original_lines.iter().chain(added.iter()) {
+            patched.push_str(l);
+            patched.push('\n');
+        }
+        // The whole original kept as context, so the hunk header line counts
+        // are real rather than asserted, and the patch applies to the file the
+        // test actually wrote.
+        let mut context = String::new();
+        for l in &original_lines {
+            context.push(' ');
+            context.push_str(l);
+            context.push('\n');
+        }
+        let mut addition = String::new();
+        for l in &added {
+            addition.push('+');
+            addition.push_str(l);
+            addition.push('\n');
+        }
+        let patch = format!(
+            "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1,{} +1,{} @@\n{}{}",
+            original_lines.len(),
+            original_lines.len() + added.len(),
+            context,
+            addition
+        );
+        let staged = check_staged(&dir, &graph, &patch).expect("the patch must parse");
+
+        // Now the identical content on disk, through the real check path.
+        std::fs::write(&dir.join("app.py"), &patched).unwrap();
+        let on_disk = run(&dir);
+
+        let staged_text: Vec<&str> = staged
+            .iter()
+            .filter(|r| r.guard != "staged.apply")
+            .map(|r| r.message.as_str())
+            .collect();
+        let disk_text: Vec<&str> = on_disk.iter().map(|r| r.message.as_str()).collect();
+        assert!(
+            !staged_text.is_empty(),
+            "staged found nothing, so there is nothing to compare. patch was:\n{}",
+            patch
+        );
+        for m in &staged_text {
+            let body = m.trim_start_matches("[staged] ");
+            assert!(
+                disk_text.iter().any(|d| d.contains(body)),
+                "staged reported {:?} but check on the identical file did not: {:?}",
+                body,
+                disk_text
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A patch that deletes a file must not be scanned as if it still existed,
+    /// and a patch that only conflicts must still be reported.
+    #[test]
+    fn staged_still_reports_conflicts_alongside_guard_findings() {
+        let dir = scratch("staged_both");
+        std::fs::write(
+            dir.join("lib.rs"),
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+        )
+        .unwrap();
+        let (graph, _) = indexer::build_graph(&dir);
+        // Changes the signature of a function that has callers.
+        let patch = "diff --git a/lib.rs b/lib.rs\n--- a/lib.rs\n+++ b/lib.rs\n@@ -1,1 +1,2 @@\n-pub fn add(a: i32, b: i32) -> i32 { a + b }\n+pub fn add(a: i32, b: i32, c: i32) -> i32 { a + b + c }\n";
+        let reports = check_staged(&dir, &graph, patch).expect("the patch must parse");
+        assert!(
+            reports.iter().any(|r| r.guard == "staged.apply"),
+            "conflict detection must survive the restored guard pass: {:?}",
+            reports
+        );
+        assert!(
+            reports
+                .iter()
+                .any(|r| r.message.contains("signature of add changed")),
+            "the signature change must still be reported: {:?}",
+            reports
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Run the real pipeline: index files from disk, then check them.

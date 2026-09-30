@@ -344,10 +344,18 @@ fn battle_serial() {
     let sig_patch = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,4 +1,4 @@\n-pub fn add(a: i32, b: i32) -> i32 { a + b }\n+pub fn add(a: i32, b: i32, c: i32) -> i32 { a + b + c }\n pub fn greet(name: &str) -> String {\n";
     b.write("bad.patch", sig_patch);
     let (out, _, ok) = b.cli(&["staged", "bad.patch"]);
-    b.check("staged exits clean on a bad patch", ok);
+    // Was asserted as exiting clean. That held only because `staged` returned
+    // SUCCESS unconditionally, so the check proved nothing. It is a gate, and a
+    // gate that reports a finding and exits 0 is the defect 0.19.2 fixed.
+    b.check("staged exits non zero on a bad patch", !ok);
     b.check(
         "staged blocks a signature change with callers",
         out.contains("blocker") && out.contains("signature"),
+    );
+    let (_, _, grace_ok) = b.cli(&["staged", "bad.patch", "--exit-zero"]);
+    b.check(
+        "staged --exit-zero lets a bad patch through, for one release of grace",
+        grace_ok,
     );
 
     // 9. Staged apply: safe body change passes
@@ -366,6 +374,28 @@ fn battle_serial() {
         "staged does not claim the patch is safe, only that nothing conflicts",
         !out.contains("safe to apply"),
     );
+
+    // A pre-commit gate that reports a critical and exits 0 is the defect
+    // 0.18.0 fixed for `check`. The guard pass was restored in 0.19.2, and
+    // this is what proves the gate can actually fail.
+    let dirty_patch = "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1,1 +1,5 @@\n export const x = 1;\n+const cmd = process.argv[2];\n+import { exec } from \"child_process\";\n+exec(cmd);\n+const token = \"ghp_abcdefghijklmnopqrstuvwxyz0123456789\";\n";
+    b.write("dirty.patch", dirty_patch);
+    let (_, _, dirty_ok) = b.cli(&["staged", "dirty.patch"]);
+    b.check(
+        "staged exits non zero on a patch that introduces a shell call and a token",
+        !dirty_ok,
+    );
+    let (staged_out, _, _) = b.cli(&["staged", "dirty.patch"]);
+    b.check(
+        "staged reports the guard finding, tagged as coming from the patch",
+        staged_out.contains("[staged]"),
+    );
+    b.check(
+        "staged reports the secret",
+        staged_out.contains("secret") || staged_out.contains("credential"),
+    );
+    let (_, _, zero_ok) = b.cli(&["staged", "dirty.patch", "--exit-zero"]);
+    b.check("staged --exit-zero restores the old behaviour", zero_ok);
 
     // 10. Staged apply: deleting a called file must be blocked
     let del_patch = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,4 +0,0 @@\n-pub fn add(a: i32, b: i32) -> i32 { a + b }\n-pub fn greet(name: &str) -> String {\n-    let v = maybe().unwrap();\n-    format!(\"hi {}\", name)\n";

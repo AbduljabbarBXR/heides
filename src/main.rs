@@ -581,6 +581,21 @@ fn main() -> ExitCode {
                             );
                         }
                     }
+                    // A pre-commit gate that finds a blocker or critical and
+                    // exits 0 is the same defect 0.18.0 fixed for `check`: the
+                    // tool reports the finding and lets the pipeline continue
+                    // anyway, so a human or a CI step has to parse the text to
+                    // learn what it already told them. Findings at or above the
+                    // threshold fail, and `--exit-zero` restores the old
+                    // behaviour for anyone who wants one release of grace.
+                    if !heides::harmony::exit_zero()
+                        && harmony::exceeds(&reports, heides::harmony::exit_threshold())
+                    {
+                        eprintln!(
+                            "heides: findings at or above the exit threshold. use --exit-zero for the old behaviour."
+                        );
+                        return ExitCode::FAILURE;
+                    }
                     ExitCode::SUCCESS
                 }
                 Err(e) => {

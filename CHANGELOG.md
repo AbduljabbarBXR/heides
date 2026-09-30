@@ -2,6 +2,19 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.19.2
+
+`staged` was a no-op that reported success. It is the pre-commit gate, and it checked nothing but merge conflicts.
+
+* **`staged` ran no security guards at all.** A patch adding `subprocess.run(cmd, shell=True)`, `requests.get(url, verify=False)`, `eval(cmd)` and a hardcoded `ghp_` token reported `no conflicts detected, and the guards found nothing in the patched files` and exited 0. The identical file written to disk produced a critical. This was a regression: the guard pass existed and was dropped during a branch split while the reworded success message was kept, which made the absence read as a considered verdict rather than an admission.
+* **The second pass is restored.** `check_staged` reconstructs the post-patch content for every touched file and runs the taint, edge and practice guards over it, tagging findings `[staged]` so a hand can tell the change being made from a pre-existing finding in the same file.
+* **Three tests, because the wording and the behaviour have to be tested together.** One plants the four payloads in a patch. One asserts `staged` and `check` agree on byte-identical content, built from one source string so the fixture cannot drift between the two paths, which is the assertion whose absence let this happen. One asserts conflict detection still works alongside the guard pass.
+* **`subprocess.run(` was not a shell sink.** The python row matched only a bare `subprocess(`, so `run`, `call`, `check_call`, `check_output` and `Popen` all passed silently while `os.system` and `eval` were caught. Found while writing the staged test: the fixture was built on a `subprocess.run` call that `check` also missed, so the test was failing for a second, independent reason.
+* **`[build-system] requires` is no longer discarded.** An unpinned build requirement like `hatchling` was dropped, so a pyproject whose only requirement was one bare name reported no manifests at all. Unpinned build dependencies are kept and marked, because the build resolves them to whatever is current, which is the risk worth naming. 0.19.0 added a test asserting that drop was correct; that test was wrong and is replaced.
+* **`staged` now exits non-zero on a blocker or critical.** It returned `SUCCESS` unconditionally, so a pre-commit gate could report three criticals and let the pipeline continue. That is the same defect 0.18.0 fixed for `check`, in the other command. `--exit-zero` restores the old behaviour and `--exit-threshold` works here too.
+* **Five battle checks for it,** covering the exit code, the `[staged]` tagging, the secret finding, `--exit-zero`, and that a clean patch still exits 0.
+* 175 tests, including the clean corpus, so idiomatic code must still produce nothing.
+
 ## 0.19.1
 
 A packaging accident, caught before it was pushed further.
