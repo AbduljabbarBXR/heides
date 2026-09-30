@@ -208,8 +208,7 @@ fn check_workspace_and_state(
             allow_offline: true,
             ..Default::default()
         };
-        let (dep_reports, offline_health) =
-            crate::deps::check_offline_cached(root, cache_policy);
+        let (dep_reports, offline_health) = crate::deps::check_offline_cached(root, cache_policy);
         let cache_health = offline_health.cache;
         for r in dep_reports {
             reports.push(GuardReport {
@@ -305,25 +304,22 @@ fn check_workspace_and_state(
 /// guards need only the index. A caller with neither can keep using the
 /// narrower functions, and the MCP surface picks this one so an agent gets the
 /// database findings without a second tool.
-pub fn check_workspace_with_database(
-    root: &Path,
-    graph: &CodeGraph,
-) -> Vec<GuardReport> {
+pub fn check_workspace_with_database(root: &Path, graph: &CodeGraph) -> Vec<GuardReport> {
     let mut reports = check_workspace_without_deps(graph);
 
     // Database guards. A workspace with no database is not a finding, so this is
     // quiet by construction: an empty graph produces no reports.
-    if let Ok(db_graph) = crate::db::index_schema(root) {
-        if !db_graph.tables.is_empty() || !db_graph.calls.is_empty() {
-            for (guard, severity, message) in crate::db::guard_reports(root, &db_graph) {
-                reports.push(GuardReport {
-                    guard,
-                    severity,
-                    message,
-                    file: String::new(),
-                    line: 0,
-                });
-            }
+    if let Ok(db_graph) = crate::db::index_schema(root)
+        && (!db_graph.tables.is_empty() || !db_graph.calls.is_empty())
+    {
+        for (guard, severity, message) in crate::db::guard_reports(root, &db_graph) {
+            reports.push(GuardReport {
+                guard,
+                severity,
+                message,
+                file: String::new(),
+                line: 0,
+            });
         }
     }
 
@@ -705,7 +701,10 @@ pub fn folded_location(first: &GuardReport, files: &[&str], file_count: usize) -
     if named.is_empty() {
         return String::new();
     }
-    let mut out = format!(" at {}", named.iter().map(|f| **f).collect::<Vec<_>>().join(", "));
+    let mut out = format!(
+        " at {}",
+        named.iter().map(|f| **f).collect::<Vec<_>>().join(", ")
+    );
     if file_count > files.len() {
         out.push_str(&format!(" and {} more", file_count - files.len()));
     }

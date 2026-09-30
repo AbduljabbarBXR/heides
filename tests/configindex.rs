@@ -153,9 +153,16 @@ fn a_github_token_is_reported() {
 #[test]
 fn an_aws_access_key_id_is_reported() {
     let dir = fixture("aws");
-    write(&dir, "creds.env", "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n");
+    write(
+        &dir,
+        "creds.env",
+        "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n",
+    );
     let f = findings(&dir);
-    assert!(f.iter().any(|x| x.key.contains("AWS_ACCESS_KEY_ID")), "{f:?}");
+    assert!(
+        f.iter().any(|x| x.key.contains("AWS_ACCESS_KEY_ID")),
+        "{f:?}"
+    );
 }
 
 #[test]
@@ -295,7 +302,10 @@ fn a_terraform_variable_with_no_default_is_quiet() {
         "variable \"db_password\" {\n  type = string\n}\n",
     );
     let f = findings(&dir);
-    assert!(f.is_empty(), "a variable with no value holds no secret: {f:?}");
+    assert!(
+        f.is_empty(),
+        "a variable with no value holds no secret: {f:?}"
+    );
 }
 
 // ----------------------------------------------------------------- reporting
@@ -303,7 +313,11 @@ fn a_terraform_variable_with_no_default_is_quiet() {
 #[test]
 fn a_workspace_with_no_config_says_so_rather_than_returning_empty() {
     let dir = fixture("noconfig");
-    write(&dir, "a.js", "export function add(a, b) { return a + b; }\n");
+    write(
+        &dir,
+        "a.js",
+        "export function add(a, b) { return a + b; }\n",
+    );
     let f = findings(&dir);
     assert!(f.is_empty());
     let summary = config::summarise(&dir);

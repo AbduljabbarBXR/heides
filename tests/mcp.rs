@@ -63,15 +63,16 @@ impl Session {
         self.stdin.flush().ok();
         let mut line = String::new();
         self.stdout.read_line(&mut line).expect("read response");
-        let v: serde_json::Value =
-            serde_json::from_str(line.trim()).unwrap_or_else(|e| {
-                panic!("response was not json ({e}): {line:?}")
-            });
+        let v: serde_json::Value = serde_json::from_str(line.trim())
+            .unwrap_or_else(|e| panic!("response was not json ({e}): {line:?}"));
         v
     }
 
     fn call(&mut self, name: &str, args: serde_json::Value) -> serde_json::Value {
-        self.request("tools/call", serde_json::json!({ "name": name, "arguments": args }))
+        self.request(
+            "tools/call",
+            serde_json::json!({ "name": name, "arguments": args }),
+        )
     }
 
     /// The text of a tool result, or the message of an MCP error.
@@ -180,7 +181,12 @@ fn every_tool_declares_a_description_and_a_schema() {
     let dir = fixture("schemas");
     let mut s = Session::start(&dir);
     let v = s.request("tools/list", serde_json::json!({}));
-    let tools = v.pointer("/result/tools").unwrap().as_array().unwrap().clone();
+    let tools = v
+        .pointer("/result/tools")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .clone();
     for t in tools {
         let name = t.get("name").and_then(|n| n.as_str()).unwrap_or("?");
         let desc = t.get("description").and_then(|d| d.as_str()).unwrap_or("");
@@ -197,7 +203,11 @@ fn every_tool_declares_a_description_and_a_schema() {
 #[test]
 fn verify_reports_a_pass_as_a_verdict_not_prose() {
     let dir = fixture("verifyclean");
-    write(&dir, "a.js", "export function add(a, b) { return a + b; }\n");
+    write(
+        &dir,
+        "a.js",
+        "export function add(a, b) { return a + b; }\n",
+    );
     scan(&dir);
     let mut s = Session::start(&dir);
     let t = s.text("harmony.verify", serde_json::json!({ "root": "." }));
@@ -234,15 +244,19 @@ fn verify_reports_a_planted_defect_as_a_failure() {
 #[test]
 fn verify_accepts_json_so_an_agent_can_branch_on_the_verdict() {
     let dir = fixture("verifyjson");
-    write(&dir, "a.js", "export function add(a, b) { return a + b; }\n");
+    write(
+        &dir,
+        "a.js",
+        "export function add(a, b) { return a + b; }\n",
+    );
     scan(&dir);
     let mut s = Session::start(&dir);
     let t = s.text(
         "harmony.verify",
         serde_json::json!({ "root": ".", "json": true }),
     );
-    let v: serde_json::Value =
-        serde_json::from_str(&t).unwrap_or_else(|e| panic!("verify --json was not json ({e}): {t}"));
+    let v: serde_json::Value = serde_json::from_str(&t)
+        .unwrap_or_else(|e| panic!("verify --json was not json ({e}): {t}"));
     assert!(
         v.get("ok").is_some(),
         "the json verdict needs a boolean to branch on: {t}"
@@ -340,7 +354,11 @@ fn db_schema_reports_a_cyclic_cascade() {
 #[test]
 fn db_schema_says_so_when_there_is_no_database() {
     let dir = fixture("dbnone");
-    write(&dir, "a.js", "export function add(a, b) { return a + b; }\n");
+    write(
+        &dir,
+        "a.js",
+        "export function add(a, b) { return a + b; }\n",
+    );
     let mut s = Session::start(&dir);
     let t = s.text("db.schema", serde_json::json!({ "root": "." }));
     assert!(
@@ -367,7 +385,10 @@ fn db_tables_names_the_tables_and_who_touches_them() {
     let mut s = Session::start(&dir);
     let t = s.text("db.tables", serde_json::json!({ "root": "." }));
     assert!(t.contains("users"), "{t}");
-    assert!(t.contains("logs"), "an untouched table is still a table: {t}");
+    assert!(
+        t.contains("logs"),
+        "an untouched table is still a table: {t}"
+    );
 }
 
 // ------------------------------------------------------------- changed since

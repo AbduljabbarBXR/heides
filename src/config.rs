@@ -279,10 +279,7 @@ fn scan_text(text: &str, rel: &str, kind: ConfigKind, out: &mut Vec<ConfigFindin
         // be reported under the variable's name.
         if kind == ConfigKind::Terraform {
             if let Some(rest) = line.strip_prefix("variable ") {
-                let quoted = rest
-                    .trim()
-                    .trim_end_matches('{')
-                    .trim();
+                let quoted = rest.trim().trim_end_matches('{').trim();
                 let name = quoted.trim_matches('"').trim();
                 tf_variable = if name.is_empty() {
                     None
@@ -299,14 +296,12 @@ fn scan_text(text: &str, rel: &str, kind: ConfigKind, out: &mut Vec<ConfigFindin
             // variable, so the finding is reported under the variable's name.
             // The name is what says this is a credential; the `default` key on its
             // own says nothing.
-            if kind == ConfigKind::Terraform {
-                if key == "default" {
-                    match tf_variable.clone() {
-                        Some(name) => key = name,
-                        // A default outside any variable block belongs to a
-                        // module or a provider, where the name is the module's.
-                        None => continue,
-                    }
+            if kind == ConfigKind::Terraform && key == "default" {
+                match tf_variable.clone() {
+                    Some(name) => key = name,
+                    // A default outside any variable block belongs to a
+                    // module or a provider, where the name is the module's.
+                    None => continue,
                 }
             }
             if let Some(f) = classify_value(&key, &value, rel, n, kind) {
@@ -347,10 +342,10 @@ fn assignments(line: &str, kind: ConfigKind) -> Vec<(String, String)> {
                 }
                 // `ENV A=1 B=2`
                 for pair in rest.split_whitespace() {
-                    if let Some((k, v)) = pair.split_once('=') {
-                        if !out.iter().any(|(ek, _)| ek == &clean_key(k)) {
-                            out.push((clean_key(k), unquote(v)));
-                        }
+                    if let Some((k, v)) = pair.split_once('=')
+                        && !out.iter().any(|(ek, _)| ek == &clean_key(k))
+                    {
+                        out.push((clean_key(k), unquote(v)));
                     }
                 }
             }
@@ -486,14 +481,63 @@ fn is_reference(value: &str) -> bool {
 /// `dummy_2024` are placeholders while a real password that happens to contain
 /// the letters `xxx` is not.
 const PLACEHOLDERS: &[&str] = &[
-    "changeme", "change-me", "change_me", "your", "yourkey", "your-key", "yourvalue",
-    "your-value", "yourpassword", "your-password", "yoursecret", "your-secret",
-    "yourtoken", "your-token", "example", "placeholder", "todo", "tbd", "none",
-    "null", "nil", "undefined", "unset", "empty", "test", "dummy", "sample",
-    "insert", "replace", "xxx", "xxxx", "xxxxxxxx", "abc123", "foo", "bar", "baz",
-    "redacted", "removed", "hidden", "masked", "value", "string", "text",
-    "password", "secret", "token", "apikey", "api-key", "api_key", "passwd",
-    "mypassword", "hunter2", "admin", "root", "default", "asdf", "qwerty",
+    "changeme",
+    "change-me",
+    "change_me",
+    "your",
+    "yourkey",
+    "your-key",
+    "yourvalue",
+    "your-value",
+    "yourpassword",
+    "your-password",
+    "yoursecret",
+    "your-secret",
+    "yourtoken",
+    "your-token",
+    "example",
+    "placeholder",
+    "todo",
+    "tbd",
+    "none",
+    "null",
+    "nil",
+    "undefined",
+    "unset",
+    "empty",
+    "test",
+    "dummy",
+    "sample",
+    "insert",
+    "replace",
+    "xxx",
+    "xxxx",
+    "xxxxxxxx",
+    "abc123",
+    "foo",
+    "bar",
+    "baz",
+    "redacted",
+    "removed",
+    "hidden",
+    "masked",
+    "value",
+    "string",
+    "text",
+    "password",
+    "secret",
+    "token",
+    "apikey",
+    "api-key",
+    "api_key",
+    "passwd",
+    "mypassword",
+    "hunter2",
+    "admin",
+    "root",
+    "default",
+    "asdf",
+    "qwerty",
 ];
 
 /// True when a value is a documented placeholder rather than a credential.
@@ -573,9 +617,14 @@ fn provider_shape(value: &str) -> Option<(&'static str, &'static str)> {
 fn aws_key_id(value: &str) -> bool {
     let v = value.trim();
     v.len() == 20
-        && (v.starts_with("AKIA") || v.starts_with("ASIA") || v.starts_with("AGPA")
-            || v.starts_with("AIDA") || v.starts_with("AROA") || v.starts_with("ANPA"))
-        && v.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        && (v.starts_with("AKIA")
+            || v.starts_with("ASIA")
+            || v.starts_with("AGPA")
+            || v.starts_with("AIDA")
+            || v.starts_with("AROA")
+            || v.starts_with("ANPA"))
+        && v.chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
 }
 
 /// A connection string carrying a password, which is the most common real leak
@@ -587,13 +636,9 @@ fn connection_string(value: &str) -> Option<String> {
     }
     let after = &v[v.find("://").map(|i| i + 3).unwrap_or(0)..];
     // The authority runs to the first /, ? or #.
-    let authority_end = after
-        .find(['/', '?', '#'])
-        .unwrap_or(after.len());
+    let authority_end = after.find(['/', '?', '#']).unwrap_or(after.len());
     let authority = &after[..authority_end];
-    let Some(at) = authority.rfind('@') else {
-        return None;
-    };
+    let at = authority.rfind('@')?;
     let userinfo = &authority[..at];
     if !userinfo.contains(':') {
         return None;
@@ -687,7 +732,10 @@ fn classify_value(
             "credential",
             file,
             line,
-            format!("an aws access key id is committed here ({})", fingerprint(v)),
+            format!(
+                "an aws access key id is committed here ({})",
+                fingerprint(v)
+            ),
             "critical",
         ));
     }
@@ -725,7 +773,10 @@ fn classify_value(
         "credential",
         file,
         line,
-        format!("a secret looking name holds a literal value ({})", fingerprint(v)),
+        format!(
+            "a secret looking name holds a literal value ({})",
+            fingerprint(v)
+        ),
         "warning",
     ))
 }
@@ -764,10 +815,29 @@ fn finding(
 /// `AWS_SECRET_ACCESS_KEY` all name one without sharing a prefix.
 fn secret_key_name(key: &str) -> bool {
     const WORDS: &[&str] = &[
-        "password", "passwd", "pwd", "secret", "token", "apikey", "api_key",
-        "api-key", "access_key", "accesskey", "private_key", "privatekey",
-        "credential", "auth", "session_key", "client_secret", "signing_key",
-        "encryption_key", "salt", "passphrase", "webhook", "bearer", "dsn",
+        "password",
+        "passwd",
+        "pwd",
+        "secret",
+        "token",
+        "apikey",
+        "api_key",
+        "api-key",
+        "access_key",
+        "accesskey",
+        "private_key",
+        "privatekey",
+        "credential",
+        "auth",
+        "session_key",
+        "client_secret",
+        "signing_key",
+        "encryption_key",
+        "salt",
+        "passphrase",
+        "webhook",
+        "bearer",
+        "dsn",
     ];
     let lower = key.to_ascii_lowercase();
     WORDS.iter().any(|w| lower.contains(w))

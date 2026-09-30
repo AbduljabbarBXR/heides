@@ -22,7 +22,7 @@ pub mod server;
 pub mod spine;
 pub mod staged;
 pub mod taint;
-pub mod verify;
 pub mod ui;
+pub mod verify;
 pub mod watch;
 pub mod web;

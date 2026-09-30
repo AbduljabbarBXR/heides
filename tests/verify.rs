@@ -43,7 +43,11 @@ impl Case {
             .expect("heides binary runs");
         (
             out.status.code().unwrap_or(-1),
-            format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
         )
     }
 
@@ -79,10 +83,17 @@ fn verify_passes_on_a_clean_workspace() {
 fn verify_fails_on_a_planted_defect() {
     let c = Case::new(
         "defect",
-        &[("app.py", "import subprocess\n\n\ndef run(cmd):\n    subprocess.run(cmd, shell=True)\n")],
+        &[(
+            "app.py",
+            "import subprocess\n\n\ndef run(cmd):\n    subprocess.run(cmd, shell=True)\n",
+        )],
     );
     let (code, out) = c.verify(&[]);
-    assert_ne!(code, 0, "planted shell=True must exit non-zero, got: {}", out);
+    assert_ne!(
+        code, 0,
+        "planted shell=True must exit non-zero, got: {}",
+        out
+    );
     assert!(
         out.contains("app.py") || out.contains("shell"),
         "verify must locate the finding, got: {}",
@@ -94,10 +105,14 @@ fn verify_fails_on_a_planted_defect() {
 /// reported as untested rather than silently counted as passing tests.
 #[test]
 fn verify_reports_a_missing_test_suite_honestly() {
-    let c = Case::new("notests", &[("app.py", "def add(a, b):\n    return a + b\n")]);
+    let c = Case::new(
+        "notests",
+        &[("app.py", "def add(a, b):\n    return a + b\n")],
+    );
     let (_code, out) = c.verify(&[]);
     assert!(
-        out.to_lowercase().contains("no test") || out.to_lowercase().contains("skipped")
+        out.to_lowercase().contains("no test")
+            || out.to_lowercase().contains("skipped")
             || out.to_lowercase().contains("notest"),
         "verify must say it found no tests instead of implying tests passed: {}",
         out
@@ -111,16 +126,25 @@ fn verify_json_is_machine_readable() {
     let c = Case::new("json", &[("app.py", "def add(a, b):\n    return a + b\n")]);
     let (code, out) = c.verify(&["--json"]);
     assert_eq!(code, 0, "clean json verify must exit 0, got: {}", out);
-    let start = out.find('{').expect("verify --json must emit a JSON object");
+    let start = out
+        .find('{')
+        .expect("verify --json must emit a JSON object");
     let json = &out[start..];
-    assert!(json.contains("\"ok\""), "json must carry an ok field: {}", json);
+    assert!(
+        json.contains("\"ok\""),
+        "json must carry an ok field: {}",
+        json
+    );
 }
 
 /// `--skip-tests` lets a caller run only the guards, and must still not report
 /// a clean result without saying tests were skipped.
 #[test]
 fn verify_skip_tests_says_so() {
-    let c = Case::new("skiptests", &[("app.py", "def add(a, b):\n    return a + b\n")]);
+    let c = Case::new(
+        "skiptests",
+        &[("app.py", "def add(a, b):\n    return a + b\n")],
+    );
     let (code, out) = c.verify(&["--skip-tests"]);
     assert_eq!(code, 0, "guards-only on clean code must exit 0: {}", out);
     assert!(

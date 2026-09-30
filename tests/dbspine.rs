@@ -55,12 +55,16 @@ fn call_sites_survive_the_round_trip_with_their_read_write_split() {
     .unwrap();
     let g = db::index_schema(&dir).unwrap();
     assert!(
-        g.calls.iter().any(|c| c.table == "User" && c.op == Op::Read),
+        g.calls
+            .iter()
+            .any(|c| c.table == "User" && c.op == Op::Read),
         "{:?}",
         g.calls
     );
     assert!(
-        g.calls.iter().any(|c| c.table == "audit_log" && c.op == Op::Write),
+        g.calls
+            .iter()
+            .any(|c| c.table == "audit_log" && c.op == Op::Write),
         "{:?}",
         g.calls
     );
@@ -73,10 +77,7 @@ fn call_sites_survive_the_round_trip_with_their_read_write_split() {
 
 #[test]
 fn migrations_survive_with_their_dialect_and_digest() {
-    let dir = fixture(
-        "migrations",
-        "CREATE TABLE t (id INTEGER PRIMARY KEY);\n",
-    );
+    let dir = fixture("migrations", "CREATE TABLE t (id INTEGER PRIMARY KEY);\n");
     std::fs::write(
         dir.join("migrations/0002_add.sql"),
         "ALTER TABLE t ADD COLUMN name TEXT;\n",
@@ -111,7 +112,11 @@ fn a_changed_migration_is_reported_as_drift() {
     .unwrap();
     let drift = db::migration_drift(&dir, &db::load_db_index(&dir).unwrap());
     assert_eq!(drift.len(), 1, "{:?}", drift);
-    assert!(drift[0].contains("0001_init"), "the file is named: {:?}", drift);
+    assert!(
+        drift[0].contains("0001_init"),
+        "the file is named: {:?}",
+        drift
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -137,11 +142,7 @@ fn a_table_dropped_from_a_migration_disappears_from_the_index() {
     // The last migration wins, so a table created then dropped is gone. This is
     // the case that makes the index honest rather than an append-only log.
     let dir = fixture("droptable", "CREATE TABLE t (id INTEGER PRIMARY KEY);\n");
-    std::fs::write(
-        dir.join("migrations/0002_drop.sql"),
-        "DROP TABLE t;\n",
-    )
-    .unwrap();
+    std::fs::write(dir.join("migrations/0002_drop.sql"), "DROP TABLE t;\n").unwrap();
     let g = db::index_schema(&dir).unwrap();
     assert!(
         g.tables.is_empty(),
@@ -209,9 +210,8 @@ fn the_graph_rebuilds_identically_from_the_same_input() {
     );
     let first = db::index_schema(&dir).unwrap();
     let second = db::index_schema(&dir).unwrap();
-    let names = |g: &db::DbGraph| -> Vec<String> {
-        g.tables.iter().map(|t| t.name.clone()).collect()
-    };
+    let names =
+        |g: &db::DbGraph| -> Vec<String> { g.tables.iter().map(|t| t.name.clone()).collect() };
     assert_eq!(names(&first), names(&second), "table order is stable");
     let _ = std::fs::remove_dir_all(&dir);
 }

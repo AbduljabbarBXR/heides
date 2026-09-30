@@ -47,11 +47,7 @@ pub struct LockGraph {
 impl LockGraph {
     /// A graph with nodes and no edges: every package is direct. This is what a
     /// lockfile with no edge information yields, and it must not be discarded.
-    pub fn flat(
-        packages: Vec<LockNode>,
-        ecosystem: &'static str,
-        source: &str,
-    ) -> LockGraph {
+    pub fn flat(packages: Vec<LockNode>, ecosystem: &'static str, source: &str) -> LockGraph {
         let nodes = packages
             .into_iter()
             .map(|mut p| {
@@ -232,11 +228,7 @@ impl LockGraph {
             .iter()
             .filter(|n| n.depth.map(|d| d >= at_least).unwrap_or(false))
             .collect();
-        v.sort_by(|a, b| {
-            b.depth
-                .cmp(&a.depth)
-                .then(a.name.cmp(&b.name))
-        });
+        v.sort_by(|a, b| b.depth.cmp(&a.depth).then(a.name.cmp(&b.name)));
         v
     }
 

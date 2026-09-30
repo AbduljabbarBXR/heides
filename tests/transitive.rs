@@ -134,7 +134,10 @@ fn a_locked_version_wins_over_the_manifest_range() {
         r#"{"lockfileVersion":3,"dependencies":{"express":{"version":"4.18.2"}}}"#,
     )
     .expect("lockfile parses");
-    assert_eq!(graph.node("express").map(|n| n.version.clone()), Some("4.18.2".into()));
+    assert_eq!(
+        graph.node("express").map(|n| n.version.clone()),
+        Some("4.18.2".into())
+    );
 }
 
 #[test]
@@ -339,10 +342,11 @@ fn a_lockfile_node_reports_its_path_from_a_direct_dependency() {
       }
     }"#;
     let graph = deps::parse_package_lock(lock).expect("lockfile parses");
-    let path = graph
-        .path_to("c")
-        .expect("c is reachable and has a path");
-    assert_eq!(path, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+    let path = graph.path_to("c").expect("c is reachable and has a path");
+    assert_eq!(
+        path,
+        vec!["a".to_string(), "b".to_string(), "c".to_string()]
+    );
 }
 
 #[test]
@@ -413,4 +417,3 @@ fn a_lockfile_with_a_known_direct_set_marks_anything_else_unreachable() {
     let (reachable, orphan) = graph.reachability();
     assert_eq!((reachable, orphan), (2, 1));
 }
-

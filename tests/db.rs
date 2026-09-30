@@ -41,7 +41,7 @@ fn parses_a_plain_create_table() {
     assert_eq!(cols(&t[0]), vec!["id", "email"]);
     assert!(t[0].columns[0].pk);
     assert!(!t[0].columns[1].nullable);
-    assert!(t[0].columns[1].pk == false);
+    assert!(!t[0].columns[1].pk);
 }
 
 #[test]
@@ -76,8 +76,11 @@ fn parses_composite_primary_keys() {
          );",
     );
     assert_eq!(t[0].name, "order_items");
-    assert!(t[0].columns[1].pk, "second column of the composite key is pk");
-    assert!(t[0].columns[2].pk == false);
+    assert!(
+        t[0].columns[1].pk,
+        "second column of the composite key is pk"
+    );
+    assert!(!t[0].columns[2].pk);
 }
 
 #[test]
@@ -111,10 +114,14 @@ fn parses_indexes_and_uniqueness() {
     );
     let idx = &t[0].indexes;
     assert_eq!(idx.len(), 2, "both indexes attach to events");
-    assert!(idx.iter().any(|i| i.unique && i.columns == vec!["user_id", "kind"]));
-    assert!(idx
-        .iter()
-        .any(|i| !i.unique && i.columns == vec!["user_id"]));
+    assert!(
+        idx.iter()
+            .any(|i| i.unique && i.columns == vec!["user_id", "kind"])
+    );
+    assert!(
+        idx.iter()
+            .any(|i| !i.unique && i.columns == vec!["user_id"])
+    );
 }
 
 #[test]
@@ -226,7 +233,8 @@ fn resolves_django_orm() {
     // it. Pinning it to "objects" would assert on the accessor and say nothing
     // about whether the right read or write was recorded.
     assert!(
-        c.iter().all(|x| x.via.contains('.') && x.via.contains("()")),
+        c.iter()
+            .all(|x| x.via.contains('.') && x.via.contains("()")),
         "every call records its operation: {:?}",
         c
     );
@@ -243,7 +251,10 @@ fn resolves_gorm_and_raw_sql() {
     );
     assert!(c.iter().any(|x| x.table == "users" && x.op == Op::Read));
     assert!(c.iter().any(|x| x.table == "user" && x.op == Op::Write));
-    assert!(c.iter().any(|x| x.table == "orders"), "raw Exec names orders");
+    assert!(
+        c.iter().any(|x| x.table == "orders"),
+        "raw Exec names orders"
+    );
 }
 
 #[test]
@@ -301,10 +312,7 @@ fn resolves_sqlalchemy_and_typeorm_entities() {
     // A repository named only `repo` carries no entity name at all. Guessing one
     // would be inventing a table, so the only honest answer is the entity named in
     // the argument of a write.
-    let anon = calls_in(
-        "r.ts",
-        "await this.repo.save(user);",
-    );
+    let anon = calls_in("r.ts", "await this.repo.save(user);");
     assert!(
         anon.iter().any(|x| x.table == "user" && x.op == Op::Write),
         "the argument names the entity: {:?}",
@@ -321,7 +329,10 @@ fn raw_sql_names_its_table() {
          cursor.execute(\"INSERT INTO orders (id) VALUES (?)\", (i,))",
     );
     assert!(c.iter().any(|x| x.table == "users" && x.op == Op::Read));
-    assert!(c.iter().any(|x| x.table == "audit_log" && x.op == Op::Write));
+    assert!(
+        c.iter()
+            .any(|x| x.table == "audit_log" && x.op == Op::Write)
+    );
     assert!(c.iter().any(|x| x.table == "orders" && x.op == Op::Write));
 }
 
@@ -376,7 +387,10 @@ fn unrelated_method_chains_resolve_to_nothing() {
 fn concatenated_construction_is_a_syntactic_sink() {
     // Deliverable 4, and the class `check` misses entirely: no source, no sink
     // match, just string concatenation inside a query call.
-    let found = heides::db::concatenated_queries(Path::new("m.py"), "q = \"SELECT * FROM users WHERE id = \" + uid\n");
+    let found = heides::db::concatenated_queries(
+        Path::new("m.py"),
+        "q = \"SELECT * FROM users WHERE id = \" + uid\n",
+    );
     assert_eq!(found.len(), 1, "concatenation into a query is a finding");
     assert!(found[0].contains("users") || found[0].contains("concatenat"));
 
@@ -439,10 +453,7 @@ fn discovers_migration_directories() {
 
 #[test]
 fn classifies_a_migration_file_by_shape() {
-    assert_eq!(
-        heides::db::classify_migration("0001_init.sql"),
-        Some("sql")
-    );
+    assert_eq!(heides::db::classify_migration("0001_init.sql"), Some("sql"));
     assert_eq!(
         heides::db::classify_migration("20240101120000_add_email.py"),
         Some("alembic")
@@ -501,11 +512,7 @@ fn writes_and_reads_back_a_schema_graph() {
 
     // `orders.user_id` has an explicit index, so it is not missing one.
     let miss = heides::db::missing_index(&back);
-    assert!(
-        miss.is_empty(),
-        "orders.user_id is indexed: {:?}",
-        miss
-    );
+    assert!(miss.is_empty(), "orders.user_id is indexed: {:?}", miss);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -547,11 +554,7 @@ fn flags_sensitive_columns() {
     assert!(names.contains(&"email"));
     assert!(names.contains(&"password_hash"));
     assert!(names.contains(&"ssn"));
-    assert!(
-        !names.contains(&"id"),
-        "an id is not PII: {:?}",
-        names
-    );
+    assert!(!names.contains(&"id"), "an id is not PII: {:?}", names);
     assert!(
         !names.contains(&"bio"),
         "bio is free text the tool cannot judge: {:?}",

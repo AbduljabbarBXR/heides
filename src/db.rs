@@ -259,7 +259,6 @@ fn split_qualified(s: &str) -> Vec<String> {
     parts
 }
 
-
 /// True for a `DROP TABLE` statement, including the IF EXISTS form.
 fn is_drop_table(stmt: &str) -> bool {
     let head = stmt.trim_start();
@@ -268,12 +267,11 @@ fn is_drop_table(stmt: &str) -> bool {
         return false;
     }
     let rest = upper["DROP".len()..].trim_start();
-    for filler in ["TABLE IF EXISTS ", "TABLE ", "EXISTS TABLE ", "EXISTS "]
-    {
-        if let Some(r) = rest.strip_prefix(filler) {
-            if r.trim_start().starts_with("TABLE") || filler.trim() == "TABLE" {
-                return true;
-            }
+    for filler in ["TABLE IF EXISTS ", "TABLE ", "EXISTS TABLE ", "EXISTS "] {
+        if let Some(r) = rest.strip_prefix(filler)
+            && (r.trim_start().starts_with("TABLE") || filler.trim() == "TABLE")
+        {
+            return true;
         }
     }
     false
@@ -292,11 +290,7 @@ fn dropped_table_name(stmt: &str) -> Option<String> {
         .chars()
         .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.' || *c == '"')
         .collect();
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
+    if name.is_empty() { None } else { Some(name) }
 }
 
 /// True when this statement creates a table rather than a view or index.
@@ -310,7 +304,12 @@ fn is_create_table(stmt: &str) -> bool {
     let rest = &upper["CREATE".len()..];
     let rest = rest.trim_start();
     for filler in [
-        "TEMP ", "TEMPORARY ", "UNLOGGED ", "GLOBAL ", "LOCAL ", "IF NOT EXISTS ",
+        "TEMP ",
+        "TEMPORARY ",
+        "UNLOGGED ",
+        "GLOBAL ",
+        "LOCAL ",
+        "IF NOT EXISTS ",
     ] {
         if let Some(r) = rest.strip_prefix(filler) {
             return r.trim_start().starts_with("TABLE");
@@ -344,10 +343,7 @@ pub fn parse_sql(path: &Path, body: &str) -> Vec<Table> {
         // Index statements are recognised by the ON clause, not by the word
         // INDEX: `CREATE UNIQUE INDEX ..` and `CREATE INDEX ..` both qualify, and
         // a table named `indexes` must not qualify.
-        if upper.starts_with("CREATE")
-            && upper.contains(" INDEX ")
-            && upper.contains(" ON ")
-        {
+        if upper.starts_with("CREATE") && upper.contains(" INDEX ") && upper.contains(" ON ") {
             // Deferred: an index can precede its table in a migration file, so
             // attaching it here would silently drop it.
             deferred_indexes.push(t.to_string());
@@ -396,14 +392,17 @@ pub fn parse_sql(path: &Path, body: &str) -> Vec<Table> {
         let body = &t[open + 1..close];
 
         // Table name is the last qualified part after TABLE.
-        let after = &head[head.to_ascii_uppercase().find("TABLE").map(|i| i + 5).unwrap_or(0)..];
+        let after = &head[head
+            .to_ascii_uppercase()
+            .find("TABLE")
+            .map(|i| i + 5)
+            .unwrap_or(0)..];
         let name_part = after
             .split_whitespace()
             .filter(|w| *w != "IF")
             .filter(|w| *w != "NOT")
             .filter(|w| *w != "EXISTS")
-            .filter(|w| *w != "IF NOT EXISTS")
-            .next()
+            .find(|w| *w != "IF NOT EXISTS")
             .unwrap_or("");
         if name_part.is_empty() {
             continue;
@@ -456,10 +455,10 @@ pub fn parse_sql(path: &Path, body: &str) -> Vec<Table> {
                     .first()
                     .map(|c| unquote(c.trim()))
                     .unwrap_or_default();
-                if let Some((Some(tbl), col2)) = parse_references(p) {
-                    if !col.is_empty() {
-                        pending_fk.push((col, tbl, col2));
-                    }
+                if let Some((Some(tbl), col2)) = parse_references(p)
+                    && !col.is_empty()
+                {
+                    pending_fk.push((col, tbl, col2));
                 }
                 continue;
             }
@@ -504,12 +503,11 @@ pub fn parse_sql(path: &Path, body: &str) -> Vec<Table> {
 
     // Second pass, so index order inside the file does not matter.
     for stmt in &deferred_indexes {
-        if let Some((target, idx)) = parse_create_index(stmt) {
-            if let Some(tbl) = tables.iter_mut().find(|x| x.name == target) {
-                if !tbl.indexes.iter().any(|e| e.name == idx.name) {
-                    tbl.indexes.push(idx);
-                }
-            }
+        if let Some((target, idx)) = parse_create_index(stmt)
+            && let Some(tbl) = tables.iter_mut().find(|x| x.name == target)
+            && !tbl.indexes.iter().any(|e| e.name == idx.name)
+        {
+            tbl.indexes.push(idx);
         }
     }
 
@@ -573,14 +571,26 @@ fn parse_column(p: &str) -> Option<Column> {
     let upper = rest.to_ascii_uppercase();
     let mut ty_end = rest.len();
     for kw in [
-        "NOT NULL", "PRIMARY KEY", "UNIQUE", "REFERENCES", "DEFAULT", "CHECK",
-        "GENERATED", "AUTO_INCREMENT", "COLLATE", "COMMENT",
+        "NOT NULL",
+        "PRIMARY KEY",
+        "UNIQUE",
+        "REFERENCES",
+        "DEFAULT",
+        "CHECK",
+        "GENERATED",
+        "AUTO_INCREMENT",
+        "COLLATE",
+        "COMMENT",
     ] {
         if let Some(i) = upper.find(kw) {
             ty_end = ty_end.min(i);
         }
     }
-    let ty = rest[..ty_end].trim().trim_end_matches(',').trim().to_string();
+    let ty = rest[..ty_end]
+        .trim()
+        .trim_end_matches(',')
+        .trim()
+        .to_string();
     let ty = if ty.is_empty() { "UNKNOWN".into() } else { ty };
 
     let nullable = !upper.contains("NOT NULL");
@@ -620,7 +630,9 @@ fn parse_references(p: &str) -> Option<(Option<String>, Option<String>)> {
     if table.is_empty() {
         return None;
     }
-    let col = paren_inner(rest).map(|i| unquote(i.trim())).unwrap_or_default();
+    let col = paren_inner(rest)
+        .map(|i| unquote(i.trim()))
+        .unwrap_or_default();
     Some((Some(table), if col.is_empty() { None } else { Some(col) }))
 }
 
@@ -737,10 +749,7 @@ pub fn classify_migration(path: &str) -> Option<&'static str> {
 
     // Timestamped or numbered, with a known extension.
     let stem = name.split('.').next().unwrap_or(name);
-    let numeric_prefix: String = stem
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
+    let numeric_prefix: String = stem.chars().take_while(|c| c.is_ascii_digit()).collect();
     let looks_numbered = numeric_prefix.len() >= 4 || {
         // 0001 is four digits; V1 handled above; a bare "1_" is too weak.
         numeric_prefix.len() == 1 && stem.contains('_')
@@ -778,13 +787,13 @@ pub const MIGRATION_DIRS: [&str; 6] = [
 /// Any recognised migration directory under `root`, relative and sorted.
 pub fn migration_dirs(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    collect_dirs(root, root, 0, &mut out);
+    collect_dirs(root, 0, &mut out);
     out.sort();
     out.dedup();
     out
 }
 
-fn collect_dirs(root: &Path, dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+fn collect_dirs(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     if depth > 6 {
         return;
     }
@@ -799,14 +808,21 @@ fn collect_dirs(root: &Path, dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
         let name = e.file_name().to_string_lossy().to_string();
         if matches!(
             name.as_str(),
-            "node_modules" | "target" | ".git" | "venv" | ".venv" | "__pycache__" | "dist" | "build"
+            "node_modules"
+                | "target"
+                | ".git"
+                | "venv"
+                | ".venv"
+                | "__pycache__"
+                | "dist"
+                | "build"
         ) {
             continue;
         }
         if MIGRATION_DIRS.iter().any(|d| name == *d || p.ends_with(d)) {
             out.push(p.clone());
         }
-        collect_dirs(root, &p, depth + 1, out);
+        collect_dirs(&p, depth + 1, out);
     }
 }
 
@@ -825,21 +841,79 @@ pub fn body_digest(body: &str) -> String {
 
 /// Method names that only read.
 const READ_METHODS: &[&str] = &[
-    "find", "findone", "findmany", "findfirst", "findunique", "findbyid", "first",
-    "firstor", "last", "take", "all", "get", "filter", "where", "count",
-    "exists", "any", "scalar", "one", "oneornone", "list", "select", "fetch",
-    "fetchall", "fetchone", "fetchmany", "read", "load", "includes", "query",
-    "selectone", "joins", "orderby", "groupby", "aggregate", "sum", "avg",
-    "pluck", "values", "distinct", "with",
+    "find",
+    "findone",
+    "findmany",
+    "findfirst",
+    "findunique",
+    "findbyid",
+    "first",
+    "firstor",
+    "last",
+    "take",
+    "all",
+    "get",
+    "filter",
+    "where",
+    "count",
+    "exists",
+    "any",
+    "scalar",
+    "one",
+    "oneornone",
+    "list",
+    "select",
+    "fetch",
+    "fetchall",
+    "fetchone",
+    "fetchmany",
+    "read",
+    "load",
+    "includes",
+    "query",
+    "selectone",
+    "joins",
+    "orderby",
+    "groupby",
+    "aggregate",
+    "sum",
+    "avg",
+    "pluck",
+    "values",
+    "distinct",
+    "with",
 ];
 
 /// Method names that only write.
 const WRITE_METHODS: &[&str] = &[
-    "create", "createasync", "createmany", "insert", "insertmany", "add",
-    "addasync", "save", "update", "updateasync", "updatemany", "upsert",
-    "delete", "deleteasync", "deleteall", "deletemany", "destroy", "remove",
-    "removerange", "destroyall", "increment", "decrement", "truncate",
-    "updateorcreate", "savepoint", "rollbackto", "bulkcreate", "bulkupdate",
+    "create",
+    "createasync",
+    "createmany",
+    "insert",
+    "insertmany",
+    "add",
+    "addasync",
+    "save",
+    "update",
+    "updateasync",
+    "updatemany",
+    "upsert",
+    "delete",
+    "deleteasync",
+    "deleteall",
+    "deletemany",
+    "destroy",
+    "remove",
+    "removerange",
+    "destroyall",
+    "increment",
+    "decrement",
+    "truncate",
+    "updateorcreate",
+    "savepoint",
+    "rollbackto",
+    "bulkcreate",
+    "bulkupdate",
 ];
 
 fn op_for(method: &str) -> Option<Op> {
@@ -907,17 +981,17 @@ fn resolve_prisma(body: &str, file: &str) -> Vec<Call> {
             .take_while(|c| c.is_alphanumeric() || *c == '_')
             .collect();
         // prisma.$queryRaw / $executeRaw are raw, not model calls.
-        if !model.starts_with('$') {
-            if let Some(op) = op_for(&method) {
-                out.push(Call {
-    fn_name: String::new(),
-                    table: model.to_ascii_lowercase(),
-                    op,
-                    via: format!("prisma.{}.{}()", model, method),
-                    file: file.to_string(),
-                    line: 1,
-                });
-            }
+        if !model.starts_with('$')
+            && let Some(op) = op_for(&method)
+        {
+            out.push(Call {
+                fn_name: String::new(),
+                table: model.to_ascii_lowercase(),
+                op,
+                via: format!("prisma.{}.{}()", model, method),
+                file: file.to_string(),
+                line: 1,
+            });
         }
         rest = after_model;
     }
@@ -971,9 +1045,25 @@ fn resolve_model_calls(body: &str, file: &str) -> Vec<Call> {
         // on `session.query(User).all()` otherwise emits tables called `query`
         // and `session`, which is worse than emitting nothing.
         const HANDLES: &[&str] = &[
-            "session", "conn", "connection", "cursor", "cur", "db", "tx", "ctx",
-            "context", "repo", "repository", "query", "objects", "manager",
-            "client", "store", "em", "entitymanager", "unitofwork",
+            "session",
+            "conn",
+            "connection",
+            "cursor",
+            "cur",
+            "db",
+            "tx",
+            "ctx",
+            "context",
+            "repo",
+            "repository",
+            "query",
+            "objects",
+            "manager",
+            "client",
+            "store",
+            "em",
+            "entitymanager",
+            "unitofwork",
         ];
         let lower = word.to_ascii_lowercase();
         if HANDLES.contains(&lower.as_str()) {
@@ -1002,12 +1092,46 @@ fn resolve_model_calls(body: &str, file: &str) -> Vec<Call> {
         // `db.Where(..).Find(..)`, so `Where` looks exactly like a model class
         // and used to resolve a table named `Where`.
         const NOT_A_MODEL: &[&str] = &[
-            "where", "query", "session", "conn", "connection", "cursor", "cur",
-            "db", "database", "tx", "ctx", "context", "repo", "repository",
-            "create", "delete", "update", "find", "first", "last", "save", "get",
-            "exec", "execute", "run", "select", "insert", "count", "filter",
-            "table", "column", "row", "result", "value", "name", "id", "self",
-            "this", "super", "new",
+            "where",
+            "query",
+            "session",
+            "conn",
+            "connection",
+            "cursor",
+            "cur",
+            "db",
+            "database",
+            "tx",
+            "ctx",
+            "context",
+            "repo",
+            "repository",
+            "create",
+            "delete",
+            "update",
+            "find",
+            "first",
+            "last",
+            "save",
+            "get",
+            "exec",
+            "execute",
+            "run",
+            "select",
+            "insert",
+            "count",
+            "filter",
+            "table",
+            "column",
+            "row",
+            "result",
+            "value",
+            "name",
+            "id",
+            "self",
+            "this",
+            "super",
+            "new",
         ];
         let lower = word.to_ascii_lowercase();
         if NOT_A_MODEL.contains(&lower.as_str()) {
@@ -1025,7 +1149,7 @@ fn resolve_model_calls(body: &str, file: &str) -> Vec<Call> {
             continue;
         }
         out.push(Call {
-    fn_name: String::new(),
+            fn_name: String::new(),
             table: word.to_string(),
             op,
             via: format!("{}.{}()", word, method_raw),
@@ -1082,7 +1206,6 @@ fn tables_in_sql(stmt: &str) -> Vec<(String, Op)> {
     out
 }
 
-
 /// Model names passed as arguments inside a call, with the operation the call
 /// implies.
 ///
@@ -1121,9 +1244,27 @@ fn models_in_call_args(rest: &str, file: &str) -> Vec<Call> {
             // `create(order)`. Anything with a dot, a call or a keyword shape is
             // not an entity name.
             const NOT_ENTITY: &[&str] = &[
-                "true", "false", "null", "none", "undefined", "data", "options",
-                "opts", "params", "args", "values", "result", "response", "req",
-                "res", "ctx", "context", "config", "payload", "body", "id",
+                "true",
+                "false",
+                "null",
+                "none",
+                "undefined",
+                "data",
+                "options",
+                "opts",
+                "params",
+                "args",
+                "values",
+                "result",
+                "response",
+                "req",
+                "res",
+                "ctx",
+                "context",
+                "config",
+                "payload",
+                "body",
+                "id",
             ];
             let name_lower = name.to_ascii_lowercase();
             // A lowercase identifier is an entity only when it fills the whole
@@ -1155,7 +1296,7 @@ fn models_in_call_args(rest: &str, file: &str) -> Vec<Call> {
             {
                 let _ = tail;
                 out.push(Call {
-    fn_name: String::new(),
+                    fn_name: String::new(),
                     table: name,
                     op: *op,
                     via: format!("orm.{}", marker.trim_end_matches('(')),
@@ -1168,7 +1309,6 @@ fn models_in_call_args(rest: &str, file: &str) -> Vec<Call> {
     }
     out
 }
-
 
 /// Case-insensitive substring search returning a byte offset into `haystack`.
 ///
@@ -1184,10 +1324,10 @@ fn find_ci(haystack: &str, needle: &str) -> Option<usize> {
 /// reading a single query.
 fn entity_from_repository_name(name: &str) -> Option<String> {
     for suffix in ["Repository", "repository", "Repo", "repo", "Model", "model"] {
-        if let Some(prefix) = name.strip_suffix(suffix) {
-            if !prefix.is_empty() {
-                return Some(prefix.to_string());
-            }
+        if let Some(prefix) = name.strip_suffix(suffix)
+            && !prefix.is_empty()
+        {
+            return Some(prefix.to_string());
         }
     }
     None
@@ -1259,7 +1399,7 @@ fn find_operation_in_chain(rest: &str, file: &str, receiver: &str) -> Option<Cal
         }
         if let Some(op) = op_for(method_raw) {
             last = Some(Call {
-    fn_name: String::new(),
+                fn_name: String::new(),
                 table: receiver.to_string(),
                 op,
                 via: format!("{}.{}()", receiver, method_raw),
@@ -1292,11 +1432,7 @@ fn receiver_table(body: &str, receiver: &str) -> Option<String> {
         .chars()
         .take_while(|c| c.is_alphanumeric() || *c == '_')
         .collect();
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
+    if name.is_empty() { None } else { Some(name) }
 }
 
 /// `userRepo.findOne()`, `orderRepository.save()`: the entity is in the name.
@@ -1342,14 +1478,10 @@ fn resolve_named_repositories(body: &str, file: &str) -> Vec<Call> {
             // `this.userRepo.findOne` yields "this.userRepo." and rsplit gives an
             // empty last segment. Trim first, then take the last segment.
             let ident = ident.trim_matches('.').to_string();
-            let ident = ident
-                .rsplit('.')
-                .next()
-                .unwrap_or(&ident)
-                .to_string();
+            let ident = ident.rsplit('.').next().unwrap_or(&ident).to_string();
             if let Some(entity) = entity_from_repository_name(&ident) {
                 out.push(Call {
-    fn_name: String::new(),
+                    fn_name: String::new(),
                     table: entity.to_ascii_lowercase(),
                     op: *op,
                     via: format!("{}.{}()", ident, method),
@@ -1366,7 +1498,13 @@ fn resolve_named_repositories(body: &str, file: &str) -> Vec<Call> {
 /// A table name inside `db.Table("orders")`, `Table('users')`, `table_name=...`.
 fn resolve_quoted_table(body: &str, file: &str, op: Op, via_prefix: &str) -> Vec<Call> {
     let mut out = Vec::new();
-    for marker in ["Table(", "table(", "table_name=", "tableName=", "from_table("] {
+    for marker in [
+        "Table(",
+        "table(",
+        "table_name=",
+        "tableName=",
+        "from_table(",
+    ] {
         let mut from = 0usize;
         while let Some(at) = body[from..].find(marker) {
             let rest = &body[from + at + marker.len()..];
@@ -1377,7 +1515,7 @@ fn resolve_quoted_table(body: &str, file: &str, op: Op, via_prefix: &str) -> Vec
                     let name = unquote(&rest[..end + 2]);
                     if !name.is_empty() {
                         out.push(Call {
-    fn_name: String::new(),
+                            fn_name: String::new(),
                             table: name,
                             op,
                             via: format!("{}{}", via_prefix, marker),
@@ -1425,7 +1563,7 @@ pub fn scan_calls(path: &Path, body: &str) -> Vec<Call> {
         }
         for (table, op) in tables_in_sql(&stmt) {
             calls.push(Call {
-    fn_name: String::new(),
+                fn_name: String::new(),
                 table,
                 op,
                 via: "raw sql".into(),
@@ -1466,17 +1604,18 @@ fn resolve_handle_receivers(body: &str, file: &str) -> Vec<Call> {
                     .last()
                     .map(|c| c.is_alphanumeric() || c == '_')
                     .unwrap_or(false);
-            if before_ok && after.starts_with('.') {
-                if let Some(table) = receiver_table(&body[from + at..], handle) {
-                    // Find the operation method after the collection.
-                    let chain = &after[after[1..]
-                        .chars()
-                        .take_while(|c| c.is_alphanumeric() || *c == '_')
-                        .count()
-                        + 1..];
-                    if let Some(call) = find_operation_in_chain(chain, file, &table) {
-                        out.push(call);
-                    }
+            if before_ok
+                && after.starts_with('.')
+                && let Some(table) = receiver_table(&body[from + at..], handle)
+            {
+                // Find the operation method after the collection.
+                let chain = &after[after[1..]
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .count()
+                    + 1..];
+                if let Some(call) = find_operation_in_chain(chain, file, &table) {
+                    out.push(call);
                 }
             }
             from = from + at + handle.len();
@@ -1514,11 +1653,15 @@ fn resolve_orm_arguments(body: &str, file: &str) -> Vec<Call> {
                 .collect();
             let tail = &rest[name.len()..];
             let model_like = !name.is_empty()
-                && name.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false)
+                && name
+                    .chars()
+                    .next()
+                    .map(|c| c.is_ascii_uppercase())
+                    .unwrap_or(false)
                 && (tail.starts_with(')') || tail.starts_with('.') || tail.starts_with(','));
             if model_like {
                 out.push(Call {
-    fn_name: String::new(),
+                    fn_name: String::new(),
                     table: name,
                     op: *op,
                     via: format!("orm.{}", marker.trim_end_matches('(')),
@@ -1563,7 +1706,7 @@ fn resolve_destinations(body: &str, file: &str) -> Vec<Call> {
                 .collect();
             if !name.is_empty() {
                 out.push(Call {
-    fn_name: String::new(),
+                    fn_name: String::new(),
                     table: name,
                     op,
                     via: format!("gorm.{}", method.trim_end_matches('(')),
@@ -1623,14 +1766,14 @@ fn is_query_position(body: &str, quote_at: usize) -> bool {
     // deliberately not a boundary here: cutting at it would discard `execute`
     // and leave the tail empty.
     let tail: String = before
-        .rsplit(|c| c == ';' || c == '\n' || c == ',' || c == '=')
+        .rsplit([';', '\n', ',', '='])
         .next()
         .unwrap_or("")
         .trim()
         .to_string();
     // The callee name is on the tail for a call argument, so read through the
     // opening paren: `cur.execute(` must yield `execute`, not an empty string.
-    let tail = tail.trim_end_matches(|c: char| c == '(' || c == ' ');
+    let tail = tail.trim_end_matches(['(', ' ']);
     let ident: String = tail
         .chars()
         .rev()
@@ -1814,10 +1957,8 @@ fn is_literal_only(s: &str) -> bool {
 /// `.format(`, or a `${}` template hole.
 fn looks_like_concat(l: &str) -> bool {
     // f-string with a hole.
-    if l.contains("f\"") || l.contains("f'") {
-        if l.contains('{') {
-            return true;
-        }
+    if (l.contains("f\"") || l.contains("f'")) && l.contains('{') {
+        return true;
     }
     // Template literal with a hole.
     if l.contains("${") {
@@ -1864,7 +2005,7 @@ pub fn index_schema(root: &Path) -> Result<DbGraph, String> {
 
     // Schema and migrations.
     let mut files: Vec<PathBuf> = Vec::new();
-    walk(root, root, 0, &mut files);
+    walk(root, 0, &mut files);
     files.sort();
     files.dedup();
 
@@ -1874,57 +2015,59 @@ pub fn index_schema(root: &Path) -> Result<DbGraph, String> {
             .unwrap_or(p)
             .to_string_lossy()
             .replace('\\', "/");
-        if p.extension().map(|e| e == "sql").unwrap_or(false) {
-            if let Ok(body) = std::fs::read_to_string(p) {
-                if let Some(dialect) = classify_migration(&rel) {
-                    g.migrations.push(Migration {
-                        file: rel.clone(),
-                        version: migration_version(&rel),
-                        dialect,
-                        sha: body_digest(&body),
-                    });
-                }
-                let mut parsed = parse_sql(p, &body);
-                // A drop in this file removes the table from everything indexed so
-                // far, not just from this file, which is what makes the graph
-                // reflect the live schema rather than every table ever created.
-                for dropped in take_dropped_tables() {
-                    g.tables.retain(|x| !table_names_match(&x.name, &dropped));
-                }
-                // Merge by name, later file wins, which matches migration order.
-                for t in parsed.drain(..) {
-                    match g.tables.iter().position(|x| x.name == t.name) {
-                        Some(i) => g.tables[i] = t,
-                        None => g.tables.push(t),
-                    }
+        if p.extension().map(|e| e == "sql").unwrap_or(false)
+            && let Ok(body) = std::fs::read_to_string(p)
+        {
+            if let Some(dialect) = classify_migration(&rel) {
+                g.migrations.push(Migration {
+                    file: rel.clone(),
+                    version: migration_version(&rel),
+                    dialect,
+                    sha: body_digest(&body),
+                });
+            }
+            let mut parsed = parse_sql(p, &body);
+            // A drop in this file removes the table from everything indexed so
+            // far, not just from this file, which is what makes the graph
+            // reflect the live schema rather than every table ever created.
+            for dropped in take_dropped_tables() {
+                g.tables.retain(|x| !table_names_match(&x.name, &dropped));
+            }
+            // Merge by name, later file wins, which matches migration order.
+            for t in parsed.drain(..) {
+                match g.tables.iter().position(|x| x.name == t.name) {
+                    Some(i) => g.tables[i] = t,
+                    None => g.tables.push(t),
                 }
             }
         }
         // Alembic emits python that contains create_table calls.
-        if p.extension().map(|e| e == "py").unwrap_or(false) {
-            if let Ok(body) = std::fs::read_to_string(p) {
-                let parsed = parse_alembic(p, &body);
-                for t in parsed {
-                    match g.tables.iter().position(|x| x.name == t.name) {
-                        Some(i) => g.tables[i] = t,
-                        None => g.tables.push(t),
-                    }
+        if p.extension().map(|e| e == "py").unwrap_or(false)
+            && let Ok(body) = std::fs::read_to_string(p)
+        {
+            let parsed = parse_alembic(p, &body);
+            for t in parsed {
+                match g.tables.iter().position(|x| x.name == t.name) {
+                    Some(i) => g.tables[i] = t,
+                    None => g.tables.push(t),
                 }
             }
         }
         // Call sites from every code and query file.
         if matches!(
-            p.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default().as_str(),
+            p.extension()
+                .map(|e| e.to_string_lossy().to_string())
+                .unwrap_or_default()
+                .as_str(),
             "py" | "ts" | "tsx" | "js" | "jsx" | "go" | "rb" | "cs" | "php" | "java" | "kt" | "sql"
-        ) {
-            if let Ok(body) = std::fs::read_to_string(p) {
-                let mut calls = scan_calls(p, &body);
-                for c in calls.iter_mut() {
-                    c.file = rel.clone();
-                    c.line = 1;
-                }
-                g.calls.extend(calls);
+        ) && let Ok(body) = std::fs::read_to_string(p)
+        {
+            let mut calls = scan_calls(p, &body);
+            for c in calls.iter_mut() {
+                c.file = rel.clone();
+                c.line = 1;
             }
+            g.calls.extend(calls);
         }
     }
 
@@ -1953,7 +2096,7 @@ fn parse_alembic(path: &Path, body: &str) -> Vec<Table> {
             continue;
         };
         let inner = &after[open + 1..close];
-        let name = split_top_level(&inner, ',')
+        let name = split_top_level(inner, ',')
             .first()
             .map(|c| {
                 let t = c.trim();
@@ -1972,7 +2115,7 @@ fn parse_alembic(path: &Path, body: &str) -> Vec<Table> {
             indexes: Vec::new(),
             source: src.clone(),
         };
-        for part in split_top_level(&inner, ',') {
+        for part in split_top_level(inner, ',') {
             let p = part.trim();
             let Some(ca) = p.find("Column(") else {
                 continue;
@@ -2009,7 +2152,7 @@ fn parse_alembic(path: &Path, body: &str) -> Vec<Table> {
     out
 }
 
-fn walk(root: &Path, dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     if depth > 8 {
         return;
     }
@@ -2025,11 +2168,18 @@ fn walk(root: &Path, dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
         if p.is_dir() {
             if matches!(
                 name.as_str(),
-                "node_modules" | "target" | "venv" | ".venv" | "__pycache__" | "dist" | "build" | "vendor"
+                "node_modules"
+                    | "target"
+                    | "venv"
+                    | ".venv"
+                    | "__pycache__"
+                    | "dist"
+                    | "build"
+                    | "vendor"
             ) {
                 continue;
             }
-            walk(root, &p, depth + 1, out);
+            walk(&p, depth + 1, out);
         } else {
             out.push(p);
         }
@@ -2060,9 +2210,13 @@ pub fn orphans(g: &DbGraph) -> Vec<String> {
         // A table referenced by a foreign key is part of the schema even if no
         // code names it directly.
         let referenced = g.tables.iter().any(|other| {
-            other.name != t.name && other.columns.iter().any(|c| {
-                c.fk_table.as_deref().map(|f| table_names_match(f, &t.name)).unwrap_or(false)
-            })
+            other.name != t.name
+                && other.columns.iter().any(|c| {
+                    c.fk_table
+                        .as_deref()
+                        .map(|f| table_names_match(f, &t.name))
+                        .unwrap_or(false)
+                })
         });
         if !referenced {
             out.push(t.name.clone());
@@ -2335,11 +2489,7 @@ fn walk_for_cycles(
             continue;
         };
         // Resolve by name, tolerating singular/plural differences.
-        let Some(next) = g
-            .tables
-            .iter()
-            .find(|t| table_names_match(&t.name, target))
-        else {
+        let Some(next) = g.tables.iter().find(|t| table_names_match(&t.name, target)) else {
             continue;
         };
 
@@ -2522,10 +2672,7 @@ pub fn policy_findings(g: &DbGraph) -> Vec<PolicyFinding> {
                     kind: "nullable_sensitive".into(),
                     table: t.name.clone(),
                     column: c.name.clone(),
-                    message: format!(
-                        "{}.{} holds sensitive data but is nullable",
-                        t.name, c.name
-                    ),
+                    message: format!("{}.{} holds sensitive data but is nullable", t.name, c.name),
                     severity: "warning".into(),
                 });
             }
@@ -2596,12 +2743,36 @@ pub fn policy_findings(g: &DbGraph) -> Vec<PolicyFinding> {
 /// `sensitive_columns` uses so the two can never disagree.
 fn is_sensitive_name(name: &str) -> bool {
     const RULES: &[&str] = &[
-        "email", "e_mail", "phone", "mobile", "ssn", "social_security",
-        "national_id", "passport", "dob", "date_of_birth", "birthdate",
-        "address", "street", "postcode", "zip", "latitude", "longitude",
-        "ip_address", "credit_card", "card_number", "cvv", "pan", "password",
-        "password_hash", "passwd", "secret", "token", "api_key",
-        "private_key", "salt",
+        "email",
+        "e_mail",
+        "phone",
+        "mobile",
+        "ssn",
+        "social_security",
+        "national_id",
+        "passport",
+        "dob",
+        "date_of_birth",
+        "birthdate",
+        "address",
+        "street",
+        "postcode",
+        "zip",
+        "latitude",
+        "longitude",
+        "ip_address",
+        "credit_card",
+        "card_number",
+        "cvv",
+        "pan",
+        "password",
+        "password_hash",
+        "passwd",
+        "secret",
+        "token",
+        "api_key",
+        "private_key",
+        "salt",
     ];
     let lower = name.to_ascii_lowercase();
     RULES
@@ -2753,9 +2924,23 @@ pub struct NPlusOne {
 
 /// Spellings that batch the query and therefore make the pattern correct.
 const BATCH_MARKERS: &[&str] = &[
-    "in_", "__in", "in(", " in (", " in(", "wherein", "where_in", "bulk_",
-    "bulkcreate", "bulk_create", "insertmany", "insert_many", "batch",
-    "fetchallatonce", "findmanyin", "in: ids", "in: [",
+    "in_",
+    "__in",
+    "in(",
+    " in (",
+    " in(",
+    "wherein",
+    "where_in",
+    "bulk_",
+    "bulkcreate",
+    "bulk_create",
+    "insertmany",
+    "insert_many",
+    "batch",
+    "fetchallatonce",
+    "findmanyin",
+    "in: ids",
+    "in: [",
 ];
 
 /// True when this line batches rather than querying per row.
@@ -2798,9 +2983,7 @@ fn has_query_call(line: &str) -> bool {
 
 /// Indentation width of a line, counting leading spaces and tabs alike.
 fn indent_of(line: &str) -> usize {
-    line.chars()
-        .take_while(|c| *c == ' ' || *c == '\t')
-        .count()
+    line.chars().take_while(|c| *c == ' ' || *c == '\t').count()
 }
 
 /// True when the line opens a loop: a `for`, `while`, `forEach`, `for..of`, or a
@@ -2905,9 +3088,25 @@ pub fn n_plus_one_candidates(path: &Path, body: &str) -> Vec<NPlusOne> {
         // call for the accessor itself, and reporting a table called `query`
         // alongside `Order` is noise that hides the real finding.
         const NOT_TABLES: &[&str] = &[
-            "query", "session", "conn", "connection", "cursor", "cur", "db",
-            "objects", "manager", "where", "table", "repo", "repository",
-            "em", "client", "store", "context", "ctx", "tx",
+            "query",
+            "session",
+            "conn",
+            "connection",
+            "cursor",
+            "cur",
+            "db",
+            "objects",
+            "manager",
+            "where",
+            "table",
+            "repo",
+            "repository",
+            "em",
+            "client",
+            "store",
+            "context",
+            "ctx",
+            "tx",
         ];
         let mut tables: Vec<String> = calls
             .iter()
@@ -2954,7 +3153,7 @@ pub fn n_plus_one_candidates(path: &Path, body: &str) -> Vec<NPlusOne> {
 pub fn n_plus_one_in_workspace(root: &Path) -> Vec<NPlusOne> {
     let mut out = Vec::new();
     let mut files: Vec<std::path::PathBuf> = Vec::new();
-    collect_code_files(root, root, 0, &mut files);
+    collect_code_files(root, 0, &mut files);
     files.sort();
     for p in files {
         if let Ok(body) = std::fs::read_to_string(&p) {
@@ -2971,7 +3170,7 @@ pub fn n_plus_one_in_workspace(root: &Path) -> Vec<NPlusOne> {
     out
 }
 
-fn collect_code_files(root: &Path, dir: &Path, depth: usize, out: &mut Vec<std::path::PathBuf>) {
+fn collect_code_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     if depth > 8 {
         return;
     }
@@ -2987,12 +3186,18 @@ fn collect_code_files(root: &Path, dir: &Path, depth: usize, out: &mut Vec<std::
         if p.is_dir() {
             if matches!(
                 name.as_str(),
-                "node_modules" | "target" | "venv" | ".venv" | "__pycache__" | "dist"
-                    | "build" | "vendor"
+                "node_modules"
+                    | "target"
+                    | "venv"
+                    | ".venv"
+                    | "__pycache__"
+                    | "dist"
+                    | "build"
+                    | "vendor"
             ) {
                 continue;
             }
-            collect_code_files(root, &p, depth + 1, out);
+            collect_code_files(&p, depth + 1, out);
         } else if matches!(
             p.extension()
                 .map(|e| e.to_string_lossy().to_string())
@@ -3071,8 +3276,14 @@ pub fn save_db_index(root: &Path, g: &DbGraph) -> Result<(), String> {
                     json_str(&c.ty),
                     c.pk,
                     c.nullable,
-                    c.fk_table.as_deref().map(json_str).unwrap_or_else(|| "null".into()),
-                    c.fk_col.as_deref().map(json_str).unwrap_or_else(|| "null".into()),
+                    c.fk_table
+                        .as_deref()
+                        .map(json_str)
+                        .unwrap_or_else(|| "null".into()),
+                    c.fk_col
+                        .as_deref()
+                        .map(json_str)
+                        .unwrap_or_else(|| "null".into()),
                     c.on_delete_cascade
                 )
             })
@@ -3202,9 +3413,7 @@ fn parse_db_index(text: &str) -> Result<DbGraph, String> {
                     t.indexes.push(Index {
                         name: inm,
                         columns: json_array(&i, "cols")
-                            .map(|a| {
-                                split_json_strings(&a).into_iter().collect()
-                            })
+                            .map(|a| split_json_strings(&a).into_iter().collect())
                             .unwrap_or_default(),
                         unique: json_field_bool(&i, "unique"),
                     });
@@ -3243,8 +3452,7 @@ fn parse_db_index(text: &str) -> Result<DbGraph, String> {
             let Some(file) = json_field_str(&chunk, "file") else {
                 continue;
             };
-            let dialect_static: &'static str = match json_field_str(&chunk, "dialect").as_deref()
-            {
+            let dialect_static: &'static str = match json_field_str(&chunk, "dialect").as_deref() {
                 Some("alembic") => "alembic",
                 Some("goose") => "goose",
                 Some("flyway") => "flyway",
@@ -3415,10 +3623,7 @@ pub fn migration_drift(root: &Path, stored: &DbGraph) -> Vec<String> {
     for m in &current.migrations {
         match stored.migrations.iter().find(|s| s.file == m.file) {
             Some(s) if s.sha == m.sha => {}
-            Some(_) => out.push(format!(
-                "{} changed since the index was written",
-                m.file
-            )),
+            Some(_) => out.push(format!("{} changed since the index was written", m.file)),
             None => out.push(format!("{} is new and not in the index", m.file)),
         }
     }
@@ -3444,7 +3649,11 @@ pub fn guard_reports(root: &Path, g: &DbGraph) -> Vec<(String, String, String)> 
     let mut out: Vec<(String, String, String)> = Vec::new();
 
     for c in fk_cycles(g) {
-        let sev = if c.cascading_delete { "critical" } else { "warning" };
+        let sev = if c.cascading_delete {
+            "critical"
+        } else {
+            "warning"
+        };
         out.push((
             "database.schema".into(),
             sev.into(),
@@ -3483,7 +3692,11 @@ pub fn guard_reports(root: &Path, g: &DbGraph) -> Vec<(String, String, String)> 
             "warning".into(),
             format!(
                 "possible N+1 query on {} at {}:{}: {}. {}",
-                if n.table.is_empty() { "an unresolved table" } else { n.table.as_str() },
+                if n.table.is_empty() {
+                    "an unresolved table"
+                } else {
+                    n.table.as_str()
+                },
                 n.file,
                 n.line,
                 n.reason,
@@ -3536,10 +3749,7 @@ fn attribute_calls(calls: &mut [Call], _path: &Path, body: &str) {
         // appears inside `createUser`, so a plain substring search attributes the
         // call to the route registration on line 1 instead of the function that
         // actually issues the query, which then has no enclosing function at all.
-        let Some(idx) = lowered
-            .iter()
-            .position(|l| contains_identifier(l, &needle))
-        else {
+        let Some(idx) = lowered.iter().position(|l| contains_identifier(l, &needle)) else {
             continue;
         };
         call.line = (idx + 1) as u64;

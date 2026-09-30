@@ -69,15 +69,15 @@ fn cache_enabled() -> bool {
 /// dependency for this, the three variables are the convention already and a
 /// `dirs` crate would be one more thing to audit for a path lookup.
 pub fn cache_dir() -> Option<PathBuf> {
-    if let Some(d) = std::env::var_os("HEIDES_CACHE_DIR") {
-        if !d.is_empty() {
-            return Some(PathBuf::from(d).join("osv"));
-        }
+    if let Some(d) = std::env::var_os("HEIDES_CACHE_DIR")
+        && !d.is_empty()
+    {
+        return Some(PathBuf::from(d).join("osv"));
     }
-    if let Some(x) = std::env::var_os("XDG_CACHE_HOME") {
-        if !x.is_empty() {
-            return Some(PathBuf::from(x).join("heides").join("osv"));
-        }
+    if let Some(x) = std::env::var_os("XDG_CACHE_HOME")
+        && !x.is_empty()
+    {
+        return Some(PathBuf::from(x).join("heides").join("osv"));
     }
     std::env::var_os("HOME")
         .filter(|h| !h.is_empty())

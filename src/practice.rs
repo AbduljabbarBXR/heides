@@ -78,7 +78,7 @@ const VALUE_SHAPED_CREDENTIALS: [(&str, &str); 13] = [
 fn value_shaped_credential(line: &str) -> Option<&'static str> {
     // Only the region after a real assignment, so function bodies and
     // comparisons cannot fire it.
-    let at = line.find(|c| c == '=' || c == ':')?;
+    let at = line.find(['=', ':'])?;
     let rest = line[at + 1..].trim();
     // The credential must be a quoted literal. An unquoted remainder means this
     // is an env read, a concatenation or prose rather than a hardcoded value.
@@ -152,12 +152,36 @@ fn value_shaped_credential(line: &str) -> Option<&'static str> {
 /// Deliberately not a taint sink: the parameter is not a source, per the
 /// precision argument in SOURCES, so a sink row would never fire.
 const SHELL_UNSAFE: [(&str, &str, &str); 6] = [
-    ("shell=True", "shell=True passes the command through a shell; use an argument list", "critical"),
-    ("shell = True", "shell=True passes the command through a shell; use an argument list", "critical"),
-    ("verify=False", "verify=False disables TLS certificate verification", "critical"),
-    ("verify = False", "verify=False disables TLS certificate verification", "critical"),
-    ("rejectUnauthorized: false", "TLS verification disabled", "critical"),
-    ("rejectUnauthorized:false", "TLS verification disabled", "critical"),
+    (
+        "shell=True",
+        "shell=True passes the command through a shell; use an argument list",
+        "critical",
+    ),
+    (
+        "shell = True",
+        "shell=True passes the command through a shell; use an argument list",
+        "critical",
+    ),
+    (
+        "verify=False",
+        "verify=False disables TLS certificate verification",
+        "critical",
+    ),
+    (
+        "verify = False",
+        "verify=False disables TLS certificate verification",
+        "critical",
+    ),
+    (
+        "rejectUnauthorized: false",
+        "TLS verification disabled",
+        "critical",
+    ),
+    (
+        "rejectUnauthorized:false",
+        "TLS verification disabled",
+        "critical",
+    ),
 ];
 
 const WEAK_CRYPTO: [(&str, &str, &str); 8] = [

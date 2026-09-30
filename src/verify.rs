@@ -113,7 +113,7 @@ pub fn run_suites(root: &Path) -> Vec<Suite> {
         // marker files can each introduce it, and running pytest six times
         // because a repo has both pytest.ini and pyproject.toml is worse than
         // useless in a verify loop.
-        if tried.iter().any(|t| *t == name) {
+        if tried.contains(&name) {
             continue;
         }
         tried.push(name);
@@ -149,7 +149,7 @@ fn run_one(name: &'static str, cmd: &'static str, root: &Path) -> Suite {
                 command: cmd,
                 outcome: SuiteOutcome::Unverified,
                 detail: format!("could not start `{}`: {}", cmd, e),
-            }
+            };
         }
     };
 
@@ -162,7 +162,7 @@ fn run_one(name: &'static str, cmd: &'static str, root: &Path) -> Suite {
 
     let outcome = if code == 0 {
         SuiteOutcome::Passed
-    } else if text.to_lowercase().contains("no test") 
+    } else if text.to_lowercase().contains("no test")
         || text.to_lowercase().contains("no tests")
         || text.to_lowercase().contains("0 tests")
     {
@@ -216,12 +216,14 @@ pub fn verify(root: &Path, skip_tests: bool, require_advisories: bool) -> Verdic
                 advisories_ran: false,
                 reasons: vec![format!("could not index the workspace: {}", e)],
                 findings: Vec::new(),
-            }
+            };
         }
     };
 
-    let mut policy = DepsPolicy::default();
-    policy.require_advisories = require_advisories;
+    let policy = DepsPolicy {
+        require_advisories,
+        ..DepsPolicy::default()
+    };
 
     // The database guards are part of the definition of done: a cyclic cascade
     // or a sensitive column on a read path is exactly the kind of thing a loop
@@ -230,9 +232,7 @@ pub fn verify(root: &Path, skip_tests: bool, require_advisories: bool) -> Verdic
     // Both extra guard families. The filter previously admitted only
     // `database.` guards, so a committed credential was invisible to the
     // definition of done, which is the one place it must never be.
-    reports.retain(|r| {
-        !(r.guard.starts_with("database.") || r.guard.starts_with("config."))
-    });
+    reports.retain(|r| !(r.guard.starts_with("database.") || r.guard.starts_with("config.")));
     reports.extend(
         harmony::check_workspace_with_database(root, &graph)
             .into_iter()
@@ -337,8 +337,7 @@ pub fn render(v: &Verdict) -> String {
         };
         out.push_str(&line);
         out.push('\n');
-        if !s.detail.is_empty() && !s.outcome.is_failure() && s.outcome != SuiteOutcome::Passed
-        {
+        if !s.detail.is_empty() && !s.outcome.is_failure() && s.outcome != SuiteOutcome::Passed {
             for l in s.detail.lines() {
                 out.push_str(&format!("        {}\n", l));
             }

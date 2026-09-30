@@ -114,6 +114,10 @@ fn the_shell_safe_fixtures_still_pass_through_check() {
         .filter(|r| r.severity == "critical" || r.severity == "blocker")
         .map(|r| r.message.clone())
         .collect();
-    assert!(bad.is_empty(), "correct code must not be critical: {:?}", bad);
+    assert!(
+        bad.is_empty(),
+        "correct code must not be critical: {:?}",
+        bad
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

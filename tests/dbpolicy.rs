@@ -98,9 +98,9 @@ fn an_indirect_cycle_is_found_and_the_path_is_walkable() {
         cycles
     );
     assert!(
-        cycles.iter().all(|c| {
-            c.path.len() >= 2 && c.path.first() == c.path.last()
-        }),
+        cycles
+            .iter()
+            .all(|c| { c.path.len() >= 2 && c.path.first() == c.path.last() }),
         "every reported cycle closes on itself and carries at least one edge: {:?}",
         cycles
     );
@@ -195,7 +195,11 @@ fn cycle_detection_terminates_on_a_mutually_recursive_pair() {
     );
     let cycles = db::fk_cycles(&g);
     assert!(!cycles.is_empty());
-    assert!(cycles.len() <= 4, "each edge pair yields one cycle: {:?}", cycles);
+    assert!(
+        cycles.len() <= 4,
+        "each edge pair yields one cycle: {:?}",
+        cycles
+    );
     for c in &cycles {
         assert!(c.path.len() <= 4, "no unbounded path growth: {:?}", c);
     }
@@ -287,9 +291,7 @@ fn a_nullable_sensitive_column_is_reported() {
         issues
     );
 
-    let required = graph(
-        "CREATE TABLE users (id INTEGER PRIMARY KEY, ssn TEXT NOT NULL);",
-    );
+    let required = graph("CREATE TABLE users (id INTEGER PRIMARY KEY, ssn TEXT NOT NULL);");
     assert!(
         !db::policy_findings(&required)
             .iter()
@@ -311,9 +313,7 @@ fn a_credential_column_without_a_default_is_reported_as_a_missing_constraint() {
     // Informational, not blocking: a credential column is not a uniqueness
     // candidate, but the check exists so the shape is reviewed.
     assert!(
-        issues
-            .iter()
-            .all(|p| p.kind != "credential_in_free_text"),
+        issues.iter().all(|p| p.kind != "credential_in_free_text"),
         "a plain TEXT credential column is normal practice: {:?}",
         issues
     );
@@ -331,7 +331,9 @@ fn a_table_with_no_primary_key_is_reported() {
 
     let ok = graph("CREATE TABLE logs (id INTEGER PRIMARY KEY, message TEXT);");
     assert!(
-        !db::policy_findings(&ok).iter().any(|p| p.kind == "no_primary_key")
+        !db::policy_findings(&ok)
+            .iter()
+            .any(|p| p.kind == "no_primary_key")
     );
 }
 

@@ -74,11 +74,11 @@ pub fn parse_package_lock(text: &str) -> Result<LockGraph, String> {
         // dependency looking like an unreachable leaf, because nothing pointed
         // at it. The root is not a node; its dependencies become roots instead,
         // which is what the direct set is for.
-        if let Some(root) = v.get("packages").and_then(|p| p.get("")) {
-            if let Some(deps) = root.get("dependencies").and_then(|d| d.as_object()) {
-                for (child, _) in deps {
-                    direct.push(child.clone());
-                }
+        if let Some(root) = v.get("packages").and_then(|p| p.get(""))
+            && let Some(deps) = root.get("dependencies").and_then(|d| d.as_object())
+        {
+            for (child, _) in deps {
+                direct.push(child.clone());
             }
         }
     } else if let Some(map) = v.get("dependencies").and_then(|d| d.as_object()) {
@@ -270,9 +270,9 @@ fn yarn_package_name(spec: &str) -> Option<String> {
     if s.is_empty() {
         return None;
     }
-    let at = if s.starts_with('@') {
-        // The first @ is the scope marker, so look for the separator after it.
-        s[1..].find('@').map(|i| i + 1)
+    // The first @ is the scope marker, so the separator is the one after it.
+    let at = if let Some(rest) = s.strip_prefix('@') {
+        rest.find('@').map(|i| i + 1)
     } else {
         s.find('@')
     };
@@ -566,7 +566,9 @@ pub fn parse_go_sum(text: &str) -> Result<LockGraph, String> {
         }
         let mut parts = t.split_whitespace();
         let Some(name) = parts.next() else { continue };
-        let Some(version) = parts.next() else { continue };
+        let Some(version) = parts.next() else {
+            continue;
+        };
         // The go.mod hash line describes the module's own manifest, not a
         // second build of the module.
         if version.ends_with("/go.mod") {
@@ -644,7 +646,10 @@ pub fn parse_gemfile_lock(text: &str) -> Result<LockGraph, String> {
         }
         let entry = trimmed.trim_end_matches('!');
         let (name, version) = match entry.split_once(" (") {
-            Some((n, v)) => (n.trim().to_string(), v.trim_end_matches(')').trim().to_string()),
+            Some((n, v)) => (
+                n.trim().to_string(),
+                v.trim_end_matches(')').trim().to_string(),
+            ),
             None => (entry.trim().to_string(), String::new()),
         };
         if name.is_empty() {
@@ -684,4 +689,14 @@ pub fn parse_gemfile_lock(text: &str) -> Result<LockGraph, String> {
 }
 
 /// Keys that appear inside a pnpm package block but are not dependencies.
-const PPNPM_META_KEYS: &[&str] = &["dev", "optional", "resolution", "engines", "peer", "hasBin", "deprecated", "cpu", "os"];
+const PPNPM_META_KEYS: &[&str] = &[
+    "dev",
+    "optional",
+    "resolution",
+    "engines",
+    "peer",
+    "hasBin",
+    "deprecated",
+    "cpu",
+    "os",
+];

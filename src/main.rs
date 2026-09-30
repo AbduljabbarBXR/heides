@@ -234,7 +234,9 @@ fn main() -> ExitCode {
                 return ExitCode::SUCCESS;
             }
             "verify" => {
-                println!("usage. heides verify [--skip-tests] [--require-advisories] [--json] [dir]");
+                println!(
+                    "usage. heides verify [--skip-tests] [--require-advisories] [--json] [dir]"
+                );
                 return ExitCode::SUCCESS;
             }
             "db" => {
@@ -481,15 +483,12 @@ fn main() -> ExitCode {
             // previously admitted only `database.` guards, so the config
             // findings that function also returns were dropped here and `check`
             // reported a clean workspace over a repository with a live key in it.
-            reports.retain(|r| {
-                !(r.guard.starts_with("database.") || r.guard.starts_with("config."))
-            });
+            reports
+                .retain(|r| !(r.guard.starts_with("database.") || r.guard.starts_with("config.")));
             reports.extend(
                 harmony::check_workspace_with_database(&root, &graph)
                     .into_iter()
-                    .filter(|r| {
-                        r.guard.starts_with("database.") || r.guard.starts_with("config.")
-                    }),
+                    .filter(|r| r.guard.starts_with("database.") || r.guard.starts_with("config.")),
             );
             if let Some(p) = pulse {
                 p.finish();
@@ -675,16 +674,13 @@ fn main() -> ExitCode {
                         println!("usage. heides db touch <METHOD> <path> [dir]");
                         return ExitCode::FAILURE;
                     }
-                    let path = args
-                        .get(4)
-                        .map(|s| s.to_string())
-                        .or_else(|| {
-                            surface
-                                .endpoints
-                                .iter()
-                                .find(|e| e.method == method)
-                                .map(|e| e.path.clone())
-                        });
+                    let path = args.get(4).map(|s| s.to_string()).or_else(|| {
+                        surface
+                            .endpoints
+                            .iter()
+                            .find(|e| e.method == method)
+                            .map(|e| e.path.clone())
+                    });
                     let Some(path) = path else {
                         println!("no {} route here", method);
                         return ExitCode::FAILURE;
@@ -731,11 +727,7 @@ fn main() -> ExitCode {
                     }
                     if let Some(v) = surface.reads.get(&key) {
                         for r in v {
-                            println!(
-                                "reads {} via {}",
-                                surface.resolve_table(&r.table),
-                                r.via
-                            );
+                            println!("reads {} via {}", surface.resolve_table(&r.table), r.via);
                             println!("  at {}:{}", r.file, r.line);
                         }
                     }
@@ -757,14 +749,18 @@ fn main() -> ExitCode {
                 }
                 "reads" => {
                     for c in &graph.calls {
-                        if c.op == heides::db::Op::Read && heides::db::table_names_match(&c.table, name) {
+                        if c.op == heides::db::Op::Read
+                            && heides::db::table_names_match(&c.table, name)
+                        {
                             println!("{} via {}", c.table, c.via);
                         }
                     }
                 }
                 "writes" => {
                     for c in &graph.calls {
-                        if c.op == heides::db::Op::Write && heides::db::table_names_match(&c.table, name) {
+                        if c.op == heides::db::Op::Write
+                            && heides::db::table_names_match(&c.table, name)
+                        {
                             println!("{} via {}", c.table, c.via);
                         }
                     }
@@ -796,7 +792,11 @@ fn main() -> ExitCode {
                             c.table,
                             c.column,
                             c.path.join(" -> "),
-                            if c.cascading_delete { "  [ON DELETE CASCADE]" } else { "" }
+                            if c.cascading_delete {
+                                "  [ON DELETE CASCADE]"
+                            } else {
+                                ""
+                            }
                         );
                     }
                     if verdict.cycles.is_empty() {
@@ -813,7 +813,10 @@ fn main() -> ExitCode {
                 }
                 "sensitive" => {
                     for e in &verdict.sensitive_exposed {
-                        println!("{}.{} ({}) reachable by a read via {}", e.table, e.column, e.kind, e.via);
+                        println!(
+                            "{}.{} ({}) reachable by a read via {}",
+                            e.table, e.column, e.kind, e.via
+                        );
                     }
                     if verdict.sensitive_exposed.is_empty() {
                         println!("no sensitive column reaches a read path");

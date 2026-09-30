@@ -560,10 +560,7 @@ fn handle(id: &Value, method: &str, params: &Value) {
                     ok(id, text_result(grounding::web_confirm(query)));
                 }
                 "harmony.verify" => {
-                    let want_json = args
-                        .get("json")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
+                    let want_json = args.get("json").and_then(|v| v.as_bool()).unwrap_or(false);
                     let p = std::path::PathBuf::from(&root);
                     let v = crate::verify::verify(&p, false, crate::deps::require_advisories());
                     let body = if want_json {
@@ -641,8 +638,7 @@ fn handle(id: &Value, method: &str, params: &Value) {
                             let want_op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
                             let mut out = String::new();
                             for c in &g.calls {
-                                if !only.is_empty()
-                                    && !crate::db::table_names_match(&c.table, only)
+                                if !only.is_empty() && !crate::db::table_names_match(&c.table, only)
                                 {
                                     continue;
                                 }
@@ -655,7 +651,11 @@ fn handle(id: &Value, method: &str, params: &Value) {
                                     "{} {} in {} at {}:{}\n",
                                     c.op.as_str(),
                                     c.table,
-                                    if c.fn_name.is_empty() { "file scope" } else { &c.fn_name },
+                                    if c.fn_name.is_empty() {
+                                        "file scope"
+                                    } else {
+                                        &c.fn_name
+                                    },
                                     c.file,
                                     c.line
                                 ));
@@ -690,8 +690,7 @@ fn handle(id: &Value, method: &str, params: &Value) {
                             return;
                         }
                     };
-                    let files: Vec<String> =
-                        code.files.iter().map(|f| f.path.clone()).collect();
+                    let files: Vec<String> = code.files.iter().map(|f| f.path.clone()).collect();
                     let eps = crate::frameworks::endpoints(&files, &p);
                     let surface = crate::frameworks::api_surface(&code, &g, &eps, 6);
                     if name == "db.routes" {
@@ -735,11 +734,7 @@ fn handle(id: &Value, method: &str, params: &Value) {
                         let want = args.get("path").and_then(|v| v.as_str());
                         let path = match want {
                             Some(p) => p.to_string(),
-                            None => match surface
-                                .endpoints
-                                .iter()
-                                .find(|e| e.method == method)
-                            {
+                            None => match surface.endpoints.iter().find(|e| e.method == method) {
                                 Some(e) => e.path.clone(),
                                 None => {
                                     err(id, 4, &format!("no {} route here", method));
@@ -763,11 +758,7 @@ fn handle(id: &Value, method: &str, params: &Value) {
                             } else {
                                 format!(". {} is registered as {}", path, known.join(", "))
                             };
-                            err(
-                                id,
-                                4,
-                                &format!("no route {} {}{}", method, path, extra),
-                            );
+                            err(id, 4, &format!("no route {} {}{}", method, path, extra));
                             return;
                         }
                         let key = format!("{} {}", method, path);
@@ -806,10 +797,7 @@ fn handle(id: &Value, method: &str, params: &Value) {
                     // key, file, line, severity and a shape description cross the
                     // wire, and the JSON form is held to the same rule, since it
                     // is the form an agent parses into a transcript.
-                    let want_json = args
-                        .get("json")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
+                    let want_json = args.get("json").and_then(|v| v.as_bool()).unwrap_or(false);
                     let p = std::path::PathBuf::from(&root);
                     let findings = crate::config::scan(&p);
                     if want_json {
@@ -826,10 +814,7 @@ fn handle(id: &Value, method: &str, params: &Value) {
                                 })
                             })
                             .collect();
-                        let critical = findings
-                            .iter()
-                            .filter(|f| f.severity == "critical")
-                            .count();
+                        let critical = findings.iter().filter(|f| f.severity == "critical").count();
                         ok(
                             id,
                             text_result(
@@ -866,10 +851,7 @@ fn handle(id: &Value, method: &str, params: &Value) {
                     }
                 }
                 "deps.tree" => {
-                    let min_depth = args
-                        .get("min_depth")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(1);
+                    let min_depth = args.get("min_depth").and_then(|v| v.as_u64()).unwrap_or(1);
                     let p = std::path::PathBuf::from(&root);
                     let graphs = crate::deps::read_lock_graphs(&p);
                     if graphs.is_empty() {
@@ -954,8 +936,13 @@ fn handle(id: &Value, method: &str, params: &Value) {
                     let mut health = crate::osv_cache::CacheHealth::default();
                     for g in &graphs {
                         for n in &g.nodes {
-                            let answer =
-                                crate::osv_cache::consult(policy, dir.as_deref(), n.ecosystem, &n.name, &n.version);
+                            let answer = crate::osv_cache::consult(
+                                policy,
+                                dir.as_deref(),
+                                n.ecosystem,
+                                &n.name,
+                                &n.version,
+                            );
                             match answer {
                                 Some(crate::osv_cache::Answer::Found {
                                     detail,
@@ -972,7 +959,11 @@ fn handle(id: &Value, method: &str, params: &Value) {
                                         if cached {
                                             format!(
                                                 " (from cache{})",
-                                                if age.is_empty() { String::new() } else { format!(" {age} old") }
+                                                if age.is_empty() {
+                                                    String::new()
+                                                } else {
+                                                    format!(" {age} old")
+                                                }
                                             )
                                         } else {
                                             String::new()
@@ -991,7 +982,11 @@ fn handle(id: &Value, method: &str, params: &Value) {
                                         if cached {
                                             format!(
                                                 " (from cache{})",
-                                                if age.is_empty() { String::new() } else { format!(" {age} old") }
+                                                if age.is_empty() {
+                                                    String::new()
+                                                } else {
+                                                    format!(" {age} old")
+                                                }
                                             )
                                         } else {
                                             String::new()
@@ -1030,10 +1025,7 @@ fn handle(id: &Value, method: &str, params: &Value) {
                     }
                 }
                 "spine.changed_since" => {
-                    let since = args
-                        .get("since")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
+                    let since = args.get("since").and_then(|v| v.as_u64()).unwrap_or(0);
                     let p = std::path::PathBuf::from(&root);
                     let code = match spine::load(&p) {
                         Ok(c) => c,
@@ -1041,7 +1033,10 @@ fn handle(id: &Value, method: &str, params: &Value) {
                             err(
                                 id,
                                 6,
-                                &format!("no code index under {}. run spine.scan first ({e})", p.display()),
+                                &format!(
+                                    "no code index under {}. run spine.scan first ({e})",
+                                    p.display()
+                                ),
                             );
                             return;
                         }

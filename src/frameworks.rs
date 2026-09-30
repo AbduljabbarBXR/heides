@@ -319,7 +319,8 @@ pub fn endpoints(files: &[String], root: &Path) -> Vec<Endpoint> {
         }
     }
     out.sort_by(|a, b| {
-        a.path.cmp(&b.path)
+        a.path
+            .cmp(&b.path)
             .then(a.method.cmp(&b.method))
             .then(a.handler.cmp(&b.handler))
     });
@@ -367,10 +368,10 @@ fn split_route_args(args: &str) -> Option<(String, String)> {
     let path = parts.iter().find_map(|p| {
         let t = p.trim();
         for quote in ['\'', '"', '`'] {
-            if let Some(rest) = t.strip_prefix(quote) {
-                if let Some(end) = rest.find(quote) {
-                    return Some(rest[..end].to_string());
-                }
+            if let Some(rest) = t.strip_prefix(quote)
+                && let Some(end) = rest.find(quote)
+            {
+                return Some(rest[..end].to_string());
             }
         }
         None
@@ -419,18 +420,17 @@ fn scan_python_endpoints(body: &str, file: &str, out: &mut Vec<Endpoint>) {
                         .next_back()
                         .map(|c| c.is_ascii_alphanumeric() || c == '_')
                         .unwrap_or(false);
-                if boundary_ok {
-                    if let Some(args) = trimmed[at + name.len() - 1..].strip_prefix('(') {
-                        if let Some((p, handler)) = split_route_args(args) {
-                            out.push(Endpoint {
-                                method: "ANY".to_string(),
-                                path: normalize_django_path(&p),
-                                handler,
-                                file: file.to_string(),
-                                line: (i + 1) as u64,
-                            });
-                        }
-                    }
+                if boundary_ok
+                    && let Some(args) = trimmed[at + name.len() - 1..].strip_prefix('(')
+                    && let Some((p, handler)) = split_route_args(args)
+                {
+                    out.push(Endpoint {
+                        method: "ANY".to_string(),
+                        path: normalize_django_path(&p),
+                        handler,
+                        file: file.to_string(),
+                        line: (i + 1) as u64,
+                    });
                 }
                 from = at + name.len();
             }
@@ -516,10 +516,10 @@ fn decorator_route(args: &str, deco: &str) -> (Option<String>, String) {
                 if let Some(end) = rest.find('\'') {
                     path = Some(rest[..end].to_string());
                 }
-            } else if let Some(rest) = t.strip_prefix('"') {
-                if let Some(end) = rest.find('"') {
-                    path = Some(rest[..end].to_string());
-                }
+            } else if let Some(rest) = t.strip_prefix('"')
+                && let Some(end) = rest.find('"')
+            {
+                path = Some(rest[..end].to_string());
             }
         }
     }
@@ -530,7 +530,9 @@ fn scan_go_endpoints(body: &str, file: &str, out: &mut Vec<Endpoint>) {
     for (i, line) in body.lines().enumerate() {
         let trimmed = line.trim_start();
         for h in GO_HANDLERS {
-            let Some(start) = trimmed.find(h) else { continue };
+            let Some(start) = trimmed.find(h) else {
+                continue;
+            };
             let args = &trimmed[start + h.len()..];
             let Some((path, handler)) = split_route_args(args) else {
                 continue;
@@ -688,11 +690,7 @@ impl ApiSurface {
         let side = if writes { &self.writes } else { &self.reads };
         let mut v: Vec<String> = side
             .get(&key)
-            .map(|r| {
-                r.iter()
-                    .map(|x| self.resolve_table(&x.table))
-                    .collect()
-            })
+            .map(|r| r.iter().map(|x| self.resolve_table(&x.table)).collect())
             .unwrap_or_default();
         v.sort();
         v.dedup();
@@ -773,8 +771,7 @@ pub fn api_surface(
 
     // A call edge records a call by name, so the walk keys on names. An index by
     // name keeps it O(edges) per hop instead of O(edges) per node.
-    let mut callees: std::collections::HashMap<&str, Vec<&str>> =
-        std::collections::HashMap::new();
+    let mut callees: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
     for edge in &graph.calls {
         callees
             .entry(edge.caller.as_str())
@@ -797,7 +794,7 @@ pub fn api_surface(
             .or_default()
             .push(QuerySite {
                 table: call.table.clone(),
-                op: call.op.clone(),
+                op: call.op,
                 file: call.file.clone(),
                 line: call.line,
             });
@@ -821,7 +818,7 @@ pub fn api_surface(
                 for q in queries {
                     let reach = TableReach {
                         table: q.table.clone(),
-                        op: q.op.clone(),
+                        op: q.op,
                         via: name.clone(),
                         file: q.file.clone(),
                         line: q.line,
@@ -911,14 +908,25 @@ fn plural_of(name: &str) -> String {
 /// Suffixes that mark a name as a repository, DAO, or context rather than a
 /// table.
 const HANDLE_SUFFIXES: &[&str] = &[
-    "repo", "repository", "dao", "store", "model", "entity", "mapper", "service",
+    "repo",
+    "repository",
+    "dao",
+    "store",
+    "model",
+    "entity",
+    "mapper",
+    "service",
 ];
 
 /// True when a name is a data-access handle rather than a table.
 fn is_repository_handle(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     HANDLE_SUFFIXES.iter().any(|s| {
-        lower == *s || lower.strip_suffix(s).map(|stem| !stem.is_empty()).unwrap_or(false)
+        lower == *s
+            || lower
+                .strip_suffix(s)
+                .map(|stem| !stem.is_empty())
+                .unwrap_or(false)
     })
 }
 

@@ -67,7 +67,10 @@ fn a_key_survives_a_name_that_is_not_a_path() {
     // would be a separator. `../../etc` is a valid package name string, so a
     // cache keyed on the raw name would write outside the cache directory.
     let p = osv_cache::entry_path(Path::new("/c"), "npm", "@scope/pkg", "1.0.0");
-    assert!(p.starts_with(Path::new("/c")), "must stay under the cache: {p:?}");
+    assert!(
+        p.starts_with(Path::new("/c")),
+        "must stay under the cache: {p:?}"
+    );
 
     let g = osv_cache::entry_path(Path::new("/c"), "go", "../../etc/passwd", "v1.0.0");
     assert!(
@@ -317,7 +320,11 @@ fn a_disabled_policy_never_reads_the_cache() {
 #[test]
 fn a_human_age_reads_as_a_duration() {
     assert_eq!(osv_cache::human_age(30), "30s");
-    assert!(osv_cache::human_age(90).contains('m'), "{}", osv_cache::human_age(90));
+    assert!(
+        osv_cache::human_age(90).contains('m'),
+        "{}",
+        osv_cache::human_age(90)
+    );
     assert!(
         osv_cache::human_age(7200).contains('h'),
         "{}",

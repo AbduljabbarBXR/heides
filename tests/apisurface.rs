@@ -12,7 +12,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-
 /// A throwaway workspace. Removed by the caller via `Drop` on the path list.
 fn fixture(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("heides-api-{name}"));
@@ -66,9 +65,8 @@ fn an_express_post_registration_is_recognised() {
         .map(|e| (e.method.clone(), e.path.clone(), e.handler.clone()))
         .collect();
     assert!(
-        hits.iter().any(|(m, p, h)| m == "POST"
-            && p == "/users"
-            && h == "createUser"),
+        hits.iter()
+            .any(|(m, p, h)| m == "POST" && p == "/users" && h == "createUser"),
         "expected POST /users -> createUser, got {hits:?}"
     );
 }
@@ -152,7 +150,11 @@ fn a_handler_that_writes_through_a_service_reaches_the_table() {
 #[test]
 fn a_handler_that_reads_reaches_the_table_on_the_read_side() {
     let dir = fixture("readchain");
-    write(&dir, "schema.sql", "CREATE TABLE users (id INT PRIMARY KEY);\n");
+    write(
+        &dir,
+        "schema.sql",
+        "CREATE TABLE users (id INT PRIMARY KEY);\n",
+    );
     write(
         &dir,
         "routes.js",
@@ -178,7 +180,11 @@ fn a_handler_that_reads_reaches_the_table_on_the_read_side() {
 #[test]
 fn a_dotted_chain_finds_the_terminal_write() {
     let dir = fixture("dotted");
-    write(&dir, "schema.sql", "CREATE TABLE orders (id INT PRIMARY KEY);\n");
+    write(
+        &dir,
+        "schema.sql",
+        "CREATE TABLE orders (id INT PRIMARY KEY);\n",
+    );
     write(
         &dir,
         "routes.js",
@@ -279,7 +285,11 @@ fn a_health_endpoint_is_reported_without_inventing_a_table() {
 #[test]
 fn a_depth_limit_stops_a_deep_chain_without_hanging() {
     let dir = fixture("deep");
-    write(&dir, "schema.sql", "CREATE TABLE deep (id INT PRIMARY KEY);\n");
+    write(
+        &dir,
+        "schema.sql",
+        "CREATE TABLE deep (id INT PRIMARY KEY);\n",
+    );
     // Nine hops, deeper than the limit passed in.
     let mut body = String::from("router.post('/deep', h0);\n");
     for i in 0..9 {

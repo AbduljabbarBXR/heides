@@ -90,7 +90,8 @@ fn a_bulk_create_is_not_a_candidate() {
 
 #[test]
 fn nested_loops_report_once_per_query_line() {
-    let sql = "for a in as:\n  for b in bs:\n    session.query(Order).filter_by(a=a.id, b=b.id).all()\n";
+    let sql =
+        "for a in as:\n  for b in bs:\n    session.query(Order).filter_by(a=a.id, b=b.id).all()\n";
     let found = db::n_plus_one_candidates(Path::new("app.py"), sql);
     assert_eq!(found.len(), 1, "one query line, one candidate: {:?}", found);
 }
@@ -100,13 +101,16 @@ fn a_query_before_and_inside_a_loop_reports_only_the_loop() {
     let sql = "total = session.query(Order).count()\nfor u in users:\n    session.query(Order).filter_by(user_id=u.id).all()\n";
     let found = db::n_plus_one_candidates(Path::new("app.py"), sql);
     assert_eq!(found.len(), 1, "{:?}", found);
-    assert!(found[0].line >= 3, "the loop line, not the earlier one: {:?}", found);
+    assert!(
+        found[0].line >= 3,
+        "the loop line, not the earlier one: {:?}",
+        found
+    );
 }
 
 #[test]
 fn an_empty_loop_body_is_not_a_candidate() {
-    assert!(db::n_plus_one_candidates(Path::new("m.py"), "for u in users:\n    pass\n")
-        .is_empty());
+    assert!(db::n_plus_one_candidates(Path::new("m.py"), "for u in users:\n    pass\n").is_empty());
 }
 
 #[test]

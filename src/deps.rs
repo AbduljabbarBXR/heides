@@ -312,7 +312,6 @@ fn collect_manifests(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
 // about dependencies has one module to reach for. The parsers live in
 // `lockparse` and the graph in `lockgraph` because they are a different concern
 // from advisory lookup; only the surface is unified.
-
 pub use crate::lockgraph::{LockGraph, LockNode};
 pub use crate::lockparse::{
     parse_gemfile_lock, parse_go_sum, parse_package_lock, parse_pnpm_lock, parse_poetry_lock,
@@ -422,7 +421,15 @@ fn collect_lockfiles(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
         if p.is_dir() {
             if matches!(
                 name.as_str(),
-                "node_modules" | "target" | "venv" | ".venv" | "__pycache__" | "dist" | "build" | "vendor" | ".git"
+                "node_modules"
+                    | "target"
+                    | "venv"
+                    | ".venv"
+                    | "__pycache__"
+                    | "dist"
+                    | "build"
+                    | "vendor"
+                    | ".git"
             ) {
                 continue;
             }
@@ -1369,14 +1376,14 @@ pub fn check_with_depth(root: &Path) -> (Vec<DepReport>, DepsHealth, Vec<LockGra
         }
         for g in &graphs {
             if let Some(n) = g.node(name) {
-                if let Some(d) = n.depth {
-                    if d > 1 {
-                        r.message.push_str(&format!(
-                            " (transitive, {} levels deep via {})",
-                            d,
-                            n.path.join(" -> ")
-                        ));
-                    }
+                if let Some(d) = n.depth
+                    && d > 1
+                {
+                    r.message.push_str(&format!(
+                        " (transitive, {} levels deep via {})",
+                        d,
+                        n.path.join(" -> ")
+                    ));
                 }
                 break;
             }
@@ -1565,7 +1572,14 @@ pub fn check_offline_cached(
                     .map(crate::osv_cache::human_age)
                     .unwrap_or_default();
                 let from = if cached {
-                    format!(" from cache{}", if age.is_empty() { String::new() } else { format!(" ({age} old)") })
+                    format!(
+                        " from cache{}",
+                        if age.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" ({age} old)")
+                        }
+                    )
                 } else {
                     String::new()
                 };

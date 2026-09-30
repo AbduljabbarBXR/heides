@@ -61,8 +61,7 @@ impl Session {
         self.stdin.flush().ok();
         let mut line = String::new();
         self.stdout.read_line(&mut line).expect("read");
-        serde_json::from_str(line.trim())
-            .unwrap_or_else(|e| panic!("not json ({e}): {line:?}"))
+        serde_json::from_str(line.trim()).unwrap_or_else(|e| panic!("not json ({e}): {line:?}"))
     }
 
     fn call(&mut self, name: &str, args: serde_json::Value) -> serde_json::Value {
@@ -138,11 +137,7 @@ fn the_new_capabilities_are_reachable_as_tools() {
     let dir = fixture("list");
     let mut s = Session::start(&dir);
     let tools = s.tools();
-    for expected in [
-        "config.scan",
-        "deps.tree",
-        "deps.advisories",
-    ] {
+    for expected in ["config.scan", "deps.tree", "deps.advisories"] {
         assert!(
             tools.iter().any(|t| t == expected),
             "missing {expected}; have {tools:?}"
@@ -155,7 +150,12 @@ fn every_new_tool_declares_a_description_and_a_schema() {
     let dir = fixture("schemas");
     let mut s = Session::start(&dir);
     let v = s.request("tools/list", serde_json::json!({}));
-    let tools = v.pointer("/result/tools").unwrap().as_array().unwrap().clone();
+    let tools = v
+        .pointer("/result/tools")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .clone();
     for t in tools {
         let name = t.get("name").and_then(|n| n.as_str()).unwrap_or("?");
         if !name.starts_with("config.") && !name.starts_with("deps.") {
@@ -197,7 +197,11 @@ fn config_scan_says_so_when_there_is_no_configuration_file() {
     // Silence here would be read as a clean scan by an agent, and only one of the
     // two means the workspace was inspected.
     let dir = fixture("cfgnone");
-    write(&dir, "a.js", "export function add(a, b) { return a + b; }\n");
+    write(
+        &dir,
+        "a.js",
+        "export function add(a, b) { return a + b; }\n",
+    );
     let mut s = Session::start(&dir);
     let t = s.text("config.scan", serde_json::json!({ "root": "." }));
     assert!(
@@ -233,7 +237,10 @@ fn config_scan_returns_json_when_asked() {
     );
     let v: serde_json::Value = serde_json::from_str(&t)
         .unwrap_or_else(|e| panic!("config --json was not json ({e}): {t}"));
-    let findings = v.get("findings").and_then(|f| f.as_array()).expect("findings array");
+    let findings = v
+        .get("findings")
+        .and_then(|f| f.as_array())
+        .expect("findings array");
     assert_eq!(findings.len(), 1, "{t}");
     let f = &findings[0];
     assert_eq!(f.get("key").and_then(|k| k.as_str()), Some("API_KEY"));
@@ -274,10 +281,7 @@ fn deps_tree_reports_depth_and_reachability() {
     let mut s = Session::start(&dir);
     let t = s.text("deps.tree", serde_json::json!({ "root": "." }));
     assert!(t.contains("cookie"), "{t}");
-    assert!(
-        t.contains("express"),
-        "the path must be reported: {t}"
-    );
+    assert!(t.contains("express"), "the path must be reported: {t}");
     assert!(
         t.contains("nothing reaches it") || t.contains("unreachable"),
         "an unreachable package must be named: {t}"
@@ -309,9 +313,18 @@ fn deps_tree_accepts_a_minimum_depth() {
         }}"#,
     );
     let mut s = Session::start(&dir);
-    let deep = s.text("deps.tree", serde_json::json!({ "root": ".", "min_depth": 2 }));
-    assert!(deep.contains("b"), "depth 2 must list the second level: {deep}");
-    let shallow = s.text("deps.tree", serde_json::json!({ "root": ".", "min_depth": 9 }));
+    let deep = s.text(
+        "deps.tree",
+        serde_json::json!({ "root": ".", "min_depth": 2 }),
+    );
+    assert!(
+        deep.contains("b"),
+        "depth 2 must list the second level: {deep}"
+    );
+    let shallow = s.text(
+        "deps.tree",
+        serde_json::json!({ "root": ".", "min_depth": 9 }),
+    );
     assert!(
         !shallow.contains("  b "),
         "depth 9 must list nothing at that level: {shallow}"
@@ -350,7 +363,10 @@ fn deps_advisories_reports_a_planted_finding() {
         serde_json::json!({ "root": ".", "cache_dir": cache.to_string_lossy() }),
     );
     assert!(t.contains("left-pad"), "the package must be named: {t}");
-    assert!(t.contains("GHSA-test-advisory"), "the advisory must be named: {t}");
+    assert!(
+        t.contains("GHSA-test-advisory"),
+        "the advisory must be named: {t}"
+    );
 }
 
 #[test]
