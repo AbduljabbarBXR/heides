@@ -4,6 +4,7 @@
 // for code. The library exposes every organ so tests and embeddings can call
 // the guards directly.
 
+pub mod config;
 pub mod db;
 pub mod deps;
 pub mod edge;

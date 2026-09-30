@@ -227,11 +227,16 @@ pub fn verify(root: &Path, skip_tests: bool, require_advisories: bool) -> Verdic
     // or a sensitive column on a read path is exactly the kind of thing a loop
     // must not finish on top of.
     let (mut reports, cov) = harmony::check_workspace_with_coverage(root, &graph, policy);
-    reports.retain(|r| !r.guard.starts_with("database."));
+    // Both extra guard families. The filter previously admitted only
+    // `database.` guards, so a committed credential was invisible to the
+    // definition of done, which is the one place it must never be.
+    reports.retain(|r| {
+        !(r.guard.starts_with("database.") || r.guard.starts_with("config."))
+    });
     reports.extend(
         harmony::check_workspace_with_database(root, &graph)
             .into_iter()
-            .filter(|r| r.guard.starts_with("database.")),
+            .filter(|r| r.guard.starts_with("database.") || r.guard.starts_with("config.")),
     );
 
     let mut blockers = 0;

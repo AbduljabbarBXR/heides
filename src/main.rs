@@ -33,6 +33,8 @@ fn print_usage() {
     println!("  scaffold [text] [dir]");
     println!("                  scaffold a new project from a plan and index it");
     println!("  deps [dir]      check dependencies for vulnerabilities and updates");
+    println!("  deps tree [dir] resolve the lockfile graph, with depth and path");
+    println!("  config [dir]    find credentials in .env, Dockerfile, terraform, manifests");
     println!("  describe [dir]  read the whole workspace manifest in one shot");
     println!("  export [dir] [out]");
     println!("                  write one self contained code map file");
@@ -475,11 +477,19 @@ fn main() -> ExitCode {
             // The database guards join the code guards here, so a schema problem
             // is visible without a second command. A workspace with no database
             // contributes nothing and the receipt is unchanged.
-            reports.retain(|r| !r.guard.starts_with("database."));
+            // Both extra guard families, not just the database one. The filter
+            // previously admitted only `database.` guards, so the config
+            // findings that function also returns were dropped here and `check`
+            // reported a clean workspace over a repository with a live key in it.
+            reports.retain(|r| {
+                !(r.guard.starts_with("database.") || r.guard.starts_with("config."))
+            });
             reports.extend(
                 harmony::check_workspace_with_database(&root, &graph)
                     .into_iter()
-                    .filter(|r| r.guard.starts_with("database.")),
+                    .filter(|r| {
+                        r.guard.starts_with("database.") || r.guard.starts_with("config.")
+                    }),
             );
             if let Some(p) = pulse {
                 p.finish();
@@ -986,6 +996,20 @@ fn main() -> ExitCode {
                     ExitCode::FAILURE
                 }
             }
+        }
+        "config" => {
+            // The config scan, stated rather than implied. A caller has to be
+            // able to tell "no config files here" from "nothing found", because
+            // only one of those means the repository was inspected.
+            let root = PathBuf::from(arg2);
+            println!("{}", heides::config::summarise(&root));
+            for f in heides::config::scan(&root) {
+                println!(
+                    "[{}] {}:{} {} ({})",
+                    f.severity, f.file, f.line, f.message, f.kind
+                );
+            }
+            ExitCode::SUCCESS
         }
         "deps" => {
             // `heides deps tree` is transitive resolution; bare `heides deps` is

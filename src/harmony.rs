@@ -258,21 +258,38 @@ pub fn check_workspace_with_database(
 ) -> Vec<GuardReport> {
     let mut reports = check_workspace_without_deps(graph);
 
-    // A workspace with no database is not a finding, so this is quiet by
-    // construction: an empty graph produces no reports.
-    let Ok(db_graph) = crate::db::index_schema(root) else {
-        return reports;
-    };
-    if db_graph.tables.is_empty() && db_graph.calls.is_empty() {
-        return reports;
+    // Database guards. A workspace with no database is not a finding, so this is
+    // quiet by construction: an empty graph produces no reports.
+    if let Ok(db_graph) = crate::db::index_schema(root) {
+        if !db_graph.tables.is_empty() || !db_graph.calls.is_empty() {
+            for (guard, severity, message) in crate::db::guard_reports(root, &db_graph) {
+                reports.push(GuardReport {
+                    guard,
+                    severity,
+                    message,
+                    file: String::new(),
+                    line: 0,
+                });
+            }
+        }
     }
-    for (guard, severity, message) in crate::db::guard_reports(root, &db_graph) {
+
+    // Configuration credentials join the normal gate. A committed secret is not
+    // something a separate command should be needed for: the same agent that
+    // runs `check` has to see it, or the gate is green on a repository with a
+    // live key in it.
+    //
+    // These two were originally inside the database branch above, behind its
+    // early returns, so a workspace with no database never scanned its config at
+    // all. That is the failure mode this whole layer exists to prevent, caused by
+    // the wiring rather than by the rules.
+    for f in crate::config::scan(root) {
         reports.push(GuardReport {
-            guard,
-            severity,
-            message,
-            file: String::new(),
-            line: 0,
+            guard: "config.credential".to_string(),
+            severity: f.severity,
+            message: f.message,
+            file: f.file,
+            line: f.line,
         });
     }
     reports
