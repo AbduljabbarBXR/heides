@@ -471,7 +471,16 @@ fn main() -> ExitCode {
                 }
             };
             let policy = heides::deps::DepsPolicy::default();
-            let (reports, cov) = harmony::check_workspace_with_coverage(&root, &graph, policy);
+            let (mut reports, cov) = harmony::check_workspace_with_coverage(&root, &graph, policy);
+            // The database guards join the code guards here, so a schema problem
+            // is visible without a second command. A workspace with no database
+            // contributes nothing and the receipt is unchanged.
+            reports.retain(|r| !r.guard.starts_with("database."));
+            reports.extend(
+                harmony::check_workspace_with_database(&root, &graph)
+                    .into_iter()
+                    .filter(|r| r.guard.starts_with("database.")),
+            );
             if let Some(p) = pulse {
                 p.finish();
             }
@@ -509,12 +518,15 @@ fn main() -> ExitCode {
                         ui.count("info", i)
                     );
                     for r in items {
-                        let loc = if r.file.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" at {}:{}", r.file, r.line)
+                        // An empty file and a zero line means the finding is about
+                        // the schema rather than a place in a file, so no location
+                        // is printed at all rather than a bare "at 0".
+                        let loc = match (r.file.is_empty(), r.line) {
+                            (true, _) => String::new(),
+                            (false, 0) => format!(" at {}", r.file),
+                            _ => format!(" at {}:{}", r.file, r.line),
                         };
-                        println!("  {} {} {}", ui.severity(&r.severity), r.message, loc);
+                        println!("  {} {}{}", ui.severity(&r.severity), r.message, loc);
                     }
                 }
                 println!("{}", cov.render());

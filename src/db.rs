@@ -3398,3 +3398,70 @@ pub fn migration_drift(root: &Path, stored: &DbGraph) -> Vec<String> {
     }
     out
 }
+
+// ------------------------------------------------- database guard reports
+
+/// The database findings, shaped as guard reports so `check`, `verify` and MCP
+/// see them without a separate code path.
+///
+/// The guard name is `database.schema` rather than something database specific,
+/// because a caller that filters on guard names should not need a second list.
+/// Severity follows the house convention: a cyclic cascade and an unindexed
+/// self reference are `critical` because they are the shapes that hurt at
+/// runtime, everything else is a `warning` a human should look at.
+pub fn guard_reports(root: &Path, g: &DbGraph) -> Vec<(String, String, String)> {
+    let mut out: Vec<(String, String, String)> = Vec::new();
+
+    for c in fk_cycles(g) {
+        let sev = if c.cascading_delete { "critical" } else { "warning" };
+        out.push((
+            "database.schema".into(),
+            sev.into(),
+            format!(
+                "foreign key cycle {}.{} -> {}{}",
+                c.table,
+                c.column,
+                c.path.join(" -> "),
+                if c.cascading_delete {
+                    " with ON DELETE CASCADE, which can recurse into itself"
+                } else {
+                    ""
+                }
+            ),
+        ));
+    }
+
+    for p in policy_findings(g) {
+        out.push(("database.schema".into(), p.severity, p.message));
+    }
+
+    for e in sensitive_exposure(g) {
+        out.push((
+            "database.exposure".into(),
+            "critical".into(),
+            format!(
+                "{}.{} is {} and is reachable by a read via {}",
+                e.table, e.column, e.kind, e.via
+            ),
+        ));
+    }
+
+    for n in n_plus_one_in_workspace(root) {
+        out.push((
+            "database.performance".into(),
+            "warning".into(),
+            format!(
+                "possible N+1 query on {} at {}:{}: {}. {}",
+                if n.table.is_empty() { "an unresolved table" } else { n.table.as_str() },
+                n.file,
+                n.line,
+                n.reason,
+                n.suggestion
+            ),
+        ));
+    }
+
+    out.sort();
+    out.dedup();
+    out
+}

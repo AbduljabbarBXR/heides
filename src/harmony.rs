@@ -245,6 +245,39 @@ fn check_workspace_and_state(
 }
 
 /// The shared local guard body behind check_workspace and the report tool.
+/// The full workspace check including the database guards.
+///
+/// Separate from `check_workspace_without_deps` rather than folded into it,
+/// because the database layer needs a filesystem root to walk while the code
+/// guards need only the index. A caller with neither can keep using the
+/// narrower functions, and the MCP surface picks this one so an agent gets the
+/// database findings without a second tool.
+pub fn check_workspace_with_database(
+    root: &Path,
+    graph: &CodeGraph,
+) -> Vec<GuardReport> {
+    let mut reports = check_workspace_without_deps(graph);
+
+    // A workspace with no database is not a finding, so this is quiet by
+    // construction: an empty graph produces no reports.
+    let Ok(db_graph) = crate::db::index_schema(root) else {
+        return reports;
+    };
+    if db_graph.tables.is_empty() && db_graph.calls.is_empty() {
+        return reports;
+    }
+    for (guard, severity, message) in crate::db::guard_reports(root, &db_graph) {
+        reports.push(GuardReport {
+            guard,
+            severity,
+            message,
+            file: String::new(),
+            line: 0,
+        });
+    }
+    reports
+}
+
 pub fn check_workspace_without_deps(graph: &CodeGraph) -> Vec<GuardReport> {
     let mut reports = Vec::new();
     // Read every indexed file once. The intra guards and the interprocedural
@@ -595,11 +628,19 @@ pub fn folded_location(first: &GuardReport, files: &[&str], file_count: usize) -
     if files.is_empty() {
         return String::new();
     }
-    let mut out = format!(" at {}", files.join(", "));
+    // A schema finding has no file, so the file list is one empty string. Naming
+    // it produced a trailing " at " on every database finding, which reads as a
+    // truncated location rather than an intentional omission.
+    let named: Vec<&&str> = files.iter().filter(|f| !f.is_empty()).collect();
+    if named.is_empty() {
+        return String::new();
+    }
+    let mut out = format!(" at {}", named.iter().map(|f| **f).collect::<Vec<_>>().join(", "));
     if file_count > files.len() {
         out.push_str(&format!(" and {} more", file_count - files.len()));
     }
-    if let Some(first_line) = first.file.as_str().strip_prefix(files[0])
+    if let Some(first_file) = named.first()
+        && let Some(first_line) = first.file.as_str().strip_prefix(**first_file)
         && !first_line.is_empty()
     {
         out.push_str(&format!(":{first_line}"));

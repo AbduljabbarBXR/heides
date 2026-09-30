@@ -223,7 +223,16 @@ pub fn verify(root: &Path, skip_tests: bool, require_advisories: bool) -> Verdic
     let mut policy = DepsPolicy::default();
     policy.require_advisories = require_advisories;
 
-    let (reports, cov) = harmony::check_workspace_with_coverage(root, &graph, policy);
+    // The database guards are part of the definition of done: a cyclic cascade
+    // or a sensitive column on a read path is exactly the kind of thing a loop
+    // must not finish on top of.
+    let (mut reports, cov) = harmony::check_workspace_with_coverage(root, &graph, policy);
+    reports.retain(|r| !r.guard.starts_with("database."));
+    reports.extend(
+        harmony::check_workspace_with_database(root, &graph)
+            .into_iter()
+            .filter(|r| r.guard.starts_with("database.")),
+    );
 
     let mut blockers = 0;
     let mut criticals = 0;
@@ -348,7 +357,13 @@ pub fn render(v: &Verdict) -> String {
             out.push_str(&format!("\n  - {}", r));
         }
         for (sev, msg, loc) in &v.findings {
-            out.push_str(&format!("\n  [{}] {} at {}", sev, msg, loc));
+            // A schema finding has no location, so it prints without one rather
+            // than ending in a bare "at 0".
+            if loc == "0" || loc.is_empty() {
+                out.push_str(&format!("\n  [{}] {}", sev, msg));
+            } else {
+                out.push_str(&format!("\n  [{}] {} at {}", sev, msg, loc));
+            }
         }
     }
     out
