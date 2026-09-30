@@ -2633,3 +2633,269 @@ pub fn root_from_args(args: &[String], skip: usize) -> PathBuf {
     }
     PathBuf::from(".")
 }
+
+// ------------------------------------------------------------ N+1 candidates
+
+/// A query that appears to run once per row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NPlusOne {
+    pub table: String,
+    pub file: String,
+    pub line: u64,
+    pub reason: String,
+    pub suggestion: String,
+}
+
+/// Spellings that batch the query and therefore make the pattern correct.
+const BATCH_MARKERS: &[&str] = &[
+    "in_", "__in", "in(", " in (", " in(", "wherein", "where_in", "bulk_",
+    "bulkcreate", "bulk_create", "insertmany", "insert_many", "batch",
+    "fetchallatonce", "findmanyin", "in: ids", "in: [",
+];
+
+/// True when this line batches rather than querying per row.
+///
+/// Checked on the line and the one before it, because the batch spelling often
+/// appears in the preceding call of a chained expression.
+fn is_batched(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    BATCH_MARKERS.iter().any(|m| lower.contains(m))
+}
+
+/// True when this line contains a query call at all.
+fn has_query_call(line: &str) -> bool {
+    const CALLS: &[&str] = &[
+        "query(",
+        "objects.",
+        "findone(",
+        "findmany(",
+        "findoneby",
+        ".first(",
+        ".last(",
+        ".get(",
+        ".count(",
+        ".all(",
+        ".exists(",
+        ".one(",
+        ".scalar(",
+        "executemany",
+        ".exec(",
+        "prisma.",
+        "_db.",
+        ".where(",
+        ".filter(",
+        ".find(",
+        ".select(",
+    ];
+    let lower = line.to_ascii_lowercase();
+    CALLS.iter().any(|c| lower.contains(c))
+}
+
+/// Indentation width of a line, counting leading spaces and tabs alike.
+fn indent_of(line: &str) -> usize {
+    line.chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .count()
+}
+
+/// True when the line opens a loop: a `for`, `while`, `forEach`, `for..of`, or a
+/// comprehension that iterates something.
+fn is_loop_header(line: &str) -> bool {
+    let t = line.trim_start();
+    let lower = t.to_ascii_lowercase();
+    if lower.starts_with("for ")
+        || lower.starts_with("for(")
+        || lower.starts_with("for[")
+        // `for await (const x of xs)` and the parenless `for const x of xs {`,
+        // which is what prettier emits and is valid JavaScript.
+        || lower.starts_with("for await")
+        || lower.starts_with("for const")
+        || lower.starts_with("for let")
+        || lower.starts_with("for var")
+        || lower.starts_with("while ")
+        || lower.starts_with("while(")
+        || lower.starts_with(".for_each")
+        || lower.contains(" for ")
+        || lower.contains(".map(")
+        || lower.contains("for (")
+    {
+        return true;
+    }
+    false
+}
+
+/// True when the line is a comprehension, where the query runs once per item
+/// even though there is no block body.
+fn is_comprehension(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("[session.query")
+        || lower.contains("[self.repo.")
+        || lower.contains("[prisma.")
+        || (lower.contains(" for ") && lower.contains('[') && has_query_call(line))
+}
+
+/// N+1 candidates in one file.
+///
+/// Syntactic and approximate by construction: it reports the unambiguous shapes
+/// and stays silent everywhere else. A tool that flags every loop in a codebase
+/// is not usable, so the negative cases matter as much as the positive ones and
+/// the batch spellings are named explicitly rather than left to inference.
+pub fn n_plus_one_candidates(path: &Path, body: &str) -> Vec<NPlusOne> {
+    let file = path.to_string_lossy().to_string();
+    let lines: Vec<&str> = body.lines().collect();
+    let mut out: Vec<NPlusOne> = Vec::new();
+
+    // Indentation of every open loop header. The header is recorded before any
+    // query test runs, because the earlier version pushed it at the end of the
+    // body behind a `continue`, so the stack was never populated and every loop
+    // in every file was invisible.
+    let mut loop_stack: Vec<usize> = Vec::new();
+
+    for (idx, line) in lines.iter().enumerate() {
+        let n = idx + 1;
+        let trimmed = line.trim();
+        let ind = indent_of(line);
+
+        // A dedent to or below a header's indentation closes it. A blank line
+        // does not, because a loop body often contains one.
+        while let Some(top) = loop_stack.last().copied() {
+            if !trimmed.is_empty() && ind <= top {
+                loop_stack.pop();
+            } else {
+                break;
+            }
+        }
+
+        let mut in_loop = !loop_stack.is_empty();
+        let comprehension = is_comprehension(line);
+        let header = is_loop_header(trimmed);
+
+        if header && !comprehension {
+            loop_stack.push(ind);
+            // A header is the outer fetch, never the defect.
+            continue;
+        }
+        // A single line comprehension is its own header and its own body, so it
+        // opens no scope: there is no indented block following it.
+        if header && comprehension {
+            in_loop = true;
+        }
+
+        if !in_loop && !comprehension {
+            continue;
+        }
+        if !has_query_call(trimmed) {
+            continue;
+        }
+        // The batch spellings are the correct answer to this exact question.
+        if is_batched(trimmed) {
+            continue;
+        }
+        if trimmed == "pass" || trimmed.starts_with('#') || trimmed.starts_with("//") {
+            continue;
+        }
+
+        let calls = scan_calls(path, line);
+        // A receiver name is not a table. `session.query(Order)` also produces a
+        // call for the accessor itself, and reporting a table called `query`
+        // alongside `Order` is noise that hides the real finding.
+        const NOT_TABLES: &[&str] = &[
+            "query", "session", "conn", "connection", "cursor", "cur", "db",
+            "objects", "manager", "where", "table", "repo", "repository",
+            "em", "client", "store", "context", "ctx", "tx",
+        ];
+        let mut tables: Vec<String> = calls
+            .iter()
+            .filter(|c| c.op == Op::Read || c.op == Op::Write)
+            .filter(|c| !NOT_TABLES.contains(&c.table.to_ascii_lowercase().as_str()))
+            .map(|c| c.table.clone())
+            .collect();
+        tables.sort();
+        tables.dedup();
+
+        let reason = if comprehension {
+            "query inside a comprehension runs once per item"
+        } else {
+            "query inside a loop runs once per row"
+        };
+        let suggestion =
+            "fetch the related rows in one query with an IN clause, or preload the relation"
+                .to_string();
+
+        if tables.is_empty() {
+            out.push(NPlusOne {
+                table: String::new(),
+                file: file.clone(),
+                line: n as u64,
+                reason: reason.to_string(),
+                suggestion: suggestion.clone(),
+            });
+        }
+        for t in &tables {
+            out.push(NPlusOne {
+                table: t.clone(),
+                file: file.clone(),
+                line: n as u64,
+                reason: reason.to_string(),
+                suggestion: suggestion.clone(),
+            });
+        }
+    }
+
+    out
+}
+
+/// N+1 candidates across a workspace, from the code files the schema walk reads.
+pub fn n_plus_one_in_workspace(root: &Path) -> Vec<NPlusOne> {
+    let mut out = Vec::new();
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    collect_code_files(root, root, 0, &mut files);
+    files.sort();
+    for p in files {
+        if let Ok(body) = std::fs::read_to_string(&p) {
+            for mut c in n_plus_one_candidates(&p, &body) {
+                c.file = p
+                    .strip_prefix(root)
+                    .unwrap_or(&p)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.push(c);
+            }
+        }
+    }
+    out
+}
+
+fn collect_code_files(root: &Path, dir: &Path, depth: usize, out: &mut Vec<std::path::PathBuf>) {
+    if depth > 8 {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        if p.is_dir() {
+            if matches!(
+                name.as_str(),
+                "node_modules" | "target" | "venv" | ".venv" | "__pycache__" | "dist"
+                    | "build" | "vendor"
+            ) {
+                continue;
+            }
+            collect_code_files(root, &p, depth + 1, out);
+        } else if matches!(
+            p.extension()
+                .map(|e| e.to_string_lossy().to_string())
+                .unwrap_or_default()
+                .as_str(),
+            "py" | "ts" | "tsx" | "js" | "jsx" | "go" | "rb" | "cs" | "php" | "java" | "kt"
+        ) {
+            out.push(p);
+        }
+    }
+}
