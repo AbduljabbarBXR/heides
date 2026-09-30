@@ -4,6 +4,7 @@
 // for code. The library exposes every organ so tests and embeddings can call
 // the guards directly.
 
+pub mod db;
 pub mod deps;
 pub mod edge;
 pub mod frameworks;
@@ -17,6 +18,7 @@ pub mod server;
 pub mod spine;
 pub mod staged;
 pub mod taint;
+pub mod verify;
 pub mod ui;
 pub mod watch;
 pub mod web;

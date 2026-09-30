@@ -231,6 +231,16 @@ fn main() -> ExitCode {
                 println!("usage. heides watch [dir]");
                 return ExitCode::SUCCESS;
             }
+            "verify" => {
+                println!("usage. heides verify [--skip-tests] [--require-advisories] [--json] [dir]");
+                return ExitCode::SUCCESS;
+            }
+            "db" => {
+                println!(
+                    "usage. heides db [tables|columns|reads|writes|orphans|missingindex|policies|cycles|schema] [name] [dir]"
+                );
+                return ExitCode::SUCCESS;
+            }
             _ => {}
         }
     }
@@ -529,6 +539,161 @@ fn main() -> ExitCode {
                 eprintln!(
                     "heides: findings at or above the exit threshold. use --exit-zero for the old behaviour."
                 );
+                return ExitCode::FAILURE;
+            }
+            ExitCode::SUCCESS
+        }
+        "verify" => {
+            // A machine checkable definition of done: the project's own tests
+            // plus every guard, in one pass, with a boolean the caller can
+            // branch on. Silence is never success here.
+            let skip_tests = args.iter().any(|a| a == "--skip-tests");
+            let require_adv = args.iter().any(|a| a == "--require-advisories");
+            let as_json = args.iter().any(|a| a == "--json");
+            let root = heides::verify::root_from(&args, 2);
+            let pulse = Stopwatch::start(&ui, "verify");
+            let verdict = heides::verify::verify(&root, skip_tests, require_adv);
+            if let Some(p) = pulse {
+                p.finish();
+            }
+            if as_json {
+                println!("{}", heides::verify::to_json(&verdict));
+            } else {
+                println!("{}", heides::verify::render(&verdict));
+            }
+            if verdict.ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        "db" => {
+            // The database layer answers the questions an agent actually asks
+            // about a codebase with a database: what tables exist, what reads or
+            // writes them, what nothing touches, and what the schema gets wrong.
+            let sub = args.get(2).map(|s| s.as_str()).unwrap_or("schema");
+            let name = args.get(3).map(|s| s.as_str()).unwrap_or("");
+            let root = heides::db::root_from_args(&args, 4);
+            let pulse = Stopwatch::start(&ui, "db");
+            let graph = match heides::db::index_schema(&root) {
+                Ok(g) => g,
+                Err(e) => {
+                    eprintln!("heides: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            };
+            if let Some(p) = pulse {
+                p.finish();
+            }
+
+            // Silence is never success: a workspace with no database says so.
+            if graph.tables.is_empty() && graph.calls.is_empty() {
+                println!("no database found under {}", root.display());
+                println!(
+                    "looked for .sql files and migration directories, and for ORM or raw SQL call sites"
+                );
+                return ExitCode::SUCCESS;
+            }
+
+            let verdict = heides::db::verify_schema(&graph);
+            let mut failed = false;
+
+            match sub {
+                "tables" => {
+                    for (t, (reads, writes)) in heides::db::tables_report(&graph) {
+                        println!("{:<28} {} read, {} write", t, reads, writes);
+                    }
+                }
+                "columns" => {
+                    let cols = heides::db::columns_of(&graph, name);
+                    if cols.is_empty() {
+                        println!("no table named {} here", name);
+                    } else {
+                        for c in cols {
+                            println!("{}", c);
+                        }
+                    }
+                }
+                "reads" => {
+                    for c in &graph.calls {
+                        if c.op == heides::db::Op::Read && heides::db::table_names_match(&c.table, name) {
+                            println!("{} via {}", c.table, c.via);
+                        }
+                    }
+                }
+                "writes" => {
+                    for c in &graph.calls {
+                        if c.op == heides::db::Op::Write && heides::db::table_names_match(&c.table, name) {
+                            println!("{} via {}", c.table, c.via);
+                        }
+                    }
+                }
+                "orphans" => {
+                    let o = heides::db::orphans(&graph);
+                    if o.is_empty() {
+                        println!("no unreferenced tables");
+                    } else {
+                        for t in &o {
+                            println!("{} is not touched and nothing references it", t);
+                        }
+                    }
+                }
+                "missingindex" => {
+                    let m = heides::db::missing_index(&graph);
+                    if m.is_empty() {
+                        println!("every foreign key has an index");
+                    } else {
+                        for (t, c) in &m {
+                            println!("{}.{} references another table with no index", t, c);
+                        }
+                    }
+                }
+                "cycles" => {
+                    for c in &verdict.cycles {
+                        println!(
+                            "{}.{} -> {}{}",
+                            c.table,
+                            c.column,
+                            c.path.join(" -> "),
+                            if c.cascading_delete { "  [ON DELETE CASCADE]" } else { "" }
+                        );
+                    }
+                    if verdict.cycles.is_empty() {
+                        println!("no foreign key cycles");
+                    }
+                }
+                "policies" => {
+                    for p in &verdict.policies {
+                        println!("[{}] {}", p.severity, p.message);
+                    }
+                    if verdict.policies.is_empty() {
+                        println!("no policy findings");
+                    }
+                }
+                "sensitive" => {
+                    for e in &verdict.sensitive_exposed {
+                        println!("{}.{} ({}) reachable by a read via {}", e.table, e.column, e.kind, e.via);
+                    }
+                    if verdict.sensitive_exposed.is_empty() {
+                        println!("no sensitive column reaches a read path");
+                    }
+                }
+                _ => {
+                    println!("{}", verdict.render());
+                }
+            }
+
+            // `db schema` is the gate form: it exits non-zero when the schema has
+            // something a human should look at, so it can be used in CI.
+            if sub == "schema" && !verdict.ok() {
+                failed = true;
+            }
+            if verdict.cycles_blocking && (sub == "cycles" || sub == "schema") {
+                failed = true;
+            }
+
+            if failed {
+                eprintln!("heides: the database schema has findings.");
                 return ExitCode::FAILURE;
             }
             ExitCode::SUCCESS

@@ -141,6 +141,25 @@ fn value_shaped_credential(line: &str) -> Option<&'static str> {
 /// The safe twins are named explicitly in the comment below, because the
 /// corpus gate failed all of these the first time they were written as broad
 /// prefixes.
+/// `shell=True` and `verify=False`, which are defects on their own.
+///
+/// These do not need a taint flow to be wrong. `subprocess.run(cmd, shell=True)`
+/// hands the string to a shell, so any later interpolation anywhere in the
+/// command becomes injection, and the guard cannot see the caller. Treating
+/// them as unconditional pattern rules is the only way they get caught at all,
+/// and it is why `verify` exists to confirm the whole pipeline agrees.
+///
+/// Deliberately not a taint sink: the parameter is not a source, per the
+/// precision argument in SOURCES, so a sink row would never fire.
+const SHELL_UNSAFE: [(&str, &str, &str); 6] = [
+    ("shell=True", "shell=True passes the command through a shell; use an argument list", "critical"),
+    ("shell = True", "shell=True passes the command through a shell; use an argument list", "critical"),
+    ("verify=False", "verify=False disables TLS certificate verification", "critical"),
+    ("verify = False", "verify=False disables TLS certificate verification", "critical"),
+    ("rejectUnauthorized: false", "TLS verification disabled", "critical"),
+    ("rejectUnauthorized:false", "TLS verification disabled", "critical"),
+];
+
 const WEAK_CRYPTO: [(&str, &str, &str); 8] = [
     (
         "pickle.loads",
@@ -554,6 +573,24 @@ pub fn scan_file(path: &Path, content: &str, lang: &str) -> Vec<PracticeReport> 
             // leftover. Scripts and main guarded blocks are legitimate.
             if has_definitions && leading_spaces(line) == 0 && !inside_guard {
                 reports.push(rep(path, line_no, "info", "print statement found at module level in a library module. remove before shipping."));
+            }
+        }
+        // shell=True and verify=False. Language gated to python because that
+        // is where the idiomatic spellings live; the javascript and go forms
+        // are covered by their own taint sink rows.
+        // A docstring is not code. `is_comment_line` catches `#` and `//` but
+        // not a `"""` opener, and a module docstring that says "never write
+        // shell=True" is documentation, not a defect.
+        let trimmed = line.trim_start();
+        let in_docstring = trimmed.starts_with("\"\"\"")
+            || trimmed.starts_with("'''")
+            || trimmed.starts_with("*\"\"\"");
+        if lang == "python" && !is_comment_line(line) && !in_docstring {
+            for (needle, msg, sev) in SHELL_UNSAFE {
+                if line.contains(needle) {
+                    reports.push(rep(path, line_no, sev, msg));
+                    break;
+                }
             }
         }
         // Weak crypto and insecure randomness. Language gated so a string
