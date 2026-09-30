@@ -801,6 +801,234 @@ fn handle(id: &Value, method: &str, params: &Value) {
                         ok(id, text_result(out));
                     }
                 }
+                "config.scan" => {
+                    // The credential value never leaves the process. Only the
+                    // key, file, line, severity and a shape description cross the
+                    // wire, and the JSON form is held to the same rule, since it
+                    // is the form an agent parses into a transcript.
+                    let want_json = args
+                        .get("json")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let p = std::path::PathBuf::from(&root);
+                    let findings = crate::config::scan(&p);
+                    if want_json {
+                        let arr: Vec<Value> = findings
+                            .iter()
+                            .map(|f| {
+                                json!({
+                                    "key": f.key,
+                                    "kind": f.kind,
+                                    "file": f.file,
+                                    "line": f.line,
+                                    "severity": f.severity,
+                                    "message": f.message
+                                })
+                            })
+                            .collect();
+                        let critical = findings
+                            .iter()
+                            .filter(|f| f.severity == "critical")
+                            .count();
+                        ok(
+                            id,
+                            text_result(
+                                json!({
+                                    "scanned": crate::config::collect_config_files(&p, 8).len(),
+                                    "findings": arr,
+                                    "critical": critical,
+                                })
+                                .to_string(),
+                            ),
+                        );
+                        return;
+                    }
+                    let mut out = format!("{}\n", crate::config::summarise(&p));
+                    if findings.is_empty() {
+                        // The summary already said so; nothing to add, and an
+                        // empty list under a clean header is the right shape.
+                        ok(id, text_result(out));
+                        return;
+                    }
+                    for f in &findings {
+                        out.push_str(&format!(
+                            "[{}] {}:{} {} ({})\n",
+                            f.severity, f.file, f.line, f.message, f.kind
+                        ));
+                    }
+                    // A critical credential is reported as an error so an agent
+                    // inspecting only the error field cannot read a repository
+                    // with a live key as a successful scan.
+                    if findings.iter().any(|f| f.severity == "critical") {
+                        err(id, 5, &out);
+                    } else {
+                        ok(id, text_result(out));
+                    }
+                }
+                "deps.tree" => {
+                    let min_depth = args
+                        .get("min_depth")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(1);
+                    let p = std::path::PathBuf::from(&root);
+                    let graphs = crate::deps::read_lock_graphs(&p);
+                    if graphs.is_empty() {
+                        ok(
+                            id,
+                            text_result(format!(
+                                "no lockfile found under {}. looked for package-lock.json, \
+                                 yarn.lock, pnpm-lock.yaml, poetry.lock, go.sum, Gemfile.lock, \
+                                 Cargo.lock",
+                                p.display()
+                            )),
+                        );
+                        return;
+                    }
+                    let mut out = String::new();
+                    for g in &graphs {
+                        let (reachable, orphan) = g.reachability();
+                        out.push_str(&format!(
+                            "{}: {} package(s), {} reachable, {} unreachable\n",
+                            g.source,
+                            g.nodes.len(),
+                            reachable,
+                            orphan
+                        ));
+                        for n in g.deepest(min_depth) {
+                            out.push_str(&format!(
+                                "  {} {} ({} levels, {})\n",
+                                n.name,
+                                n.version,
+                                n.depth.unwrap_or(0),
+                                n.path.join(" -> ")
+                            ));
+                        }
+                        for n in g.nodes.iter().filter(|n| n.depth.is_none()) {
+                            out.push_str(&format!(
+                                "  {} {} is in the lockfile but nothing reaches it\n",
+                                n.name, n.version
+                            ));
+                        }
+                    }
+                    ok(id, text_result(out));
+                }
+                "deps.advisories" => {
+                    let p = std::path::PathBuf::from(&root);
+                    let graphs = crate::deps::read_lock_graphs(&p);
+                    if graphs.is_empty() {
+                        ok(
+                            id,
+                            text_result(format!(
+                                "no lockfile found under {}, so no pinned version could be \
+                                 checked",
+                                p.display()
+                            )),
+                        );
+                        return;
+                    }
+                    // An explicit cache_dir wins over the environment, so a test or
+                    // a CI job can point at a seeded cache without mutating the
+                    // caller's environment.
+                    let dir = args
+                        .get("cache_dir")
+                        .and_then(|v| v.as_str())
+                        .map(std::path::PathBuf::from);
+                    let dir = dir.or_else(crate::osv_cache::cache_dir);
+                    if dir.is_none() {
+                        ok(
+                            id,
+                            text_result(
+                                "no cache directory could be resolved, so nothing was checked. \
+                                 set HEIDES_CACHE_DIR or pass cache_dir"
+                                    .to_string(),
+                            ),
+                        );
+                        return;
+                    }
+                    let policy = crate::osv_cache::CachePolicy {
+                        enabled: true,
+                        allow_offline: true,
+                        ..Default::default()
+                    };
+                    let mut out = String::new();
+                    let mut health = crate::osv_cache::CacheHealth::default();
+                    for g in &graphs {
+                        for n in &g.nodes {
+                            let answer =
+                                crate::osv_cache::consult(policy, dir.as_deref(), n.ecosystem, &n.name, &n.version);
+                            match answer {
+                                Some(crate::osv_cache::Answer::Found {
+                                    detail,
+                                    cached,
+                                    age_secs,
+                                }) => {
+                                    let age = age_secs
+                                        .map(crate::osv_cache::human_age)
+                                        .unwrap_or_default();
+                                    out.push_str(&format!(
+                                        "[critical] {} {} is vulnerable, {detail}{}\n",
+                                        n.name,
+                                        n.version,
+                                        if cached {
+                                            format!(
+                                                " (from cache{})",
+                                                if age.is_empty() { String::new() } else { format!(" {age} old") }
+                                            )
+                                        } else {
+                                            String::new()
+                                        }
+                                    ));
+                                    health.note_hit(age_secs);
+                                }
+                                Some(crate::osv_cache::Answer::Clean { cached, age_secs }) => {
+                                    let age = age_secs
+                                        .map(crate::osv_cache::human_age)
+                                        .unwrap_or_default();
+                                    out.push_str(&format!(
+                                        "[info] {} {} has no known advisory{}\n",
+                                        n.name,
+                                        n.version,
+                                        if cached {
+                                            format!(
+                                                " (from cache{})",
+                                                if age.is_empty() { String::new() } else { format!(" {age} old") }
+                                            )
+                                        } else {
+                                            String::new()
+                                        }
+                                    ));
+                                    health.note_hit(age_secs);
+                                }
+                                Some(crate::osv_cache::Answer::NotChecked { .. }) => {
+                                    health.note_stale();
+                                    out.push_str(&format!(
+                                        "[warning] {} {} was not checked, the cached answer expired\n",
+                                        n.name, n.version
+                                    ));
+                                }
+                                None => {
+                                    health.note_miss();
+                                    out.push_str(&format!(
+                                        "[warning] {} {} was not checked, no cached advisory\n",
+                                        n.name, n.version
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    out.push_str(&format!(
+                        "\nadvisory cache: {} answered, {} with no entry, {} expired\n",
+                        health.hits, health.misses, health.stale
+                    ));
+                    // A vulnerability is an error; an incomplete check is not,
+                    // because the warnings above already say what was not looked
+                    // at and a caller that wanted a hard gate has one in `verify`.
+                    if out.contains("[critical]") {
+                        err(id, 5, &out);
+                    } else {
+                        ok(id, text_result(out));
+                    }
+                }
                 "spine.changed_since" => {
                     let since = args
                         .get("since")
@@ -985,6 +1213,21 @@ fn tool_list() -> Value {
                             "name": "db.touch",
                             "description": "What one endpoint writes. Answers the question an agent asks before changing a route, in one call instead of a dozen file reads. Errors when the route does not exist, because a route that writes nothing and a route that is missing are different answers.",
                             "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "method": { "type": "string" }, "path": { "type": "string" } }, "required": ["method"] }
+                        },
+                        {
+                            "name": "config.scan",
+                            "description": "Find credentials committed in configuration files: .env, Dockerfile, Compose, Terraform, Kubernetes and Helm manifests, and ini files. The credential value is never returned, only the key, the file, the line and a description of the value's shape, because a report that echoes a secret has copied it into every log that reads the output. Reports a clean scan as clean and a workspace with no configuration files as such, because those are different facts. Pass json true for structured findings.",
+                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "json": { "type": "boolean", "description": "return findings as json" } } }
+                        },
+                        {
+                            "name": "deps.tree",
+                            "description": "Resolve the lockfile graph and report each package's depth and the path taken to reach it, plus any package nothing reaches. Answers which packages exist only because of something pulled in, which is what decides whether an advisory matters.",
+                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "min_depth": { "type": "integer", "description": "only list packages at or beyond this depth. Defaults to 1" } } }
+                        },
+                        {
+                            "name": "deps.advisories",
+                            "description": "Report the advisory status of every pinned package from the OSV cache. A package with no cache entry is reported as not checked, never as clean: an unchecked project and a project with no known vulnerabilities are different facts and an agent acting on the second would be wrong.",
+                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "cache_dir": { "type": "string", "description": "override the cache directory, otherwise HEIDES_CACHE_DIR or the XDG default" } } }
                         },
                         {
                             "name": "spine.changed_since",
