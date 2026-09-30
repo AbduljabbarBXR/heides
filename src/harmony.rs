@@ -196,9 +196,21 @@ fn check_workspace_and_state(
     // The one guard that is allowed to want the network, and only when asked.
     if !policy.enabled {
         // Manifest parsing is local and still runs, so the pinned versions are
-        // known even offline. Only the advisory and latest-version lookups are
-        // skipped, and the receipt says so.
-        let (dep_reports, _health) = crate::deps::check_offline(root);
+        // known even offline. The advisory answers come from the cache where one
+        // is usable, which is what turns `--no-deps` from an honest refusal into
+        // a real gate.
+        //
+        // The state is still Skipped when the cache could not answer for every
+        // pinned version. A cache miss is not a clean bill of health, and
+        // reporting Skipped over a partial cache is the honest reading.
+        let cache_policy = crate::osv_cache::CachePolicy {
+            enabled: true,
+            allow_offline: true,
+            ..Default::default()
+        };
+        let (dep_reports, offline_health) =
+            crate::deps::check_offline_cached(root, cache_policy);
+        let cache_health = offline_health.cache;
         for r in dep_reports {
             reports.push(GuardReport {
                 guard: "dependency".to_string(),
@@ -208,7 +220,48 @@ fn check_workspace_and_state(
                 line: r.line,
             });
         }
-        return (reports, DepsState::Skipped);
+        // The cache line is always printed, including when it is empty, so a
+        // reader can tell "the cache answered" from "the cache was never asked".
+        if cache_health.hits > 0 || cache_health.misses > 0 || cache_health.stale > 0 {
+            reports.push(GuardReport {
+                guard: "dependency".to_string(),
+                severity: "info".to_string(),
+                message: format!(
+                    "advisory cache: {} answered, {} with no entry, {} expired{}",
+                    cache_health.hits,
+                    cache_health.misses,
+                    cache_health.stale,
+                    if cache_health.oldest_used_secs > 0 {
+                        format!(
+                            ". oldest answer relied on was {}",
+                            crate::osv_cache::human_age(cache_health.oldest_used_secs)
+                        )
+                    } else {
+                        String::new()
+                    }
+                ),
+                file: String::new(),
+                line: 0,
+            });
+        }
+        // Two states, not one. A cache that answered for every pinned version is
+        // a real check even though it was offline, so calling it Skipped would
+        // understate it. A cache that answered for some of them is RanPartial,
+        // which already means "looked at some of it and could not look at the
+        // rest", so the state is reused rather than invented.
+        let complete = cache_health.misses == 0 && cache_health.stale == 0;
+        return (
+            reports,
+            if complete && cache_health.hits > 0 {
+                DepsState::RanOnline
+            } else if complete {
+                // Nothing pinned, so nothing needed answering. Skipped is the
+                // honest word: there was no advisory work to do.
+                DepsState::Skipped
+            } else {
+                DepsState::RanPartial
+            },
+        );
     }
 
     let (dep_reports, health) = crate::deps::check(root);

@@ -1138,6 +1138,10 @@ pub struct DepsHealth {
     pub advisories_ok: bool,
     /// Every "is there a newer release" lookup answered.
     pub versions_ok: bool,
+    /// How the advisory answers were obtained, so a reader can tell a live
+    /// answer from a cached one. Defaulted, because a caller that never touches
+    /// the cache should not have to say so.
+    pub cache: crate::osv_cache::CacheHealth,
 }
 
 /// Fetch the latest published version of a dependency.
@@ -1397,6 +1401,7 @@ pub fn check(root: &Path) -> (Vec<DepReport>, DepsHealth) {
             DepsHealth {
                 advisories_ok: true,
                 versions_ok: true,
+                cache: Default::default(),
             },
         );
     }
@@ -1413,6 +1418,7 @@ pub fn check(root: &Path) -> (Vec<DepReport>, DepsHealth) {
     let mut health = DepsHealth {
         advisories_ok: true,
         versions_ok: true,
+        cache: Default::default(),
     };
     let mut checked = 0;
     for ((name, ecosystem), version) in &seen {
@@ -1504,6 +1510,140 @@ pub fn check(root: &Path) -> (Vec<DepReport>, DepsHealth) {
 ///
 /// The report says how many pinned versions it read, so an offline run is
 /// visibly doing local work rather than silently doing nothing.
+/// The offline check, answered from the advisory cache where it can be.
+///
+/// An offline run previously gave up on advisories entirely, which made
+/// `--no-deps` honest but nearly useless: it could report the pinned versions
+/// and nothing else. A cached answer is stable for a day and does not need the
+/// network on every run, so the offline path can be a real gate again.
+///
+/// The rule is that a cache miss, a stale entry, and a live clean are three
+/// different outcomes. A miss is reported as not checked, never as clean, and a
+/// stale *clean* is not a clean while a stale *advisory* is still an advisory.
+pub fn check_offline_cached(
+    root: &Path,
+    policy: crate::osv_cache::CachePolicy,
+) -> (Vec<DepReport>, DepsHealth) {
+    let deps = read_manifests(root);
+    let mut health = crate::osv_cache::CacheHealth::default();
+    if deps.is_empty() {
+        return (
+            vec![DepReport {
+                severity: "info".to_string(),
+                message: "no dependency manifests found (Cargo.toml, Cargo.lock, package.json, go.mod, requirements.txt, pyproject.toml, pom.xml, composer.lock)".to_string(),
+                file: root.display().to_string(),
+                line: 0,
+            }],
+            DepsHealth {
+                advisories_ok: true,
+                versions_ok: true,
+                cache: health,
+            },
+        );
+    }
+
+    let dir = if policy.enabled {
+        crate::osv_cache::cache_dir()
+    } else {
+        None
+    };
+    let mut not_checked: Vec<String> = Vec::new();
+    let mut reports: Vec<DepReport> = Vec::new();
+
+    for d in &deps {
+        if d.version == "?" {
+            continue;
+        }
+        let key = format!("{}@{}", d.name, d.version);
+        match crate::osv_cache::consult(policy, dir.as_deref(), d.ecosystem, &d.name, &d.version) {
+            Some(crate::osv_cache::Answer::Found {
+                detail,
+                cached,
+                age_secs,
+            }) => {
+                let age = age_secs
+                    .map(crate::osv_cache::human_age)
+                    .unwrap_or_default();
+                let from = if cached {
+                    format!(" from cache{}", if age.is_empty() { String::new() } else { format!(" ({age} old)") })
+                } else {
+                    String::new()
+                };
+                reports.push(DepReport {
+                    severity: "critical".to_string(),
+                    message: format!("{} {} is vulnerable, {detail}{from}", d.name, d.version),
+                    file: "manifest".to_string(),
+                    line: 0,
+                });
+                health.note_hit(age_secs);
+            }
+            Some(crate::osv_cache::Answer::Clean { cached, age_secs }) => {
+                let age = age_secs
+                    .map(crate::osv_cache::human_age)
+                    .unwrap_or_default();
+                // The source is named rather than assumed. A hardcoded "from
+                // cache" on a live answer would misreport how current the gate
+                // is, which is the one thing a reader uses this for.
+                let source = if cached {
+                    format!(
+                        "from cache{}",
+                        if age.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" ({age} old)")
+                        }
+                    )
+                } else {
+                    "from a live lookup".to_string()
+                };
+                reports.push(DepReport {
+                    severity: "info".to_string(),
+                    message: format!("{} {} has no known advisory, {source}", d.name, d.version),
+                    file: "manifest".to_string(),
+                    line: 0,
+                });
+                health.note_hit(age_secs);
+            }
+            // Present but expired. Reported, never as clean: this is the branch
+            // that would make an offline gate green on a stale answer.
+            Some(crate::osv_cache::Answer::NotChecked { cached_stale }) => {
+                health.note_stale();
+                not_checked.push(format!("{key} (cached answer expired)"));
+                let _ = cached_stale;
+            }
+            None => {
+                health.note_miss();
+                not_checked.push(key);
+            }
+        }
+    }
+
+    if !not_checked.is_empty() {
+        reports.push(DepReport {
+            severity: "warning".to_string(),
+            message: format!(
+                "{} pinned version(s) had no usable cached advisory and were not checked: {}",
+                not_checked.len(),
+                not_checked.join(", ")
+            ),
+            file: "manifest".to_string(),
+            line: 0,
+        });
+    }
+
+    (
+        reports,
+        DepsHealth {
+            // Only true when every pinned version actually produced an answer.
+            // The whole point: an offline run that could not check everything must
+            // not report a clean gate.
+            advisories_ok: not_checked.is_empty(),
+            versions_ok: true,
+            cache: health,
+        },
+    )
+}
+
 pub fn check_offline(root: &Path) -> (Vec<DepReport>, DepsHealth) {
     let deps = read_manifests(root);
     let mut reports = Vec::new();
@@ -1519,6 +1659,7 @@ pub fn check_offline(root: &Path) -> (Vec<DepReport>, DepsHealth) {
             DepsHealth {
                 advisories_ok: true,
                 versions_ok: true,
+                cache: Default::default(),
             },
         );
     }
@@ -1556,6 +1697,7 @@ pub fn check_offline(root: &Path) -> (Vec<DepReport>, DepsHealth) {
         DepsHealth {
             advisories_ok: true,
             versions_ok: true,
+            cache: Default::default(),
         },
     )
 }
