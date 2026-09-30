@@ -32,6 +32,22 @@ use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------- data shapes
 
+thread_local! {
+    /// Tables dropped by the most recent `parse_sql` call.
+    ///
+    /// A `DROP TABLE` in a later migration has to remove a table that an earlier
+    /// migration created, and those are two separate `parse_sql` calls, so the
+    /// information cannot travel through the return value. It is kept here
+    /// instead of changing the public signature every caller depends on.
+    static DROPPED: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Take the tables dropped by the last `parse_sql` call.
+pub fn take_dropped_tables() -> Vec<String> {
+    DROPPED.with(|d| std::mem::take(&mut *d.borrow_mut()))
+}
+
 /// One column of a table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Column {
@@ -234,6 +250,46 @@ fn split_qualified(s: &str) -> Vec<String> {
     parts
 }
 
+
+/// True for a `DROP TABLE` statement, including the IF EXISTS form.
+fn is_drop_table(stmt: &str) -> bool {
+    let head = stmt.trim_start();
+    let upper = head.to_ascii_uppercase();
+    if !upper.starts_with("DROP") {
+        return false;
+    }
+    let rest = upper["DROP".len()..].trim_start();
+    for filler in ["TABLE IF EXISTS ", "TABLE ", "EXISTS TABLE ", "EXISTS "]
+    {
+        if let Some(r) = rest.strip_prefix(filler) {
+            if r.trim_start().starts_with("TABLE") || filler.trim() == "TABLE" {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The table name a `DROP TABLE` names, without the trailing options.
+fn dropped_table_name(stmt: &str) -> Option<String> {
+    let upper = stmt.to_ascii_uppercase();
+    let at = upper.find("TABLE")? + "TABLE".len();
+    let rest = stmt[at..].trim_start();
+    let rest = rest
+        .strip_prefix("IF EXISTS ")
+        .or_else(|| rest.strip_prefix("IF	EXISTS "))
+        .unwrap_or(rest);
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.' || *c == '"')
+        .collect();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
 /// True when this statement creates a table rather than a view or index.
 fn is_create_table(stmt: &str) -> bool {
     let head = stmt.trim_start();
@@ -286,6 +342,20 @@ pub fn parse_sql(path: &Path, body: &str) -> Vec<Table> {
             // Deferred: an index can precede its table in a migration file, so
             // attaching it here would silently drop it.
             deferred_indexes.push(t.to_string());
+            continue;
+        }
+
+        // DROP TABLE removes a table that an earlier migration created. Without
+        // handling it the graph is an append-only log, so a table dropped in
+        // production still looks live forever. Migrations are applied in filename
+        // order, which is the order this walk reads them, so removing here is
+        // correct.
+        if is_drop_table(t) {
+            if let Some(name) = dropped_table_name(t) {
+                let normalized = unquote(&name);
+                tables.retain(|x| !table_names_match(&x.name, &normalized));
+                DROPPED.with(|d| d.borrow_mut().push(normalized));
+            }
             continue;
         }
 
@@ -1786,6 +1856,12 @@ pub fn index_schema(root: &Path) -> Result<DbGraph, String> {
                     });
                 }
                 let mut parsed = parse_sql(p, &body);
+                // A drop in this file removes the table from everything indexed so
+                // far, not just from this file, which is what makes the graph
+                // reflect the live schema rather than every table ever created.
+                for dropped in take_dropped_tables() {
+                    g.tables.retain(|x| !table_names_match(&x.name, &dropped));
+                }
                 // Merge by name, later file wins, which matches migration order.
                 for t in parsed.drain(..) {
                     match g.tables.iter().position(|x| x.name == t.name) {
@@ -2898,4 +2974,427 @@ fn collect_code_files(root: &Path, dir: &Path, depth: usize, out: &mut Vec<std::
             out.push(p);
         }
     }
+}
+
+// ------------------------------------------------- the persistent db index
+
+/// Where the database index lives for a workspace.
+///
+/// A separate file from the code spine on purpose. The code index is invalidated
+/// by a version bump whenever the parser changes, and rebuilding it is cheap. The
+/// database index holds derived data that is expensive to walk, and invalidating
+/// it every time a grammar is added would throw away a lot of work for nothing.
+pub fn db_index_path(root: &Path) -> PathBuf {
+    root.join(".heides").join("db.json")
+}
+
+/// True when a database index has been written for this workspace.
+pub fn db_index_exists(root: &Path) -> bool {
+    db_index_path(root).exists()
+}
+
+/// Minimal JSON writing. The store is a flat document, so a dependency-free
+/// writer is smaller and has fewer failure modes than pulling in a parser for it,
+/// and every value written here is either a number, a bool, or a string that
+/// `json_escape` has already made safe.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn json_str(s: &str) -> String {
+    format!("\"{}\"", json_escape(s))
+}
+
+/// Write the database index for a workspace.
+///
+/// A plain document rather than a table per entity, because the whole graph is
+/// read together and written together, and a single file keeps the on-disk
+/// footprint to one entry an agent has to ignore.
+pub fn save_db_index(root: &Path, g: &DbGraph) -> Result<(), String> {
+    let path = db_index_path(root);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("could not create {}: {}", parent.display(), e))?;
+    }
+
+    let mut tables = Vec::new();
+    for t in &g.tables {
+        let cols: Vec<String> = t
+            .columns
+            .iter()
+            .map(|c| {
+                format!(
+                    "{{\"name\":{},\"ty\":{},\"pk\":{},\"nullable\":{},\
+\"fk_table\":{},\"fk_col\":{},\"cascade\":{}}}",
+                    json_str(&c.name),
+                    json_str(&c.ty),
+                    c.pk,
+                    c.nullable,
+                    c.fk_table.as_deref().map(json_str).unwrap_or_else(|| "null".into()),
+                    c.fk_col.as_deref().map(json_str).unwrap_or_else(|| "null".into()),
+                    c.on_delete_cascade
+                )
+            })
+            .collect();
+        let idx: Vec<String> = t
+            .indexes
+            .iter()
+            .map(|i| {
+                let cs: Vec<String> = i.columns.iter().map(|c| json_str(c)).collect();
+                format!(
+                    "{{\"name\":{},\"cols\":[{}],\"unique\":{}}}",
+                    json_str(&i.name),
+                    cs.join(","),
+                    i.unique
+                )
+            })
+            .collect();
+        tables.push(format!(
+            "{{\"name\":{},\"schema\":{},\"kind\":{},\"source\":{},\"columns\":[{}],\"indexes\":[{}]}}",
+            json_str(&t.name),
+            t.schema.as_deref().map(json_str).unwrap_or_else(|| "null".into()),
+            json_str(&t.kind),
+            json_str(&t.source),
+            cols.join(","),
+            idx.join(",")
+        ));
+    }
+
+    let calls: Vec<String> = g
+        .calls
+        .iter()
+        .map(|c| {
+            format!(
+                "{{\"table\":{},\"op\":{},\"via\":{},\"file\":{},\"line\":{}}}",
+                json_str(&c.table),
+                json_str(c.op.as_str()),
+                json_str(&c.via),
+                json_str(&c.file),
+                c.line
+            )
+        })
+        .collect();
+
+    let migrations: Vec<String> = g
+        .migrations
+        .iter()
+        .map(|m| {
+            format!(
+                "{{\"file\":{},\"version\":{},\"dialect\":{},\"sha\":{}}}",
+                json_str(&m.file),
+                json_str(&m.version),
+                json_str(m.dialect),
+                json_str(&m.sha)
+            )
+        })
+        .collect();
+
+    let doc = format!(
+        "{{\"version\":1,\"tables\":[{}],\"calls\":[{}],\"migrations\":[{}]}}",
+        tables.join(","),
+        calls.join(","),
+        migrations.join(",")
+    );
+    std::fs::write(&path, doc).map_err(|e| format!("could not write {}: {}", path.display(), e))
+}
+
+/// Read the database index back.
+///
+/// A missing file is not an error: it is the state of every workspace before the
+/// first scan, and the caller rebuilds. A malformed file is an error, because
+/// silently returning an empty graph would report a real schema as absent.
+pub fn load_db_index(root: &Path) -> Result<DbGraph, String> {
+    let path = db_index_path(root);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(_) => return Ok(DbGraph::default()),
+    };
+    parse_db_index(&text)
+}
+
+/// Parse the stored document.
+///
+/// A tolerant scanner rather than a full JSON parser: it walks to the named key
+/// and reads the string, bool and number values it expects, and stops cleanly at
+/// the end of the array. Anything it cannot understand is skipped rather than
+/// aborting, because a partially readable index is more useful than none.
+fn parse_db_index(text: &str) -> Result<DbGraph, String> {
+    let mut g = DbGraph::default();
+
+    // tables
+    if let Some(start) = text.find("\"tables\":[") {
+        let body = &text[start + "\"tables\":[".len()..];
+        for chunk in split_json_objects(body) {
+            let Some(name) = json_field_str(&chunk, "name") else {
+                continue;
+            };
+            let mut t = Table {
+                name,
+                schema: json_field_str(&chunk, "schema"),
+                kind: json_field_str(&chunk, "kind").unwrap_or_else(|| "table".into()),
+                columns: Vec::new(),
+                indexes: Vec::new(),
+                source: json_field_str(&chunk, "source").unwrap_or_default(),
+            };
+            if let Some(cs) = json_array(&chunk, "columns") {
+                for c in split_json_objects(&cs) {
+                    let Some(cn) = json_field_str(&c, "name") else {
+                        continue;
+                    };
+                    t.columns.push(Column {
+                        name: cn,
+                        ty: json_field_str(&c, "ty").unwrap_or_else(|| "UNKNOWN".into()),
+                        pk: json_field_bool(&c, "pk"),
+                        nullable: json_field_bool(&c, "nullable"),
+                        fk_table: json_field_str(&c, "fk_table"),
+                        fk_col: json_field_str(&c, "fk_col"),
+                        on_delete_cascade: json_field_bool(&c, "cascade"),
+                    });
+                }
+            }
+            if let Some(is) = json_array(&chunk, "indexes") {
+                for i in split_json_objects(&is) {
+                    let Some(inm) = json_field_str(&i, "name") else {
+                        continue;
+                    };
+                    t.indexes.push(Index {
+                        name: inm,
+                        columns: json_array(&i, "cols")
+                            .map(|a| {
+                                split_json_strings(&a).into_iter().collect()
+                            })
+                            .unwrap_or_default(),
+                        unique: json_field_bool(&i, "unique"),
+                    });
+                }
+            }
+            g.tables.push(t);
+        }
+    }
+
+    // calls
+    if let Some(start) = text.find("\"calls\":[") {
+        let body = &text[start + "\"calls\":[".len()..];
+        for chunk in split_json_objects(body) {
+            let Some(table) = json_field_str(&chunk, "table") else {
+                continue;
+            };
+            let op = match json_field_str(&chunk, "op").as_deref() {
+                Some("write") => Op::Write,
+                _ => Op::Read,
+            };
+            g.calls.push(Call {
+                table,
+                op,
+                via: json_field_str(&chunk, "via").unwrap_or_default(),
+                file: json_field_str(&chunk, "file").unwrap_or_default(),
+                line: json_field_num(&chunk, "line").unwrap_or(0),
+            });
+        }
+    }
+
+    // migrations
+    if let Some(start) = text.find("\"migrations\":[") {
+        let body = &text[start + "\"migrations\":[".len()..];
+        for chunk in split_json_objects(body) {
+            let Some(file) = json_field_str(&chunk, "file") else {
+                continue;
+            };
+            let dialect_static: &'static str = match json_field_str(&chunk, "dialect").as_deref()
+            {
+                Some("alembic") => "alembic",
+                Some("goose") => "goose",
+                Some("flyway") => "flyway",
+                Some("prisma") => "prisma",
+                Some("knex") => "knex",
+                Some("liquibase") => "liquibase",
+                _ => "sql",
+            };
+            g.migrations.push(Migration {
+                file,
+                version: json_field_str(&chunk, "version").unwrap_or_default(),
+                dialect: dialect_static,
+                sha: json_field_str(&chunk, "sha").unwrap_or_default(),
+            });
+        }
+    }
+
+    Ok(g)
+}
+
+/// The text of a `[...]` array starting at `key`, brackets balanced.
+fn json_array(text: &str, key: &str) -> Option<String> {
+    let at = text.find(&format!("\"{}\":[", key))? + key.len() + 3;
+    let b = text.as_bytes();
+    let mut depth = 0i32;
+    let mut quote = false;
+    let mut esc = false;
+    for (i, &c) in b.iter().enumerate().skip(at) {
+        if esc {
+            esc = false;
+            continue;
+        }
+        match c {
+            b'\\' if quote => esc = true,
+            b'"' => quote = !quote,
+            b'[' | b'{' if !quote => depth += 1,
+            b']' | b'}' if !quote => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(text[at + 1..i].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Each `{...}` object in a bracketed body, in order.
+fn split_json_objects(body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let b = body.as_bytes();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    let mut quote = false;
+    let mut esc = false;
+    for (i, &c) in b.iter().enumerate() {
+        if esc {
+            esc = false;
+            continue;
+        }
+        match c {
+            b'\\' if quote => esc = true,
+            b'"' => quote = !quote,
+            b'{' if !quote => {
+                if depth == 0 {
+                    start = i;
+                }
+                depth += 1;
+            }
+            b'}' if !quote => {
+                depth -= 1;
+                if depth == 0 {
+                    out.push(body[start..=i].to_string());
+                }
+            }
+            _ => {}
+        }
+        if depth < 0 {
+            break;
+        }
+    }
+    out
+}
+
+/// Every `"..."` string in a body.
+fn split_json_strings(body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let b = body.as_bytes();
+    let mut i = 0usize;
+    while i < b.len() {
+        if b[i] == b'"' {
+            let mut j = i + 1;
+            let mut s = String::new();
+            while j < b.len() && b[j] != b'"' {
+                if b[j] == b'\\' && j + 1 < b.len() {
+                    j += 1;
+                    s.push(match b[j] {
+                        b'n' => '\n',
+                        b'r' => '\r',
+                        b't' => '\t',
+                        other => other as char,
+                    });
+                } else {
+                    s.push(b[j] as char);
+                }
+                j += 1;
+            }
+            out.push(s);
+            i = j + 1;
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+fn json_field_str(obj: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{}\":\"", key);
+    let at = obj.find(&needle)? + needle.len();
+    let b = obj.as_bytes();
+    let mut s = String::new();
+    let mut i = at;
+    while i < b.len() && b[i] != b'"' {
+        if b[i] == b'\\' && i + 1 < b.len() {
+            i += 1;
+            s.push(match b[i] {
+                b'n' => '\n',
+                b'r' => '\r',
+                b't' => '\t',
+                other => other as char,
+            });
+        } else {
+            s.push(b[i] as char);
+        }
+        i += 1;
+    }
+    Some(s)
+}
+
+fn json_field_bool(obj: &str, key: &str) -> bool {
+    obj.contains(&format!("\"{}\":true", key))
+}
+
+fn json_field_num(obj: &str, key: &str) -> Option<u64> {
+    let needle = format!("\"{}\":", key);
+    let at = obj.find(&needle)? + needle.len();
+    let digits: String = obj[at..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
+/// Migrations that changed or disappeared since the index was written.
+///
+/// This is the drift question an agent asks before trusting the schema: a
+/// migration edited in place, or a file removed, both mean the index no longer
+/// describes the workspace. It is reported rather than acted on, because a
+/// migration edit is sometimes intentional.
+pub fn migration_drift(root: &Path, stored: &DbGraph) -> Vec<String> {
+    let current = match index_schema(root) {
+        Ok(g) => g,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+
+    for m in &current.migrations {
+        match stored.migrations.iter().find(|s| s.file == m.file) {
+            Some(s) if s.sha == m.sha => {}
+            Some(_) => out.push(format!(
+                "{} changed since the index was written",
+                m.file
+            )),
+            None => out.push(format!("{} is new and not in the index", m.file)),
+        }
+    }
+    for s in &stored.migrations {
+        if !current.migrations.iter().any(|m| m.file == s.file) {
+            out.push(format!("{} was removed and is still in the index", s.file));
+        }
+    }
+    out
 }
