@@ -38,6 +38,9 @@ fn with_calls(sql: &str, calls: &[(&str, Op, &str)]) -> DbGraph {
             table: table.to_string(),
             op: *op,
             via: via.to_string(),
+            // Not used by the policy checks, which work off the table and the
+            // operation, but the field is not optional.
+            fn_name: "handler".into(),
             file: "app.py".into(),
             line: 1,
         })

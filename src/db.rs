@@ -92,12 +92,21 @@ pub struct Call {
     pub op: Op,
     /// The source text that produced this, so a finding can be grounded.
     pub via: String,
+    /// The function containing the call, resolved from the body. Empty when the
+    /// call is at file scope, which is common for module level query constants.
+    /// The API surface graph walks on this, so it is not optional decoration:
+    /// without it an endpoint cannot reach a table.
+    pub fn_name: String,
     pub file: String,
     pub line: u64,
 }
 
 /// Whether a call reads or writes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Ord` is derived so the API surface can sort and deduplicate the tables it
+/// reaches. It is sound because the ordering is only ever used to make a set
+/// stable, never to mean that one operation outranks another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Op {
     Read,
     Write,
@@ -901,6 +910,7 @@ fn resolve_prisma(body: &str, file: &str) -> Vec<Call> {
         if !model.starts_with('$') {
             if let Some(op) = op_for(&method) {
                 out.push(Call {
+    fn_name: String::new(),
                     table: model.to_ascii_lowercase(),
                     op,
                     via: format!("prisma.{}.{}()", model, method),
@@ -1015,6 +1025,7 @@ fn resolve_model_calls(body: &str, file: &str) -> Vec<Call> {
             continue;
         }
         out.push(Call {
+    fn_name: String::new(),
             table: word.to_string(),
             op,
             via: format!("{}.{}()", word, method_raw),
@@ -1144,6 +1155,7 @@ fn models_in_call_args(rest: &str, file: &str) -> Vec<Call> {
             {
                 let _ = tail;
                 out.push(Call {
+    fn_name: String::new(),
                     table: name,
                     op: *op,
                     via: format!("orm.{}", marker.trim_end_matches('(')),
@@ -1247,6 +1259,7 @@ fn find_operation_in_chain(rest: &str, file: &str, receiver: &str) -> Option<Cal
         }
         if let Some(op) = op_for(method_raw) {
             last = Some(Call {
+    fn_name: String::new(),
                 table: receiver.to_string(),
                 op,
                 via: format!("{}.{}()", receiver, method_raw),
@@ -1336,6 +1349,7 @@ fn resolve_named_repositories(body: &str, file: &str) -> Vec<Call> {
                 .to_string();
             if let Some(entity) = entity_from_repository_name(&ident) {
                 out.push(Call {
+    fn_name: String::new(),
                     table: entity.to_ascii_lowercase(),
                     op: *op,
                     via: format!("{}.{}()", ident, method),
@@ -1363,6 +1377,7 @@ fn resolve_quoted_table(body: &str, file: &str, op: Op, via_prefix: &str) -> Vec
                     let name = unquote(&rest[..end + 2]);
                     if !name.is_empty() {
                         out.push(Call {
+    fn_name: String::new(),
                             table: name,
                             op,
                             via: format!("{}{}", via_prefix, marker),
@@ -1410,6 +1425,7 @@ pub fn scan_calls(path: &Path, body: &str) -> Vec<Call> {
         }
         for (table, op) in tables_in_sql(&stmt) {
             calls.push(Call {
+    fn_name: String::new(),
                 table,
                 op,
                 via: "raw sql".into(),
@@ -1419,7 +1435,18 @@ pub fn scan_calls(path: &Path, body: &str) -> Vec<Call> {
         }
     }
 
-    calls.sort_by(|a, b| a.table.cmp(&b.table));
+    // Attribution runs before the sort and dedup so two calls to the same table
+    // from different functions stay distinct. Deduplicating first would collapse
+    // them and the API surface graph would see one function doing both, which is
+    // how an endpoint ends up credited with a write it never makes.
+    attribute_calls(&mut calls, path, body);
+    calls.sort_by(|a, b| {
+        a.table
+            .cmp(&b.table)
+            .then(a.op.as_str().cmp(b.op.as_str()))
+            .then(a.file.cmp(&b.file))
+            .then(a.line.cmp(&b.line))
+    });
     calls.dedup_by(|a, b| a.table == b.table && a.op == b.op && a.via == b.via);
     calls
 }
@@ -1491,6 +1518,7 @@ fn resolve_orm_arguments(body: &str, file: &str) -> Vec<Call> {
                 && (tail.starts_with(')') || tail.starts_with('.') || tail.starts_with(','));
             if model_like {
                 out.push(Call {
+    fn_name: String::new(),
                     table: name,
                     op: *op,
                     via: format!("orm.{}", marker.trim_end_matches('(')),
@@ -1535,6 +1563,7 @@ fn resolve_destinations(body: &str, file: &str) -> Vec<Call> {
                 .collect();
             if !name.is_empty() {
                 out.push(Call {
+    fn_name: String::new(),
                     table: name,
                     op,
                     via: format!("gorm.{}", method.trim_end_matches('(')),
@@ -3077,10 +3106,11 @@ pub fn save_db_index(root: &Path, g: &DbGraph) -> Result<(), String> {
         .iter()
         .map(|c| {
             format!(
-                "{{\"table\":{},\"op\":{},\"via\":{},\"file\":{},\"line\":{}}}",
+                "{{\"table\":{},\"op\":{},\"via\":{},\"fn_name\":{},\"file\":{},\"line\":{}}}",
                 json_str(&c.table),
                 json_str(c.op.as_str()),
                 json_str(&c.via),
+                json_str(&c.fn_name),
                 json_str(&c.file),
                 c.line
             )
@@ -3199,6 +3229,7 @@ fn parse_db_index(text: &str) -> Result<DbGraph, String> {
                 table,
                 op,
                 via: json_field_str(&chunk, "via").unwrap_or_default(),
+                fn_name: json_field_str(&chunk, "fn_name").unwrap_or_default(),
                 file: json_field_str(&chunk, "file").unwrap_or_default(),
                 line: json_field_num(&chunk, "line").unwrap_or(0),
             });
@@ -3464,4 +3495,175 @@ pub fn guard_reports(root: &Path, g: &DbGraph) -> Vec<(String, String, String)> 
     out.sort();
     out.dedup();
     out
+}
+
+/// Attribute each call to the function that contains it and to a real line.
+///
+/// Every resolver above records the source text that produced a match and
+/// leaves the line at 1, because a resolver reads a whole body at once and does
+/// not know where in it the match landed. That was fine while the only consumer
+/// asked "does this repository touch this table", but it makes two later things
+/// wrong: a finding points at the top of a 400 line service, and the API
+/// surface graph cannot walk from an endpoint to a table, because it has no way
+/// to tell which function a call belongs to.
+///
+/// Attribution happens once here, as a post-pass, rather than by threading a
+/// position through nine resolvers. The token searched for is the distinctive
+/// tail of the recorded source text: the method name, or the table name for raw
+/// SQL. The first line containing it is taken, which is exact when a method
+/// appears once in a function and approximate when it appears in several. The
+/// approximation is deliberate and bounded: a wrong enclosing function would put
+/// a table on the wrong endpoint, so a caller that needs certainty should
+/// ground on the reported file and line rather than the name alone.
+fn attribute_calls(calls: &mut [Call], _path: &Path, body: &str) {
+    if calls.is_empty() {
+        return;
+    }
+    let lines: Vec<&str> = body.lines().collect();
+    if lines.is_empty() {
+        return;
+    }
+    // Lowercased once, since every lookup lowercases the line.
+    let lowered: Vec<String> = lines.iter().map(|l| l.to_ascii_lowercase()).collect();
+
+    for call in calls.iter_mut() {
+        let token = call_token(&call.via, &call.table);
+        if token.is_empty() {
+            continue;
+        }
+        let needle = token.to_ascii_lowercase();
+        // Matched as a whole identifier, not as a substring. The verb `create`
+        // appears inside `createUser`, so a plain substring search attributes the
+        // call to the route registration on line 1 instead of the function that
+        // actually issues the query, which then has no enclosing function at all.
+        let Some(idx) = lowered
+            .iter()
+            .position(|l| contains_identifier(l, &needle))
+        else {
+            continue;
+        };
+        call.line = (idx + 1) as u64;
+        if let Some((name, _)) = enclosing_function(&lines, idx) {
+            call.fn_name = name;
+        }
+    }
+}
+
+/// The text worth searching for when locating a recorded call.
+fn call_token(via: &str, table: &str) -> String {
+    let cleaned = via.trim().trim_end_matches("()").trim();
+    if cleaned == "raw sql" || cleaned.is_empty() {
+        // A raw SQL call has no method name, so the table it touches is the only
+        // thing that can locate it.
+        return table.to_string();
+    }
+    // "prisma.user.create" -> "create", "orm.filter" -> "filter". The last
+    // segment is the verb, which is what distinguishes one call from another
+    // inside the same function.
+    let last = cleaned.rsplit('.').next().unwrap_or(cleaned);
+    if last.len() >= 3 && last.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        last.to_string()
+    } else {
+        cleaned.to_string()
+    }
+}
+
+/// The name of the function whose body contains line `idx`, found by scanning
+/// back for a declaration at a lower indent.
+///
+/// Indent rather than braces, because the languages the database layer handles
+/// do not share a brace style and Python has none. A one line `def` whose body
+/// follows on the same line still matches, and a nested helper resolves to the
+/// inner name, which is the one whose body actually contains the query.
+fn enclosing_function(lines: &[&str], idx: usize) -> Option<(String, usize)> {
+    let target = indent_of(lines[idx]);
+    // Inclusive of the query's own line: `function f() { return prisma.user.create(); }`
+    // declares and queries on one line, so a range starting above it can never
+    // find the enclosing declaration.
+    for back in (0..=idx).rev() {
+        let line = lines[back];
+        let trimmed = line.trim_start();
+        let ind = indent_of(line);
+        let rest = declaration_name(trimmed)?;
+        // Strictly deeper than the query line, so a nested helper wins. Equal
+        // indent is accepted, which is what a one line function body needs:
+        // `function f() { return prisma.user.create(); }` has the declaration
+        // and the query on the same line at the same indent.
+        if ind > target {
+            continue;
+        }
+        let bare: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if !bare.is_empty() {
+            return Some((bare, back + 1));
+        }
+    }
+    None
+}
+
+/// The declared name after a definition keyword, across the languages the
+/// database layer already recognises, or None if this is not a declaration.
+fn declaration_name(trimmed: &str) -> Option<&str> {
+    for kw in ["async def ", "def ", "func ", "fn ", "function "] {
+        if let Some(rest) = trimmed.strip_prefix(kw) {
+            return Some(rest.trim_start());
+        }
+    }
+    // Java and C# put modifiers between the indent and the return type.
+    let mut rest = trimmed;
+    for mod_kw in ["public ", "static ", "private ", "protected ", "internal "] {
+        if let Some(r) = rest.strip_prefix(mod_kw) {
+            rest = r;
+        }
+    }
+    if rest.len() < trimmed.len() {
+        for ret in ["void ", "int ", "String ", "User ", "Task<", "async "] {
+            if let Some(r) = rest.strip_prefix(ret) {
+                rest = r;
+            }
+        }
+        // `public void handler(HttpRequest req)` -> after the return type, the name.
+        if rest
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_alphabetic() || c == '_')
+            .unwrap_or(false)
+        {
+            return Some(rest);
+        }
+    }
+    None
+}
+
+/// True when `hay` contains `needle` as a whole identifier: not preceded or
+/// followed by another word character. A dot before it is fine, because that is
+/// how a method call is written.
+fn contains_identifier(hay: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let bytes = hay.as_bytes();
+    let n = needle.len();
+    let mut from = 0usize;
+    while let Some(found) = hay[from..].find(needle) {
+        let at = from + found;
+        let before_ok = at == 0
+            || !bytes
+                .get(at - 1)
+                .map(|c| c.is_ascii_alphanumeric() || *c == b'_')
+                .unwrap_or(false);
+        let after_at = at + n;
+        let after_ok = after_at >= bytes.len()
+            || !bytes
+                .get(after_at)
+                .map(|c| c.is_ascii_alphanumeric() || *c == b'_')
+                .unwrap_or(false);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = at + 1;
+    }
+    false
 }

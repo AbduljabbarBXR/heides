@@ -237,7 +237,7 @@ fn main() -> ExitCode {
             }
             "db" => {
                 println!(
-                    "usage. heides db [tables|columns|reads|writes|orphans|missingindex|policies|cycles|schema] [name] [dir]"
+                    "usage. heides db [tables|columns|reads|writes|orphans|missingindex|policies|cycles|schema|routes|touch] [name] [dir]"
                 );
                 return ExitCode::SUCCESS;
             }
@@ -584,8 +584,13 @@ fn main() -> ExitCode {
             // about a codebase with a database: what tables exist, what reads or
             // writes them, what nothing touches, and what the schema gets wrong.
             let sub = args.get(2).map(|s| s.as_str()).unwrap_or("schema");
+            // `heides db touch <METHOD> <path> [dir]` has one more positional
+            // argument than the other subcommands, so its root sits at index 5
+            // rather than 4. Resolving the root at the wrong offset is what
+            // made the walk run against `/users` and report no database.
+            let root_at = if sub == "touch" { 5 } else { 4 };
             let name = args.get(3).map(|s| s.as_str()).unwrap_or("");
-            let root = heides::db::root_from_args(&args, 4);
+            let root = heides::db::root_from_args(&args, root_at);
             let pulse = Stopwatch::start(&ui, "db");
             let graph = match heides::db::index_schema(&root) {
                 Ok(g) => g,
@@ -610,7 +615,121 @@ fn main() -> ExitCode {
             let verdict = heides::db::verify_schema(&graph);
             let mut failed = false;
 
+            // The API surface needs the code graph too, because the walk from an
+            // endpoint to a table goes through the call graph. Loading it here
+            // rather than in the subcommand keeps the database commands that do
+            // not need it as cheap as before.
+            let code = spine::load(&root).ok();
+            let surface = code.as_ref().map(|g| {
+                let files: Vec<String> = g.files.iter().map(|f| f.path.clone()).collect();
+                let eps = heides::frameworks::endpoints(&files, &root);
+                heides::frameworks::api_surface(g, &graph, &eps, 6)
+            });
+
             match sub {
+                "routes" => {
+                    let Some(surface) = surface.as_ref() else {
+                        println!("no code index under {}", root.display());
+                        println!("run `heides scan {}` first", root.display());
+                        return ExitCode::FAILURE;
+                    };
+                    if surface.endpoints.is_empty() {
+                        println!("no routes recognised under {}", root.display());
+                        println!(
+                            "recognised: express and fastify, flask and django, and go net/http"
+                        );
+                    } else {
+                        for e in &surface.endpoints {
+                            let writes = surface.reachable_tables(&e.method, &e.path);
+                            let reads = surface.readable_tables(&e.method, &e.path);
+                            println!("{} {}", e.method, e.path);
+                            println!("  handler {} at {}:{}", e.handler, e.file, e.line);
+                            println!("  writes {}", writes.join(", "));
+                            println!("  reads  {}", reads.join(", "));
+                        }
+                    }
+                }
+                "touch" => {
+                    // `heides db touch POST /users [dir]` answers the one question
+                    // the surface graph exists for: what does this endpoint write.
+                    // The method is args[3] and the path is args[4], so the root
+                    // has to be read from args[5] for this subcommand, otherwise
+                    // the path is consumed as the root and the whole walk runs in
+                    // the wrong directory.
+                    let method = name.to_ascii_uppercase();
+                    let Some(surface) = surface.as_ref() else {
+                        println!("no code index under {}", root.display());
+                        return ExitCode::FAILURE;
+                    };
+                    if method.is_empty() {
+                        println!("usage. heides db touch <METHOD> <path> [dir]");
+                        return ExitCode::FAILURE;
+                    }
+                    let path = args
+                        .get(4)
+                        .map(|s| s.to_string())
+                        .or_else(|| {
+                            surface
+                                .endpoints
+                                .iter()
+                                .find(|e| e.method == method)
+                                .map(|e| e.path.clone())
+                        });
+                    let Some(path) = path else {
+                        println!("no {} route here", method);
+                        return ExitCode::FAILURE;
+                    };
+                    let key = format!("{} {}", method, path);
+                    // A path that is not a registered route is reported as
+                    // missing, not as a route that writes nothing. Those are
+                    // different answers and only one is true, and an agent that
+                    // read the second as the first would skip a route that
+                    // exists under a different method.
+                    if !surface
+                        .endpoints
+                        .iter()
+                        .any(|e| e.method == method && e.path == path)
+                    {
+                        println!("no route {} {} here", method, path);
+                        let known: Vec<String> = surface
+                            .endpoints
+                            .iter()
+                            .filter(|e| e.path == path)
+                            .map(|e| e.method.clone())
+                            .collect();
+                        if !known.is_empty() {
+                            println!("{} is registered as {}", path, known.join(", "));
+                        }
+                        return ExitCode::FAILURE;
+                    }
+                    // Resolved to the declared table, the same as `db routes`.
+                    // Printing the model name here and the table name there means
+                    // an agent comparing the two views sees a mismatch that does
+                    // not exist.
+                    match surface.writes.get(&key) {
+                        Some(v) if !v.is_empty() => {
+                            for r in v {
+                                println!(
+                                    "writes {} via {}",
+                                    surface.resolve_table(&r.table),
+                                    r.via
+                                );
+                                println!("  at {}:{} in {}", r.file, r.line, r.depth_hop());
+                            }
+                        }
+                        _ => println!("{} {} writes no table", method, path),
+                    }
+                    if let Some(v) = surface.reads.get(&key) {
+                        for r in v {
+                            println!(
+                                "reads {} via {}",
+                                surface.resolve_table(&r.table),
+                                r.via
+                            );
+                            println!("  at {}:{}", r.file, r.line);
+                        }
+                    }
+                }
                 "tables" => {
                     for (t, (reads, writes)) in heides::db::tables_report(&graph) {
                         println!("{:<28} {} read, {} write", t, reads, writes);

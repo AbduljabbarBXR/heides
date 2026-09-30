@@ -13,14 +13,14 @@
 // that matters here is a wrong table rather than a missing one. A caller that
 // resolves to `users` when it touches `orders` is worse than no answer.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 // ---------------------------------------------------------------- schema graph
 
 // Aliases to the module's own types. These tests compile against the real API
 // rather than a local copy, so a field rename cannot leave the tests green
 // against a stale shape.
-use heides::db::{Call, Column, Index, Op, Table};
+use heides::db::{Call, Op, Table};
 
 pub fn parse_sql_file(path: &str, body: &str) -> Vec<Table> {
     heides::db::parse_sql(Path::new(path), body)
