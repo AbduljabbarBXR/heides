@@ -788,7 +788,7 @@ mod liveness {
         let staged = check_staged(&dir, &graph, &patch).expect("the patch must parse");
 
         // Now the identical content on disk, through the real check path.
-        std::fs::write(&dir.join("app.py"), &patched).unwrap();
+        std::fs::write(dir.join("app.py"), &patched).unwrap();
         let on_disk = run(&dir);
 
         let staged_text: Vec<&str> = staged
