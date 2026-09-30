@@ -523,6 +523,16 @@ fn quoted_entries(list: &str) -> Vec<String> {
     out
 }
 
+/// Push one requirement, keeping an unpinned one.
+///
+/// `split_python_req` returns None for a bare name like `hatchling`, because it
+/// has no version operator to split on. That is right for `requirements.txt`,
+/// where an unpinned entry is not a pinned version anybody can look up. It was
+/// wrong for `[build-system] requires`, where an unpinned build dependency is
+/// exactly the supply-chain risk worth naming: the build runs whatever that
+/// package resolves to today. Dropping it made a pyproject whose only
+/// requirement was `hatchling` report no manifests at all, while the identical
+/// requirement in requirements.txt was found.
 fn push_py_req(deps: &mut Vec<Dependency>, entry: &str) {
     if let Some((name, version)) = split_python_req(entry) {
         deps.push(Dependency {
@@ -530,7 +540,48 @@ fn push_py_req(deps: &mut Vec<Dependency>, entry: &str) {
             version,
             ecosystem: "PyPI",
         });
+        return;
     }
+    if let Some(name) = bare_py_name(entry) {
+        deps.push(Dependency {
+            name,
+            version: UNPINNED.to_string(),
+            ecosystem: "PyPI",
+        });
+    }
+}
+
+/// The version recorded for a requirement that carries no pin.
+pub const UNPINNED: &str = "?";
+
+/// The name of a requirement that specifies no version, if that is all it is.
+///
+/// Guards, markers and inline comments are not names.
+fn bare_py_name(entry: &str) -> Option<String> {
+    let t = entry.trim();
+    if t.is_empty() || t.starts_with('#') || t.starts_with('-') {
+        return None;
+    }
+    // Drop an inline environment marker, `flask ; python_version<"3.13"`.
+    let t = t.split(';').next().unwrap_or(t).trim();
+    if t.is_empty() {
+        return None;
+    }
+    // Anything with a comparison or an extra is a version spec that
+    // split_python_req already had its chance at.
+    if t.contains(['=', '<', '>', '~', '!', '@', '[', '*', ',']) {
+        return None;
+    }
+    if !t
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return None;
+    }
+    if t.starts_with('.') || t.ends_with('.') {
+        return None;
+    }
+    Some(t.to_string())
 }
 
 fn parse_pyproject_toml(text: &str) -> Vec<Dependency> {
@@ -1448,14 +1499,46 @@ mod tests {
                 .any(|d| d.name == "setuptools" && d.version == ">=68"),
             "the pinned build requirement must be reported: {deps:?}"
         );
-        // `wheel` carries no version, so there is no pinned version to look
-        // up. Dropping it matches how requirements.txt already behaves, and
-        // inventing a version would query the advisory service for something
-        // that was never pinned.
+        // An unpinned build requirement is kept, marked as unpinned, because
+        // the build resolves it to whatever is current. Reporting it as absent
+        // was the bug: a pyproject whose only requirement was `hatchling`
+        // claimed to have no dependency manifests at all.
         assert!(
-            !deps.iter().any(|d| d.name == "wheel"),
-            "an unpinned requirement is not a pinnable version: {deps:?}"
+            deps.iter()
+                .any(|d| d.name == "wheel" && d.version == UNPINNED),
+            "an unpinned build requirement must still be reported: {deps:?}"
         );
+    }
+
+    #[test]
+    fn an_unpinned_build_requirement_is_not_dropped() {
+        // The exact fixture that reported "no dependency manifests found".
+        let toml =
+            "[build-system]\nrequires = [\"hatchling\"]\nbuild-backend = \"hatchling.build\"\n";
+        let deps = parse_pyproject_toml(toml);
+        assert_eq!(deps.len(), 1, "{deps:?}");
+        assert_eq!(deps[0].name, "hatchling");
+        assert_eq!(deps[0].version, UNPINNED);
+    }
+
+    #[test]
+    fn bare_py_name_only_accepts_a_bare_name() {
+        assert_eq!(bare_py_name("hatchling"), Some("hatchling".to_string()));
+        assert_eq!(
+            bare_py_name("flask ; python_version<\"3.13\""),
+            Some("flask".to_string()),
+            "an inline marker is a condition, not a name"
+        );
+        assert_eq!(bare_py_name(""), None);
+        assert_eq!(bare_py_name("# comment"), None);
+        assert_eq!(bare_py_name("-r base.txt"), None, "a flag is not a name");
+        assert_eq!(
+            bare_py_name("requests>=2.0"),
+            None,
+            "a version spec belongs to split_python_req"
+        );
+        assert_eq!(bare_py_name("./relative"), None, "not a package name");
+        assert_eq!(bare_py_name("has space"), None);
     }
 
     /// The legacy table must keep working. It is still what a large amount of
