@@ -716,9 +716,7 @@ mod liveness {
             joined
         );
         assert!(
-            joined
-                .iter()
-                .any(|m| m.contains("secret") || m.contains("credential")),
+            joined.iter().any(|m| m.contains("hardcoded in source")),
             "a hardcoded token introduced by the patch must be caught: {:?}",
             joined
         );

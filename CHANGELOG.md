@@ -2,6 +2,17 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.20.0
+
+Four audit findings closed. Three of them had no test at all when they were written, so two were measurably wrong before this release.
+
+* **Credentials are now matched by value shape, not only by variable name.** `AWS_ACCESS_KEY_ID`, `SLACK_TOKEN`, `HOOK_URL` and `KEY` all bind a real credential to a name containing no keyword, so the keyword match never fired. Thirteen shapes are recognised: AWS access and temporary key ids, GitHub PAT, OAuth and fine grained tokens, all four Slack token families, Slack webhook URLs, OpenAI project keys, Anthropic keys and PEM blocks. The report names which credential it found, so "possible secret" becomes "AWS access key id hardcoded in source".
+* **Only the value is inspected, never the line.** The first version searched everything after the `=`, so a docstring reading "rotate your ghp_ token" fired, and so did a variable literally named `comment`. A shape must now sit inside an unbroken run of token characters with at least 16 characters after it, which keeps real keys and drops prose. An env read such as `AWS_ACCESS_KEY_ID = os.environ["AWS_ACCESS_KEY_ID"]` stays silent: the key name appears inside the bracket expression, and reading a credential from the environment is the correct thing to do.
+* **`pickle`, `marshal`, `yaml.load`, `hashlib.md5`, `hashlib.sha1` and insecure `random` are reported.** They are pattern rules rather than taint sinks on purpose: `pickle.loads` of an attacker controlled archive is exploitable whatever the source is, so tying it to a flow would leave it silent on exactly the archives that matter. Weak hash and non crypto randomness are defects on their own.
+* **The safe twins are asserted, not assumed.** `hashlib.sha256`, `secrets`, `random.SystemRandom`, `yaml.safe_load` and `yaml.load(x, Loader=SafeLoader)` must all stay silent. The first version fired on the explicit `SafeLoader` form, which is the documented safe way to write it. Rows are python gated, so a doc comment mentioning `pickle.loads` is not a finding in a rust or typescript file.
+* **Rust `unsafe` blocks and null pointer construction are reported**, both as warnings and never as blockers. `unsafe` is a promise the compiler cannot check, not a defect, so this is a review hint. `unsafe impl` and `unsafe trait` are marker signatures and stay silent.
+* **8 tests, all of them measuring something that was previously wrong.** Value shapes fire on real keys, stay silent on prose and env reads, and stay silent when a prefix is embedded in a longer identifier. The safe twins stay silent. The python rows do not leak into other languages. `unsafe impl` and comments stay silent.
+
 ## 0.19.2
 
 `staged` was a no-op that reported success. It is the pre-commit gate, and it checked nothing but merge conflicts.
