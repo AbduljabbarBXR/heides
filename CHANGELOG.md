@@ -2,6 +2,44 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.20.0
+
+Every capability reachable by an agent, and one gap closed before it shipped.
+
+* **The dead-code signal is no longer a list of functions the workspace cannot see.** `describe` reported uncalled roots, which is a false statement about plenty of live code: a method dispatched through a framework, a job handed to a queue, a test exercising a helper, a symbol exported for a consumer, a trait method called through its trait. Routes were handled and nothing else was. Each case now carries a reason, and a symbol whose source cannot be read is neither called dead nor called live.
+* **Python dispatch by naming convention was the hole left in that fix.** Django views, Celery workers and Flask handlers are dispatched by name, so there is no call edge and no decorator to find. `handle_request`, `dispatch_event` and `task` were all reported dead, which is exactly the kind of finding an agent acts on by deleting working code. Found by probing the rule rather than reading it, because the original tests covered routes and exports and nothing dispatched by name.
+* **The exemption is python and method only.** A JS or Go function called `get` really is usually dead, and exempting it everywhere would make the signal useless in every other language the scanner supports.
+* **A python method is extracted as `function_definition`, not `method_definition`,** so the kind cannot tell a method from a module level function. Indentation does, and that is what the check uses.
+* **8 tests.** Three for the convention cases, and one asserting the exemption does not leak into JavaScript or Go.
+
+
+The release that makes Heides usable by an agent rather than only by a person at
+a terminal. Everything here was reachable from a terminal before and is now
+either a tool call or a machine-checkable verdict, and several of the new layers
+found real defects in themselves the moment they were switched on.
+
+* **`verify`: a machine-checkable definition of done.** Runs the workspace tests plus every guard and returns a boolean with reasons, `--json` for agents. This is the stopping condition an autonomous loop actually needs. Silence is never success, and a failing gate returns non-zero rather than printing an unhappy message. Six `SHELL_UNSAFE` rules ship with it, catching `shell=True`, `verify=False` and `rejectUnauthorized`, each with a benign twin asserting the safe form stays silent.
+* **The database layer.** `.sql` and migration directories (SQL, Alembic, Goose, Flyway, Prisma) parse into a schema graph; seven ORMs and raw SQL resolve to tables with the read/write split preserved; concatenated query construction is a syntactic sink. Reports foreign key cycles with their path, missing indexes, tables with no primary key, sensitive columns, and N+1 query patterns. The first version reported a dropped `DROP TABLE` as a live table, which is the kind of defect that makes a tool untrustworthy rather than merely wrong.
+* **The API surface graph.** `endpoint -> handler -> service -> table`, in one query, every hop grounded in a file and line. `heides db routes` lists what each endpoint reads and writes; `heides db touch POST /users` answers the single question an agent asks before changing a route. Recognises Express, Fastify, Flask, Django and Go net/http.
+* **Configuration and secret indexing.** `.env`, `Dockerfile`, Compose, Terraform, Kubernetes and Helm manifests, and ini files. These were not merely unchecked, they were never read: a file with no extension returns no language, and `.env` and `Dockerfile` have none. A finding never carries the credential, on the wire or in the JSON form, because a report that echoes a secret has copied it into every log and transcript that reads the output.
+* **Transitive dependency resolution.** Seven lockfile formats, with each package's depth and the path taken to reach it. A vulnerability four levels down is a different decision from one on a direct dependency, and the report now says which it is. Verified on Heides' own `Cargo.lock`: 94 packages, 90 reachable, a six-level path reported correctly.
+* **An OSV advisory cache, so `--no-deps` is a real gate.** An offline run previously gave up on advisories entirely. The asymmetry is the safety property: a stale *vulnerability* is still reported, a stale *clean* is not, because only one of those errs in a direction a reader can correct.
+* **MCP: 21 tools, up from 11.** Everything above is reachable as a tool call, not only as a subcommand. Every tool's arguments are validated against its declared schema before dispatch, because a wrong type silently coerced to an empty string answers as if it were a fact about the codebase.
+* **The database index is persisted** at `.heides/db.json`, with migration drift detection, so a resuming agent can tell whether the schema it holds is still the schema on disk.
+
+**Defects found and fixed while building the above**, each of which made a shipped feature report nothing rather than something wrong: the enclosing-function scan skipped the query's own line, so no one-line function body ever resolved; the verb `create` matched inside `createUser`; only callees were checked, so a handler querying directly was reported as touching nothing; `findmany({` sat in the batch-marker list, so every prisma read looked pre-batched; the config scan sat behind the database branch's early returns; and `check` and `verify` filtered the extra guards to `database.` only, so a repository with a live key in it reported clean.
+
+### Credential shapes and weak crypto, from the same unreleased line
+
+Four audit findings closed. Three of them had no test at all when they were written, so two were measurably wrong before this release.
+
+* **Credentials are now matched by value shape, not only by variable name.** `AWS_ACCESS_KEY_ID`, `SLACK_TOKEN`, `HOOK_URL` and `KEY` all bind a real credential to a name containing no keyword, so the keyword match never fired. Thirteen shapes are recognised: AWS access and temporary key ids, GitHub PAT, OAuth and fine grained tokens, all four Slack token families, Slack webhook URLs, OpenAI project keys, Anthropic keys and PEM blocks. The report names which credential it found, so "possible secret" becomes "AWS access key id hardcoded in source".
+* **Only the value is inspected, never the line.** The first version searched everything after the `=`, so a docstring reading "rotate your ghp_ token" fired, and so did a variable literally named `comment`. A shape must now sit inside an unbroken run of token characters with at least 16 characters after it, which keeps real keys and drops prose. An env read such as `AWS_ACCESS_KEY_ID = os.environ["AWS_ACCESS_KEY_ID"]` stays silent: the key name appears inside the bracket expression, and reading a credential from the environment is the correct thing to do.
+* **`pickle`, `marshal`, `yaml.load`, `hashlib.md5`, `hashlib.sha1` and insecure `random` are reported.** They are pattern rules rather than taint sinks on purpose: `pickle.loads` of an attacker controlled archive is exploitable whatever the source is, so tying it to a flow would leave it silent on exactly the archives that matter. Weak hash and non crypto randomness are defects on their own.
+* **The safe twins are asserted, not assumed.** `hashlib.sha256`, `secrets`, `random.SystemRandom`, `yaml.safe_load` and `yaml.load(x, Loader=SafeLoader)` must all stay silent. The first version fired on the explicit `SafeLoader` form, which is the documented safe way to write it. Rows are python gated, so a doc comment mentioning `pickle.loads` is not a finding in a rust or typescript file.
+* **Rust `unsafe` blocks and null pointer construction are reported**, both as warnings and never as blockers. `unsafe` is a promise the compiler cannot check, not a defect, so this is a review hint. `unsafe impl` and `unsafe trait` are marker signatures and stay silent.
+* **8 tests, all of them measuring something that was previously wrong.** Value shapes fire on real keys, stay silent on prose and env reads, and stay silent when a prefix is embedded in a longer identifier. The safe twins stay silent. The python rows do not leak into other languages. `unsafe impl` and comments stay silent.
+
 ## 0.19.2
 
 `staged` was a no-op that reported success. It is the pre-commit gate, and it checked nothing but merge conflicts.

@@ -306,6 +306,213 @@ fn collect_manifests(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
 /// Reads every manifest reachable from the root, root first then bounded
 /// subdirectories, so a check on a project parent does not silently skip the
 /// real manifests one level down. Duplicate packages collapse to one entry.
+// ------------------------------------------------- transitive resolution
+//
+// Re-exported from here rather than used from two places, so a caller asking
+// about dependencies has one module to reach for. The parsers live in
+// `lockparse` and the graph in `lockgraph` because they are a different concern
+// from advisory lookup; only the surface is unified.
+pub use crate::lockgraph::{LockGraph, LockNode};
+pub use crate::lockparse::{
+    parse_gemfile_lock, parse_go_sum, parse_package_lock, parse_pnpm_lock, parse_poetry_lock,
+    parse_yarn_lock,
+};
+
+/// The lockfiles present in a workspace, with their resolved graphs.
+///
+/// A lockfile that fails to parse is reported, not skipped. A caller cannot tell
+/// "this project has no lockfile" from "this project's lockfile is unreadable",
+/// and only one of those is a reason to trust a clean result.
+pub fn read_lock_graphs(root: &Path) -> Vec<LockGraph> {
+    let mut out: Vec<LockGraph> = Vec::new();
+    let mut files: Vec<PathBuf> = Vec::new();
+    collect_lockfiles(root, 6, &mut files);
+    for file in files {
+        let Some(name) = file.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        let graph = match name {
+            "package-lock.json" => parse_package_lock(&text),
+            "yarn.lock" => parse_yarn_lock(&text),
+            "pnpm-lock.yaml" => parse_pnpm_lock(&text),
+            "poetry.lock" => parse_poetry_lock(&text),
+            "go.sum" => parse_go_sum(&text),
+            "Gemfile.lock" => parse_gemfile_lock(&text),
+            "Cargo.lock" => parse_cargo_lock_graph(&text),
+            _ => continue,
+        };
+        match graph {
+            Ok(mut g) => {
+                // Record which manifest names are direct, so the walk starts at
+                // the real roots rather than at whatever nothing depends on.
+                g.direct = direct_names(root, name);
+                g.resolve();
+                out.push(g);
+            }
+            Err(e) => {
+                // Kept as an error-shaped node rather than dropped: the caller
+                // needs to know a lockfile existed and was unreadable.
+                out.push(LockGraph {
+                    nodes: vec![LockNode {
+                        name: format!("{}: {}", name, e),
+                        version: String::new(),
+                        ecosystem: "error",
+                        depth: None,
+                        dev: false,
+                        path: Vec::new(),
+                    }],
+                    edges: Vec::new(),
+                    source: name.to_string(),
+                    direct: Vec::new(),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Package names declared in the manifest that pairs with a lockfile.
+///
+/// npm and yarn read the same `package.json`, poetry the same `pyproject.toml`,
+/// so the pairing is by ecosystem rather than by path.
+fn direct_names(root: &Path, lock: &str) -> Vec<String> {
+    let manifest = match lock {
+        "package-lock.json" | "yarn.lock" | "pnpm-lock.yaml" => "package.json",
+        "poetry.lock" => "pyproject.toml",
+        "Gemfile.lock" => "Gemfile",
+        "Cargo.lock" => "Cargo.toml",
+        _ => return Vec::new(),
+    };
+    let Ok(text) = std::fs::read_to_string(root.join(manifest)) else {
+        return Vec::new();
+    };
+    match manifest {
+        "package.json" => parse_package_json(&text)
+            .into_iter()
+            .map(|d| d.name)
+            .collect(),
+        "pyproject.toml" => parse_pyproject_toml(&text)
+            .into_iter()
+            .map(|d| d.name)
+            .collect(),
+        "Cargo.toml" => parse_cargo_toml(&text)
+            .into_iter()
+            .map(|d| d.name)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Lockfile names, walked to a bounded depth so a monorepo does not turn a
+/// dependency check into a tree walk.
+fn collect_lockfiles(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    if depth == 0 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        let name = e.file_name().to_string_lossy().to_string();
+        if p.is_dir() {
+            if matches!(
+                name.as_str(),
+                "node_modules"
+                    | "target"
+                    | "venv"
+                    | ".venv"
+                    | "__pycache__"
+                    | "dist"
+                    | "build"
+                    | "vendor"
+                    | ".git"
+            ) {
+                continue;
+            }
+            collect_lockfiles(&p, depth - 1, out);
+        } else if matches!(
+            name.as_str(),
+            "package-lock.json"
+                | "yarn.lock"
+                | "pnpm-lock.yaml"
+                | "poetry.lock"
+                | "go.sum"
+                | "Gemfile.lock"
+                | "Cargo.lock"
+        ) {
+            out.push(p);
+        }
+    }
+}
+
+/// Cargo.lock already carries the graph, so it needs no new parser: the package
+/// table has `dependencies` as a list of names, and the depth is a field.
+pub fn parse_cargo_lock_graph(text: &str) -> Result<LockGraph, String> {
+    let mut nodes: Vec<LockNode> = Vec::new();
+    let mut edges: Vec<(String, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut current: Option<String> = None;
+    // True between `dependencies = [` and the closing `]`. A package block has
+    // several bracketed lists and only one of them is the edge set, so the flag
+    // is what stops a checksum line or a features list being read as an edge.
+    let mut in_dep_list = false;
+    for raw in text.lines() {
+        let t = raw.trim();
+        if t == "[[package]]" {
+            current = None;
+            in_dep_list = false;
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("name = ") {
+            let name = rest.trim().trim_matches('"').to_string();
+            if !name.is_empty() && seen.insert(name.clone()) {
+                nodes.push(LockNode {
+                    name: name.clone(),
+                    version: String::new(),
+                    ecosystem: "cargo",
+                    depth: None,
+                    dev: false,
+                    path: Vec::new(),
+                });
+            }
+            current = Some(name);
+            continue;
+        }
+        let Some(pkg) = current.clone() else { continue };
+        if let Some(rest) = t.strip_prefix("version = ") {
+            let v = rest.trim().trim_matches('"').to_string();
+            if let Some(n) = nodes.iter_mut().find(|n| n.name == pkg) {
+                n.version = v;
+            }
+            continue;
+        }
+        if t == "dependencies = [" {
+            in_dep_list = true;
+            continue;
+        }
+        if in_dep_list && t.starts_with(']') {
+            in_dep_list = false;
+            continue;
+        }
+        if t.starts_with('"') && in_dep_list {
+            let dep = t.trim().trim_matches(',').trim_matches('"').to_string();
+            if !dep.is_empty() {
+                edges.push((pkg.clone(), dep));
+            }
+        }
+    }
+    Ok(LockGraph {
+        nodes,
+        edges,
+        source: "Cargo.lock".to_string(),
+        direct: Vec::new(),
+    })
+}
+
 pub fn read_manifests(root: &Path) -> Vec<Dependency> {
     let mut files = Vec::new();
     collect_manifests(root, 6, &mut files);
@@ -938,6 +1145,10 @@ pub struct DepsHealth {
     pub advisories_ok: bool,
     /// Every "is there a newer release" lookup answered.
     pub versions_ok: bool,
+    /// How the advisory answers were obtained, so a reader can tell a live
+    /// answer from a cached one. Defaulted, because a caller that never touches
+    /// the cache should not have to say so.
+    pub cache: crate::osv_cache::CacheHealth,
 }
 
 /// Fetch the latest published version of a dependency.
@@ -1143,6 +1354,44 @@ fn offline_env_value(v: Option<&str>) -> bool {
     matches!(v, Some("1") | Some("true") | Some("yes"))
 }
 
+/// Dependency reports annotated with how deep each package sits.
+///
+/// A finding on a package four levels down is a different decision from one on a
+/// direct dependency, and the report is the only place that difference can be
+/// shown. Packages whose depth is unknown are reported as depth zero rather than
+/// being dropped, so a lockfile we could not read still produces its advisories.
+pub fn check_with_depth(root: &Path) -> (Vec<DepReport>, DepsHealth, Vec<LockGraph>) {
+    let (mut reports, health) = check(root);
+    let graphs = read_lock_graphs(root);
+    if graphs.is_empty() {
+        return (reports, health, graphs);
+    }
+    for r in reports.iter_mut() {
+        // The message is "<name> <version> ..." in the existing shape, so the
+        // package is the first word. Matching on the name rather than rewriting
+        // the message keeps both surfaces consistent by construction.
+        let name = r.message.split_whitespace().next().unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        for g in &graphs {
+            if let Some(n) = g.node(name) {
+                if let Some(d) = n.depth
+                    && d > 1
+                {
+                    r.message.push_str(&format!(
+                        " (transitive, {} levels deep via {})",
+                        d,
+                        n.path.join(" -> ")
+                    ));
+                }
+                break;
+            }
+        }
+    }
+    (reports, health, graphs)
+}
+
 pub fn check(root: &Path) -> (Vec<DepReport>, DepsHealth) {
     let deps = read_manifests(root);
     let mut reports = Vec::new();
@@ -1159,6 +1408,7 @@ pub fn check(root: &Path) -> (Vec<DepReport>, DepsHealth) {
             DepsHealth {
                 advisories_ok: true,
                 versions_ok: true,
+                cache: Default::default(),
             },
         );
     }
@@ -1175,6 +1425,7 @@ pub fn check(root: &Path) -> (Vec<DepReport>, DepsHealth) {
     let mut health = DepsHealth {
         advisories_ok: true,
         versions_ok: true,
+        cache: Default::default(),
     };
     let mut checked = 0;
     for ((name, ecosystem), version) in &seen {
@@ -1266,6 +1517,147 @@ pub fn check(root: &Path) -> (Vec<DepReport>, DepsHealth) {
 ///
 /// The report says how many pinned versions it read, so an offline run is
 /// visibly doing local work rather than silently doing nothing.
+/// The offline check, answered from the advisory cache where it can be.
+///
+/// An offline run previously gave up on advisories entirely, which made
+/// `--no-deps` honest but nearly useless: it could report the pinned versions
+/// and nothing else. A cached answer is stable for a day and does not need the
+/// network on every run, so the offline path can be a real gate again.
+///
+/// The rule is that a cache miss, a stale entry, and a live clean are three
+/// different outcomes. A miss is reported as not checked, never as clean, and a
+/// stale *clean* is not a clean while a stale *advisory* is still an advisory.
+pub fn check_offline_cached(
+    root: &Path,
+    policy: crate::osv_cache::CachePolicy,
+) -> (Vec<DepReport>, DepsHealth) {
+    let deps = read_manifests(root);
+    let mut health = crate::osv_cache::CacheHealth::default();
+    if deps.is_empty() {
+        return (
+            vec![DepReport {
+                severity: "info".to_string(),
+                message: "no dependency manifests found (Cargo.toml, Cargo.lock, package.json, go.mod, requirements.txt, pyproject.toml, pom.xml, composer.lock)".to_string(),
+                file: root.display().to_string(),
+                line: 0,
+            }],
+            DepsHealth {
+                advisories_ok: true,
+                versions_ok: true,
+                cache: health,
+            },
+        );
+    }
+
+    let dir = if policy.enabled {
+        crate::osv_cache::cache_dir()
+    } else {
+        None
+    };
+    let mut not_checked: Vec<String> = Vec::new();
+    let mut reports: Vec<DepReport> = Vec::new();
+
+    for d in &deps {
+        if d.version == "?" {
+            continue;
+        }
+        let key = format!("{}@{}", d.name, d.version);
+        match crate::osv_cache::consult(policy, dir.as_deref(), d.ecosystem, &d.name, &d.version) {
+            Some(crate::osv_cache::Answer::Found {
+                detail,
+                cached,
+                age_secs,
+            }) => {
+                let age = age_secs
+                    .map(crate::osv_cache::human_age)
+                    .unwrap_or_default();
+                let from = if cached {
+                    format!(
+                        " from cache{}",
+                        if age.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" ({age} old)")
+                        }
+                    )
+                } else {
+                    String::new()
+                };
+                reports.push(DepReport {
+                    severity: "critical".to_string(),
+                    message: format!("{} {} is vulnerable, {detail}{from}", d.name, d.version),
+                    file: "manifest".to_string(),
+                    line: 0,
+                });
+                health.note_hit(age_secs);
+            }
+            Some(crate::osv_cache::Answer::Clean { cached, age_secs }) => {
+                let age = age_secs
+                    .map(crate::osv_cache::human_age)
+                    .unwrap_or_default();
+                // The source is named rather than assumed. A hardcoded "from
+                // cache" on a live answer would misreport how current the gate
+                // is, which is the one thing a reader uses this for.
+                let source = if cached {
+                    format!(
+                        "from cache{}",
+                        if age.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" ({age} old)")
+                        }
+                    )
+                } else {
+                    "from a live lookup".to_string()
+                };
+                reports.push(DepReport {
+                    severity: "info".to_string(),
+                    message: format!("{} {} has no known advisory, {source}", d.name, d.version),
+                    file: "manifest".to_string(),
+                    line: 0,
+                });
+                health.note_hit(age_secs);
+            }
+            // Present but expired. Reported, never as clean: this is the branch
+            // that would make an offline gate green on a stale answer.
+            Some(crate::osv_cache::Answer::NotChecked { cached_stale }) => {
+                health.note_stale();
+                not_checked.push(format!("{key} (cached answer expired)"));
+                let _ = cached_stale;
+            }
+            None => {
+                health.note_miss();
+                not_checked.push(key);
+            }
+        }
+    }
+
+    if !not_checked.is_empty() {
+        reports.push(DepReport {
+            severity: "warning".to_string(),
+            message: format!(
+                "{} pinned version(s) had no usable cached advisory and were not checked: {}",
+                not_checked.len(),
+                not_checked.join(", ")
+            ),
+            file: "manifest".to_string(),
+            line: 0,
+        });
+    }
+
+    (
+        reports,
+        DepsHealth {
+            // Only true when every pinned version actually produced an answer.
+            // The whole point: an offline run that could not check everything must
+            // not report a clean gate.
+            advisories_ok: not_checked.is_empty(),
+            versions_ok: true,
+            cache: health,
+        },
+    )
+}
+
 pub fn check_offline(root: &Path) -> (Vec<DepReport>, DepsHealth) {
     let deps = read_manifests(root);
     let mut reports = Vec::new();
@@ -1281,6 +1673,7 @@ pub fn check_offline(root: &Path) -> (Vec<DepReport>, DepsHealth) {
             DepsHealth {
                 advisories_ok: true,
                 versions_ok: true,
+                cache: Default::default(),
             },
         );
     }
@@ -1318,6 +1711,7 @@ pub fn check_offline(root: &Path) -> (Vec<DepReport>, DepsHealth) {
         DepsHealth {
             advisories_ok: true,
             versions_ok: true,
+            cache: Default::default(),
         },
     )
 }

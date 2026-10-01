@@ -196,9 +196,20 @@ fn check_workspace_and_state(
     // The one guard that is allowed to want the network, and only when asked.
     if !policy.enabled {
         // Manifest parsing is local and still runs, so the pinned versions are
-        // known even offline. Only the advisory and latest-version lookups are
-        // skipped, and the receipt says so.
-        let (dep_reports, _health) = crate::deps::check_offline(root);
+        // known even offline. The advisory answers come from the cache where one
+        // is usable, which is what turns `--no-deps` from an honest refusal into
+        // a real gate.
+        //
+        // The state is still Skipped when the cache could not answer for every
+        // pinned version. A cache miss is not a clean bill of health, and
+        // reporting Skipped over a partial cache is the honest reading.
+        let cache_policy = crate::osv_cache::CachePolicy {
+            enabled: true,
+            allow_offline: true,
+            ..Default::default()
+        };
+        let (dep_reports, offline_health) = crate::deps::check_offline_cached(root, cache_policy);
+        let cache_health = offline_health.cache;
         for r in dep_reports {
             reports.push(GuardReport {
                 guard: "dependency".to_string(),
@@ -208,7 +219,48 @@ fn check_workspace_and_state(
                 line: r.line,
             });
         }
-        return (reports, DepsState::Skipped);
+        // The cache line is always printed, including when it is empty, so a
+        // reader can tell "the cache answered" from "the cache was never asked".
+        if cache_health.hits > 0 || cache_health.misses > 0 || cache_health.stale > 0 {
+            reports.push(GuardReport {
+                guard: "dependency".to_string(),
+                severity: "info".to_string(),
+                message: format!(
+                    "advisory cache: {} answered, {} with no entry, {} expired{}",
+                    cache_health.hits,
+                    cache_health.misses,
+                    cache_health.stale,
+                    if cache_health.oldest_used_secs > 0 {
+                        format!(
+                            ". oldest answer relied on was {}",
+                            crate::osv_cache::human_age(cache_health.oldest_used_secs)
+                        )
+                    } else {
+                        String::new()
+                    }
+                ),
+                file: String::new(),
+                line: 0,
+            });
+        }
+        // Two states, not one. A cache that answered for every pinned version is
+        // a real check even though it was offline, so calling it Skipped would
+        // understate it. A cache that answered for some of them is RanPartial,
+        // which already means "looked at some of it and could not look at the
+        // rest", so the state is reused rather than invented.
+        let complete = cache_health.misses == 0 && cache_health.stale == 0;
+        return (
+            reports,
+            if complete && cache_health.hits > 0 {
+                DepsState::RanOnline
+            } else if complete {
+                // Nothing pinned, so nothing needed answering. Skipped is the
+                // honest word: there was no advisory work to do.
+                DepsState::Skipped
+            } else {
+                DepsState::RanPartial
+            },
+        );
     }
 
     let (dep_reports, health) = crate::deps::check(root);
@@ -245,6 +297,53 @@ fn check_workspace_and_state(
 }
 
 /// The shared local guard body behind check_workspace and the report tool.
+/// The full workspace check including the database guards.
+///
+/// Separate from `check_workspace_without_deps` rather than folded into it,
+/// because the database layer needs a filesystem root to walk while the code
+/// guards need only the index. A caller with neither can keep using the
+/// narrower functions, and the MCP surface picks this one so an agent gets the
+/// database findings without a second tool.
+pub fn check_workspace_with_database(root: &Path, graph: &CodeGraph) -> Vec<GuardReport> {
+    let mut reports = check_workspace_without_deps(graph);
+
+    // Database guards. A workspace with no database is not a finding, so this is
+    // quiet by construction: an empty graph produces no reports.
+    if let Ok(db_graph) = crate::db::index_schema(root)
+        && (!db_graph.tables.is_empty() || !db_graph.calls.is_empty())
+    {
+        for (guard, severity, message) in crate::db::guard_reports(root, &db_graph) {
+            reports.push(GuardReport {
+                guard,
+                severity,
+                message,
+                file: String::new(),
+                line: 0,
+            });
+        }
+    }
+
+    // Configuration credentials join the normal gate. A committed secret is not
+    // something a separate command should be needed for: the same agent that
+    // runs `check` has to see it, or the gate is green on a repository with a
+    // live key in it.
+    //
+    // These two were originally inside the database branch above, behind its
+    // early returns, so a workspace with no database never scanned its config at
+    // all. That is the failure mode this whole layer exists to prevent, caused by
+    // the wiring rather than by the rules.
+    for f in crate::config::scan(root) {
+        reports.push(GuardReport {
+            guard: "config.credential".to_string(),
+            severity: f.severity,
+            message: f.message,
+            file: f.file,
+            line: f.line,
+        });
+    }
+    reports
+}
+
 pub fn check_workspace_without_deps(graph: &CodeGraph) -> Vec<GuardReport> {
     let mut reports = Vec::new();
     // Read every indexed file once. The intra guards and the interprocedural
@@ -595,11 +694,22 @@ pub fn folded_location(first: &GuardReport, files: &[&str], file_count: usize) -
     if files.is_empty() {
         return String::new();
     }
-    let mut out = format!(" at {}", files.join(", "));
+    // A schema finding has no file, so the file list is one empty string. Naming
+    // it produced a trailing " at " on every database finding, which reads as a
+    // truncated location rather than an intentional omission.
+    let named: Vec<&&str> = files.iter().filter(|f| !f.is_empty()).collect();
+    if named.is_empty() {
+        return String::new();
+    }
+    let mut out = format!(
+        " at {}",
+        named.iter().map(|f| **f).collect::<Vec<_>>().join(", ")
+    );
     if file_count > files.len() {
         out.push_str(&format!(" and {} more", file_count - files.len()));
     }
-    if let Some(first_line) = first.file.as_str().strip_prefix(files[0])
+    if let Some(first_file) = named.first()
+        && let Some(first_line) = first.file.as_str().strip_prefix(**first_file)
         && !first_line.is_empty()
     {
         out.push_str(&format!(":{first_line}"));
@@ -716,9 +826,7 @@ mod liveness {
             joined
         );
         assert!(
-            joined
-                .iter()
-                .any(|m| m.contains("secret") || m.contains("credential")),
+            joined.iter().any(|m| m.contains("hardcoded in source")),
             "a hardcoded token introduced by the patch must be caught: {:?}",
             joined
         );

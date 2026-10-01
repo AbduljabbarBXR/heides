@@ -2,7 +2,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use heides::{
-    deps, frameworks, grounding, harmony, indexer, server, spine, ui::Stopwatch, ui::Ui, watch,
+    deadcode, deps, frameworks, grounding, harmony, indexer, server, spine, ui::Stopwatch, ui::Ui,
+    watch,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -33,6 +34,8 @@ fn print_usage() {
     println!("  scaffold [text] [dir]");
     println!("                  scaffold a new project from a plan and index it");
     println!("  deps [dir]      check dependencies for vulnerabilities and updates");
+    println!("  deps tree [dir] resolve the lockfile graph, with depth and path");
+    println!("  config [dir]    find credentials in .env, Dockerfile, terraform, manifests");
     println!("  describe [dir]  read the whole workspace manifest in one shot");
     println!("  export [dir] [out]");
     println!("                  write one self contained code map file");
@@ -229,6 +232,18 @@ fn main() -> ExitCode {
             }
             "watch" => {
                 println!("usage. heides watch [dir]");
+                return ExitCode::SUCCESS;
+            }
+            "verify" => {
+                println!(
+                    "usage. heides verify [--skip-tests] [--require-advisories] [--json] [dir]"
+                );
+                return ExitCode::SUCCESS;
+            }
+            "db" => {
+                println!(
+                    "usage. heides db [tables|columns|reads|writes|orphans|missingindex|policies|cycles|schema|routes|touch] [name] [dir]"
+                );
                 return ExitCode::SUCCESS;
             }
             _ => {}
@@ -461,7 +476,21 @@ fn main() -> ExitCode {
                 }
             };
             let policy = heides::deps::DepsPolicy::default();
-            let (reports, cov) = harmony::check_workspace_with_coverage(&root, &graph, policy);
+            let (mut reports, cov) = harmony::check_workspace_with_coverage(&root, &graph, policy);
+            // The database guards join the code guards here, so a schema problem
+            // is visible without a second command. A workspace with no database
+            // contributes nothing and the receipt is unchanged.
+            // Both extra guard families, not just the database one. The filter
+            // previously admitted only `database.` guards, so the config
+            // findings that function also returns were dropped here and `check`
+            // reported a clean workspace over a repository with a live key in it.
+            reports
+                .retain(|r| !(r.guard.starts_with("database.") || r.guard.starts_with("config.")));
+            reports.extend(
+                harmony::check_workspace_with_database(&root, &graph)
+                    .into_iter()
+                    .filter(|r| r.guard.starts_with("database.") || r.guard.starts_with("config.")),
+            );
             if let Some(p) = pulse {
                 p.finish();
             }
@@ -499,12 +528,15 @@ fn main() -> ExitCode {
                         ui.count("info", i)
                     );
                     for r in items {
-                        let loc = if r.file.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" at {}:{}", r.file, r.line)
+                        // An empty file and a zero line means the finding is about
+                        // the schema rather than a place in a file, so no location
+                        // is printed at all rather than a bare "at 0".
+                        let loc = match (r.file.is_empty(), r.line) {
+                            (true, _) => String::new(),
+                            (false, 0) => format!(" at {}", r.file),
+                            _ => format!(" at {}:{}", r.file, r.line),
                         };
-                        println!("  {} {} {}", ui.severity(&r.severity), r.message, loc);
+                        println!("  {} {}{}", ui.severity(&r.severity), r.message, loc);
                     }
                 }
                 println!("{}", cov.render());
@@ -529,6 +561,284 @@ fn main() -> ExitCode {
                 eprintln!(
                     "heides: findings at or above the exit threshold. use --exit-zero for the old behaviour."
                 );
+                return ExitCode::FAILURE;
+            }
+            ExitCode::SUCCESS
+        }
+        "verify" => {
+            // A machine checkable definition of done: the project's own tests
+            // plus every guard, in one pass, with a boolean the caller can
+            // branch on. Silence is never success here.
+            let skip_tests = args.iter().any(|a| a == "--skip-tests");
+            let require_adv = args.iter().any(|a| a == "--require-advisories");
+            let as_json = args.iter().any(|a| a == "--json");
+            let root = heides::verify::root_from(&args, 2);
+            let pulse = Stopwatch::start(&ui, "verify");
+            let verdict = heides::verify::verify(&root, skip_tests, require_adv);
+            if let Some(p) = pulse {
+                p.finish();
+            }
+            if as_json {
+                println!("{}", heides::verify::to_json(&verdict));
+            } else {
+                println!("{}", heides::verify::render(&verdict));
+            }
+            if verdict.ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        "db" => {
+            // The database layer answers the questions an agent actually asks
+            // about a codebase with a database: what tables exist, what reads or
+            // writes them, what nothing touches, and what the schema gets wrong.
+            let sub = args.get(2).map(|s| s.as_str()).unwrap_or("schema");
+            // `heides db touch <METHOD> <path> [dir]` has one more positional
+            // argument than the other subcommands, so its root sits at index 5
+            // rather than 4. Resolving the root at the wrong offset is what
+            // made the walk run against `/users` and report no database.
+            let root_at = if sub == "touch" { 5 } else { 4 };
+            let name = args.get(3).map(|s| s.as_str()).unwrap_or("");
+            let root = heides::db::root_from_args(&args, root_at);
+            let pulse = Stopwatch::start(&ui, "db");
+            let graph = match heides::db::index_schema(&root) {
+                Ok(g) => g,
+                Err(e) => {
+                    eprintln!("heides: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            };
+            if let Some(p) = pulse {
+                p.finish();
+            }
+
+            // Silence is never success: a workspace with no database says so.
+            if graph.tables.is_empty() && graph.calls.is_empty() {
+                println!("no database found under {}", root.display());
+                println!(
+                    "looked for .sql files and migration directories, and for ORM or raw SQL call sites"
+                );
+                return ExitCode::SUCCESS;
+            }
+
+            let verdict = heides::db::verify_schema(&graph);
+            let mut failed = false;
+
+            // The API surface needs the code graph too, because the walk from an
+            // endpoint to a table goes through the call graph. Loading it here
+            // rather than in the subcommand keeps the database commands that do
+            // not need it as cheap as before.
+            let code = spine::load(&root).ok();
+            let surface = code.as_ref().map(|g| {
+                let files: Vec<String> = g.files.iter().map(|f| f.path.clone()).collect();
+                let eps = heides::frameworks::endpoints(&files, &root);
+                heides::frameworks::api_surface(g, &graph, &eps, 6)
+            });
+
+            match sub {
+                "routes" => {
+                    let Some(surface) = surface.as_ref() else {
+                        println!("no code index under {}", root.display());
+                        println!("run `heides scan {}` first", root.display());
+                        return ExitCode::FAILURE;
+                    };
+                    if surface.endpoints.is_empty() {
+                        println!("no routes recognised under {}", root.display());
+                        println!(
+                            "recognised: express and fastify, flask and django, and go net/http"
+                        );
+                    } else {
+                        for e in &surface.endpoints {
+                            let writes = surface.reachable_tables(&e.method, &e.path);
+                            let reads = surface.readable_tables(&e.method, &e.path);
+                            println!("{} {}", e.method, e.path);
+                            println!("  handler {} at {}:{}", e.handler, e.file, e.line);
+                            println!("  writes {}", writes.join(", "));
+                            println!("  reads  {}", reads.join(", "));
+                        }
+                    }
+                }
+                "touch" => {
+                    // `heides db touch POST /users [dir]` answers the one question
+                    // the surface graph exists for: what does this endpoint write.
+                    // The method is args[3] and the path is args[4], so the root
+                    // has to be read from args[5] for this subcommand, otherwise
+                    // the path is consumed as the root and the whole walk runs in
+                    // the wrong directory.
+                    let method = name.to_ascii_uppercase();
+                    let Some(surface) = surface.as_ref() else {
+                        println!("no code index under {}", root.display());
+                        return ExitCode::FAILURE;
+                    };
+                    if method.is_empty() {
+                        println!("usage. heides db touch <METHOD> <path> [dir]");
+                        return ExitCode::FAILURE;
+                    }
+                    let path = args.get(4).map(|s| s.to_string()).or_else(|| {
+                        surface
+                            .endpoints
+                            .iter()
+                            .find(|e| e.method == method)
+                            .map(|e| e.path.clone())
+                    });
+                    let Some(path) = path else {
+                        println!("no {} route here", method);
+                        return ExitCode::FAILURE;
+                    };
+                    let key = format!("{} {}", method, path);
+                    // A path that is not a registered route is reported as
+                    // missing, not as a route that writes nothing. Those are
+                    // different answers and only one is true, and an agent that
+                    // read the second as the first would skip a route that
+                    // exists under a different method.
+                    if !surface
+                        .endpoints
+                        .iter()
+                        .any(|e| e.method == method && e.path == path)
+                    {
+                        println!("no route {} {} here", method, path);
+                        let known: Vec<String> = surface
+                            .endpoints
+                            .iter()
+                            .filter(|e| e.path == path)
+                            .map(|e| e.method.clone())
+                            .collect();
+                        if !known.is_empty() {
+                            println!("{} is registered as {}", path, known.join(", "));
+                        }
+                        return ExitCode::FAILURE;
+                    }
+                    // Resolved to the declared table, the same as `db routes`.
+                    // Printing the model name here and the table name there means
+                    // an agent comparing the two views sees a mismatch that does
+                    // not exist.
+                    match surface.writes.get(&key) {
+                        Some(v) if !v.is_empty() => {
+                            for r in v {
+                                println!(
+                                    "writes {} via {}",
+                                    surface.resolve_table(&r.table),
+                                    r.via
+                                );
+                                println!("  at {}:{} in {}", r.file, r.line, r.depth_hop());
+                            }
+                        }
+                        _ => println!("{} {} writes no table", method, path),
+                    }
+                    if let Some(v) = surface.reads.get(&key) {
+                        for r in v {
+                            println!("reads {} via {}", surface.resolve_table(&r.table), r.via);
+                            println!("  at {}:{}", r.file, r.line);
+                        }
+                    }
+                }
+                "tables" => {
+                    for (t, (reads, writes)) in heides::db::tables_report(&graph) {
+                        println!("{:<28} {} read, {} write", t, reads, writes);
+                    }
+                }
+                "columns" => {
+                    let cols = heides::db::columns_of(&graph, name);
+                    if cols.is_empty() {
+                        println!("no table named {} here", name);
+                    } else {
+                        for c in cols {
+                            println!("{}", c);
+                        }
+                    }
+                }
+                "reads" => {
+                    for c in &graph.calls {
+                        if c.op == heides::db::Op::Read
+                            && heides::db::table_names_match(&c.table, name)
+                        {
+                            println!("{} via {}", c.table, c.via);
+                        }
+                    }
+                }
+                "writes" => {
+                    for c in &graph.calls {
+                        if c.op == heides::db::Op::Write
+                            && heides::db::table_names_match(&c.table, name)
+                        {
+                            println!("{} via {}", c.table, c.via);
+                        }
+                    }
+                }
+                "orphans" => {
+                    let o = heides::db::orphans(&graph);
+                    if o.is_empty() {
+                        println!("no unreferenced tables");
+                    } else {
+                        for t in &o {
+                            println!("{} is not touched and nothing references it", t);
+                        }
+                    }
+                }
+                "missingindex" => {
+                    let m = heides::db::missing_index(&graph);
+                    if m.is_empty() {
+                        println!("every foreign key has an index");
+                    } else {
+                        for (t, c) in &m {
+                            println!("{}.{} references another table with no index", t, c);
+                        }
+                    }
+                }
+                "cycles" => {
+                    for c in &verdict.cycles {
+                        println!(
+                            "{}.{} -> {}{}",
+                            c.table,
+                            c.column,
+                            c.path.join(" -> "),
+                            if c.cascading_delete {
+                                "  [ON DELETE CASCADE]"
+                            } else {
+                                ""
+                            }
+                        );
+                    }
+                    if verdict.cycles.is_empty() {
+                        println!("no foreign key cycles");
+                    }
+                }
+                "policies" => {
+                    for p in &verdict.policies {
+                        println!("[{}] {}", p.severity, p.message);
+                    }
+                    if verdict.policies.is_empty() {
+                        println!("no policy findings");
+                    }
+                }
+                "sensitive" => {
+                    for e in &verdict.sensitive_exposed {
+                        println!(
+                            "{}.{} ({}) reachable by a read via {}",
+                            e.table, e.column, e.kind, e.via
+                        );
+                    }
+                    if verdict.sensitive_exposed.is_empty() {
+                        println!("no sensitive column reaches a read path");
+                    }
+                }
+                _ => {
+                    println!("{}", verdict.render());
+                }
+            }
+
+            // `db schema` is the gate form: it exits non-zero when the schema has
+            // something a human should look at, so it can be used in CI.
+            if sub == "schema" && !verdict.ok() {
+                failed = true;
+            }
+            if verdict.cycles_blocking && (sub == "cycles" || sub == "schema") {
+                failed = true;
+            }
+
+            if failed {
+                eprintln!("heides: the database schema has findings.");
                 return ExitCode::FAILURE;
             }
             ExitCode::SUCCESS
@@ -691,7 +1001,61 @@ fn main() -> ExitCode {
                 }
             }
         }
+        "config" => {
+            // The config scan, stated rather than implied. A caller has to be
+            // able to tell "no config files here" from "nothing found", because
+            // only one of those means the repository was inspected.
+            let root = PathBuf::from(arg2);
+            println!("{}", heides::config::summarise(&root));
+            for f in heides::config::scan(&root) {
+                println!(
+                    "[{}] {}:{} {} ({})",
+                    f.severity, f.file, f.line, f.message, f.kind
+                );
+            }
+            ExitCode::SUCCESS
+        }
         "deps" => {
+            // `heides deps tree` is transitive resolution; bare `heides deps` is
+            // the advisory check, now annotated with depth so a finding four
+            // levels down reads differently from one on a direct dependency.
+            if arg2 == "tree" {
+                let root = PathBuf::from(arg3.unwrap_or("."));
+                let graphs = deps::read_lock_graphs(&root);
+                if graphs.is_empty() {
+                    println!("no lockfile found under {}", root.display());
+                    println!(
+                        "looked for package-lock.json, yarn.lock, pnpm-lock.yaml, poetry.lock, go.sum, Gemfile.lock, Cargo.lock"
+                    );
+                    return ExitCode::SUCCESS;
+                }
+                for g in &graphs {
+                    let (reachable, orphan) = g.reachability();
+                    println!(
+                        "{}: {} package(s), {} reachable, {} unreachable",
+                        g.source,
+                        g.nodes.len(),
+                        reachable,
+                        orphan
+                    );
+                    for n in g.deepest(2) {
+                        println!(
+                            "  {} {} ({} levels, {})",
+                            n.name,
+                            n.version,
+                            n.depth.unwrap_or(0),
+                            n.path.join(" -> ")
+                        );
+                    }
+                    for n in g.nodes.iter().filter(|n| n.depth.is_none()) {
+                        println!(
+                            "  {} {} is in the lockfile but nothing reaches it",
+                            n.name, n.version
+                        );
+                    }
+                }
+                return ExitCode::SUCCESS;
+            }
             let root = PathBuf::from(arg2);
             let pulse = Stopwatch::start(&ui, "deps check");
             let (reports, _network) = deps::check(&root);
@@ -1014,13 +1378,24 @@ fn describe_workspace(graph: &spine::CodeGraph, root: &std::path::Path) {
         })
         .copied()
         .collect();
-    let rest: Vec<&str> = entry_names
-        .iter()
-        .filter(|n| !named.contains(n))
-        .copied()
-        .collect();
     print_entries(named, "named entrypoints", 10);
-    print_entries(rest, "uncalled roots", 20);
+    // Dead roots, with the reason attached. The old list named symbols and
+    // nothing else, and an agent acting on it had to re-derive why each was
+    // listed. The refinement also removes the false claims: exports, decorated
+    // functions, overrides, test helpers and callback registrations are all
+    // called by something the call graph cannot see.
+    let dead = deadcode::dead_roots(graph, root);
+    if dead.is_empty() {
+        println!("uncalled roots: none, every function is reached, dispatched, exported or tested");
+    } else {
+        println!("uncalled roots, {} total", dead.len());
+        for d in dead.iter().take(20) {
+            println!("  {} at {}:{} — {}", d.name, d.file, d.line, d.reason);
+        }
+        if dead.len() > 20 {
+            println!("  ... and {} more", dead.len() - 20);
+        }
+    }
 
     // Hubs, the symbols with the most wiring in and out.
     let mut hub_scores: Vec<(&str, usize)> = Vec::new();

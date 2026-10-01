@@ -392,7 +392,7 @@ fn battle_serial() {
     );
     b.check(
         "staged reports the secret",
-        staged_out.contains("secret") || staged_out.contains("credential"),
+        staged_out.contains("hardcoded in source"),
     );
     let (_, _, zero_ok) = b.cli(&["staged", "dirty.patch", "--exit-zero"]);
     b.check("staged --exit-zero restores the old behaviour", zero_ok);
