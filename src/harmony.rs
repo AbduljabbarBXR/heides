@@ -297,18 +297,19 @@ fn check_workspace_and_state(
 }
 
 /// The shared local guard body behind check_workspace and the report tool.
-/// The full workspace check including the database guards.
+/// The database and configuration guard families, on their own.
 ///
-/// Separate from `check_workspace_without_deps` rather than folded into it,
-/// because the database layer needs a filesystem root to walk while the code
-/// guards need only the index. A caller with neither can keep using the
-/// narrower functions, and the MCP surface picks this one so an agent gets the
-/// database findings without a second tool.
-pub fn check_workspace_with_database(root: &Path, graph: &CodeGraph) -> Vec<GuardReport> {
-    let mut reports = check_workspace_without_deps(graph);
+/// Split out rather than folded into `check_workspace_without_deps` because this
+/// is the part that needs a filesystem root and the code guards do not. More
+/// importantly it does *not* call the code guards: a previous version returned
+/// those too and the callers filtered them back out, which meant the entire
+/// guard pass, interprocedural taint included, ran twice for every check. On a 56
+/// file python project that was 675 seconds of a 675 second check.
+pub fn check_workspace_with_database(root: &Path) -> Vec<GuardReport> {
+    let mut reports: Vec<GuardReport> = Vec::new();
 
-    // Database guards. A workspace with no database is not a finding, so this is
-    // quiet by construction: an empty graph produces no reports.
+    // A workspace with no database is not a finding, so this is quiet by
+    // construction: an empty graph produces no reports.
     if let Ok(db_graph) = crate::db::index_schema(root)
         && (!db_graph.tables.is_empty() || !db_graph.calls.is_empty())
     {
@@ -324,14 +325,14 @@ pub fn check_workspace_with_database(root: &Path, graph: &CodeGraph) -> Vec<Guar
     }
 
     // Configuration credentials join the normal gate. A committed secret is not
-    // something a separate command should be needed for: the same agent that
-    // runs `check` has to see it, or the gate is green on a repository with a
-    // live key in it.
+    // something a separate command should be needed for: the same agent that runs
+    // `check` has to see it, or the gate is green on a repository with a live key
+    // in it.
     //
     // These two were originally inside the database branch above, behind its
     // early returns, so a workspace with no database never scanned its config at
-    // all. That is the failure mode this whole layer exists to prevent, caused by
-    // the wiring rather than by the rules.
+    // all. That is the failure mode this layer exists to prevent, caused by the
+    // wiring rather than by the rules.
     for f in crate::config::scan(root) {
         reports.push(GuardReport {
             guard: "config.credential".to_string(),

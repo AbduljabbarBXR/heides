@@ -344,3 +344,85 @@ fn a_secret_is_never_echoed_back_in_the_message() {
     );
     assert!(!f[0].message.contains(secret.as_str()));
 }
+
+// ------------------------------------------- regressions from real repositories
+
+#[test]
+fn a_typescript_identifier_bound_to_a_call_is_not_a_credential() {
+    // Found on llama.cpp, in tools/ui/tests/unit. `const apiKeyField =
+    // fields.find(...)` binds a secret-looking name to the result of a call. The
+    // old rule read the whole right-hand side as a value, so a 61 character call
+    // expression was reported as a hardcoded credential.
+    let dir = fixture("tscall");
+    write(
+        &dir,
+        "settings.test.ts",
+        "const fields = SETTINGS.flatMap((s) => s.fields);\n\
+         const apiKeyField = fields.find((f) => f?.key === KEYS.API_KEY);\n\
+         expect(apiKeyField).toBeDefined();\n",
+    );
+    let f = findings(&dir);
+    assert!(f.is_empty(), "a call result is not a literal: {f:?}");
+}
+
+#[test]
+fn a_type_annotation_is_not_a_credential() {
+    // The same file, same rule, different shape: a secret-looking name with a
+    // type annotation and a call on the right-hand side.
+    let dir = fixture("tsannotation");
+    write(
+        &dir,
+        "a.ts",
+        "const apiKeyField: SettingsField = lookup(SETTINGS_KEYS.API_KEY);\n",
+    );
+    let f = findings(&dir);
+    assert!(f.is_empty(), "a type annotation is not a literal: {f:?}");
+}
+
+#[test]
+fn a_credential_literal_with_a_declaration_prefix_is_still_reported() {
+    // The benign twin's opposite. Tightening the literal rule must not stop the
+    // finding that matters, including when the line carries a declaration prefix
+    // and a trailing semicolon, which is how a source-shaped config file looks.
+    //
+    // An `.ini` rather than a `.ts`, because a `.ts` file is source and the
+    // language scanner owns it; this layer reads configuration. The regression
+    // that started this was in a `.ts` test file, and the fix belongs here.
+    // The prefix is what the rule matches on. The tail is deliberately
+    // low entropy: GitHub push protection blocks `sk_live_` followed by random
+    // characters, and although the key this replaced is Stripe's published TEST
+    // key the scanner cannot tell a test key from a live one, so the fixture
+    // has to stay pushable.
+    let dir = fixture("tsreal");
+    write(
+        &dir,
+        "settings.ini",
+        "apiKey = sk_live_0000fixture0000notreal;\n",
+    );
+    let f = findings(&dir);
+    assert!(
+        f.iter().any(|x| x.kind == "credential"),
+        "a credential literal must be found: {f:?}"
+    );
+}
+
+#[test]
+fn an_unquoted_credential_literal_is_still_reported() {
+    // A dotenv value has no quotes, so the bare-token branch has to keep working.
+    let dir = fixture("bareliteral");
+    write(&dir, ".env", "API_KEY=sk_live_0000fixture0000notreal\n");
+    let f = findings(&dir);
+    assert!(f.iter().any(|x| x.kind == "credential"), "{f:?}");
+}
+
+#[test]
+fn a_template_expression_is_not_a_credential() {
+    let dir = fixture("template");
+    write(
+        &dir,
+        "a.ts",
+        "const apiKey = `${process.env.API_KEY}-suffix`;\n",
+    );
+    let f = findings(&dir);
+    assert!(f.is_empty(), "a template expression must stay quiet: {f:?}");
+}

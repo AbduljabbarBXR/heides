@@ -232,9 +232,12 @@ pub fn verify(root: &Path, skip_tests: bool, require_advisories: bool) -> Verdic
     // Both extra guard families. The filter previously admitted only
     // `database.` guards, so a committed credential was invisible to the
     // definition of done, which is the one place it must never be.
-    reports.retain(|r| !(r.guard.starts_with("database.") || r.guard.starts_with("config.")));
+    // See the note in main.rs: the retain is what made the entire guard pass run
+    // twice. `check_workspace_with_database` returns the code guards too, so
+    // filtering them out of one list after computing them twice is how a check on
+    // a 56 file python project took 675 seconds instead of 36.
     reports.extend(
-        harmony::check_workspace_with_database(root, &graph)
+        harmony::check_workspace_with_database(root)
             .into_iter()
             .filter(|r| r.guard.starts_with("database.") || r.guard.starts_with("config.")),
     );
