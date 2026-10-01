@@ -84,9 +84,10 @@ because both meant whole languages were invisible rather than a rule being weak:
   only, not string literals or content.
 - `plan` prints `feasible true / grounding received the plan` without the
   grounded symbol and file evidence it used.
-- `describe` lists `uncalled roots` including `login`, which is an Express-style
-  entrypoint. Entrypoints are not modeled, so handlers read as dead code.
-- `staged` validates conflicts only; it does not run taint on the post-patch tree.
+- **Resolved in 0.20.0:** route handlers, exported symbols, trait members, test
+  code, decorated functions, callback registrations, override siblings and
+  python naming conventions are all kept out of the dead list, each with a
+  stated reason.
 
 ### 2.4 Packaging
 
@@ -224,6 +225,7 @@ can reason about the whole deployable unit, not just source.
   manifests, with hardcoded-credential detection reaching a sink.
 - **Dead-code signal refinement**: with entrypoints and routes modeled, the
   `uncalled roots` list becomes trustworthy enough to act on automatically.
+  **Shipped in 0.20.0.**
 
 ### Tier 4 — ecosystem and the agent loop
 

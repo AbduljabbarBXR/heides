@@ -57,7 +57,7 @@ pub fn dead_roots(graph: &CodeGraph, root: &Path) -> Vec<DeadRoot> {
         if !graph.callers_of(&s.name).is_empty() {
             continue;
         }
-        if reason_not_dead(s, &sources, &dispatched).is_some() {
+        if reason_not_dead(s, &sources, &dispatched, root).is_some() {
             continue;
         }
         out.push(DeadRoot {
@@ -92,6 +92,7 @@ fn reason_not_dead(
     s: &Symbol,
     sources: &std::collections::HashMap<String, String>,
     dispatched: &HashSet<String>,
+    root: &Path,
 ) -> Option<&'static str> {
     // A test is an entrypoint by definition, so nothing inside one is dead.
     if is_test_path(&s.file) {
@@ -129,6 +130,9 @@ fn reason_not_dead(
     }
     if has_an_override_sibling(body, &s.name) {
         return Some("overrides a base method, so it is dispatched through the base");
+    }
+    if is_convention_dispatched(s, root) {
+        return Some("a python method dispatched by naming convention");
     }
     None
 }
@@ -233,6 +237,59 @@ fn is_definition_site(before: &str) -> bool {
         || t.ends_with("fn")
         || t.ends_with("=>")
         || t.ends_with("async")
+}
+
+/// A method whose name matches a framework dispatch convention.
+///
+/// Python frameworks dispatch handlers and workers by naming convention rather
+/// than by registration, so there is no call edge and no decorator to find.
+/// Celery looks for `task`, Django and Flask for `handle*`, `get` and `post`.
+///
+/// This is the most aggressive exemption in the file, so it is narrow on
+/// purpose: only python method definitions are considered, because a JS or Go
+/// function called `get` is usually genuinely dead. A false "dead" costs more
+/// than a missed one, because an agent acting on it deletes working code.
+/// True when the declaration at `line` is indented, which is how a python
+/// method is told from a module level function.
+fn looks_like_a_method(file: &str, root: &Path, line: u64) -> bool {
+    let full = root.join(file);
+    let Ok(text) = std::fs::read_to_string(&full) else {
+        return false;
+    };
+    let idx = line.saturating_sub(1) as usize;
+    text.lines()
+        .nth(idx)
+        .map(|l| l.starts_with(' ') || l.starts_with('\t'))
+        .unwrap_or(false)
+}
+
+fn is_convention_dispatched(s: &Symbol, root: &Path) -> bool {
+    if s.lang != "python" {
+        return false;
+    }
+    // A python method is extracted as `function_definition`, not
+    // `method_definition`, so the kind cannot be used to tell a method from a
+    // plain function here. Indentation can: a method body is indented.
+    if !looks_like_a_method(&s.file, root, s.line) {
+        return false;
+    }
+    let name = s.name.as_str();
+    // A Celery or RQ worker entrypoint.
+    if matches!(name, "task" | "run" | "process" | "handle") {
+        return true;
+    }
+    // Django and Flask view and handler naming.
+    if name.starts_with("handle")
+        || name.starts_with("dispatch")
+        || name.starts_with("process_")
+        || name.starts_with("post_")
+        || name.starts_with("get_")
+        || name.starts_with("put_")
+        || name.starts_with("delete_")
+    {
+        return true;
+    }
+    matches!(name, "get" | "post" | "put" | "delete" | "patch")
 }
 
 /// A method name declared in both a base class and a subclass.

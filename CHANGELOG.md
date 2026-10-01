@@ -4,6 +4,15 @@ All notable changes to HEIDES are recorded here.
 
 ## 0.20.0
 
+Every capability reachable by an agent, and one gap closed before it shipped.
+
+* **The dead-code signal is no longer a list of functions the workspace cannot see.** `describe` reported uncalled roots, which is a false statement about plenty of live code: a method dispatched through a framework, a job handed to a queue, a test exercising a helper, a symbol exported for a consumer, a trait method called through its trait. Routes were handled and nothing else was. Each case now carries a reason, and a symbol whose source cannot be read is neither called dead nor called live.
+* **Python dispatch by naming convention was the hole left in that fix.** Django views, Celery workers and Flask handlers are dispatched by name, so there is no call edge and no decorator to find. `handle_request`, `dispatch_event` and `task` were all reported dead, which is exactly the kind of finding an agent acts on by deleting working code. Found by probing the rule rather than reading it, because the original tests covered routes and exports and nothing dispatched by name.
+* **The exemption is python and method only.** A JS or Go function called `get` really is usually dead, and exempting it everywhere would make the signal useless in every other language the scanner supports.
+* **A python method is extracted as `function_definition`, not `method_definition`,** so the kind cannot tell a method from a module level function. Indentation does, and that is what the check uses.
+* **8 tests.** Three for the convention cases, and one asserting the exemption does not leak into JavaScript or Go.
+
+
 The release that makes Heides usable by an agent rather than only by a person at
 a terminal. Everything here was reachable from a terminal before and is now
 either a tool call or a machine-checkable verdict, and several of the new layers
