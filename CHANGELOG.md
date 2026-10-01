@@ -2,6 +2,19 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.20.1
+
+A false positive that only a real repository could find, and a guard pass that ran twice.
+
+* **A call expression bound to a secret sounding name was reported as a hardcoded credential.** Running the published binary against llama.cpp produced this at `tools/ui/tests/unit/settings-private-fields.test.ts`:
+  ```ts
+  const apiKeyField = fields.find((field) => field?.key === SETTINGS_KEYS.API_KEY);
+  ```
+  reported as "a secret looking name holds a literal value, 61 chars". The rule read the whole right hand side as a value. This is the worst failure mode for a credential rule: a finding like it trains an agent to ignore the rule rather than act on it.
+* **The fix is a literal check, and the distinction is subtle.** An earlier attempt disqualified on `=` and on `:`, which silently dropped a real Kubernetes Secret finding, because a Secret value is base64 with trailing `=` padding, and a real TypeScript credential. The question is not "does it contain a symbol" but "would it have to be evaluated": brackets, arrows, a leading dot, a leading dollar. A colon and an equals do not mean evaluation. Both positives are pinned by tests so the tightening cannot quietly drop them again.
+* **`check` ran the entire guard pass twice.** `check` called `check_workspace_with_database`, which itself called `check_workspace_without_deps`, and the caller then filtered the code guards back out with a `retain`. The interprocedural taint pass therefore ran twice for every check, and it is the expensive layer. Measured on attrs, 56 python files: 675 seconds became 55. Twelve times, from one redundant pass, found by timing the layer rather than guessing at it.
+* **llama.cpp at 706 source files still exceeds 240 seconds**, stated plainly in the commit that fixed it. One interprocedural pass over that many files is the remaining cost, and it is a real cost rather than the duplicate that was removed.
+
 ## 0.20.0
 
 Every capability reachable by an agent, and one gap closed before it shipped.
