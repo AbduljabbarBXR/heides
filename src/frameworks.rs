@@ -870,10 +870,8 @@ struct QuerySite {
 /// The singular of a declared table name, for matching a model name.
 fn singular_of(table: &str) -> String {
     let lower = table.to_ascii_lowercase();
-    for suffix in ["ies"] {
-        if let Some(stem) = lower.strip_suffix(suffix) {
-            return format!("{stem}y");
-        }
+    if let Some(stem) = lower.strip_suffix("ies") {
+        return format!("{stem}y");
     }
     for suffix in ["ses", "xes", "zes", "ches", "shes"] {
         if let Some(stem) = lower.strip_suffix(suffix) {

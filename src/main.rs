@@ -487,7 +487,7 @@ fn main() -> ExitCode {
             reports
                 .retain(|r| !(r.guard.starts_with("database.") || r.guard.starts_with("config.")));
             reports.extend(
-                harmony::check_workspace_with_database(&root, &graph)
+                harmony::check_workspace_with_database(&root)
                     .into_iter()
                     .filter(|r| r.guard.starts_with("database.") || r.guard.starts_with("config.")),
             );

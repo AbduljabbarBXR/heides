@@ -394,13 +394,50 @@ fn strip_word<'a>(line: &'a str, word: &str) -> Option<&'a str> {
 }
 
 fn clean_key(raw: &str) -> String {
-    raw.trim()
-        .trim_matches(|c| c == '"' || c == '\'' || c == '`' || c == ' ')
+    let mut t = raw.trim();
+    // Strip a declaration prefix so `export const apiKey = ...` keys on
+    // `apiKey`. A .ts file is source rather than configuration, but a credential
+    // in one is still a credential and the key has to name it.
+    for prefix in [
+        "export const ",
+        "export let ",
+        "export var ",
+        "export default ",
+        "export ",
+        "const ",
+        "let ",
+        "var ",
+        "pub const ",
+        "pub fn ",
+        "pub ",
+        "static ",
+        "public static final ",
+        "public final ",
+        "public static ",
+        "static final ",
+        "final ",
+        "public ",
+        "private ",
+    ] {
+        if let Some(rest) = t.strip_prefix(prefix) {
+            t = rest.trim_start();
+            break;
+        }
+    }
+    t.trim_matches(|c| c == '"' || c == '\'' || c == '`' || c == ' ')
         .to_string()
 }
 
 fn unquote(raw: &str) -> String {
-    let t = raw.trim();
+    let mut t = raw.trim();
+    // A statement terminator is not part of a quoted value. Without this,
+    // `'sk_live_...';` kept its quote and semicolon, so the literal check below
+    // saw a value that was neither quoted nor bare and rejected it.
+    for terminator in [';', ','] {
+        if let Some(stripped) = t.strip_suffix(terminator) {
+            t = stripped.trim_end();
+        }
+    }
     for q in ['"', '\'', '`'] {
         if let Some(inner) = t.strip_prefix(q) {
             if let Some(end) = inner.rfind(q) {
@@ -713,6 +750,12 @@ fn classify_value(
     if looks_like_path(v) {
         return None;
     }
+    // Not a literal, so not a credential sitting in a config file. Checked before
+    // the provider shapes, because a shape match on the middle of a call
+    // expression would still be a false positive.
+    if !is_literal_value(v) {
+        return None;
+    }
 
     // A provider token shape is the strongest evidence and does not depend on the
     // key name, so it is checked first and reports even for an unremarkable key.
@@ -861,6 +904,53 @@ fn looks_like_path(v: &str) -> bool {
         return true;
     }
     false
+}
+
+/// True when a value is a plain literal rather than an expression.
+///
+/// This is the rule that a type annotation and a call result both slip past, and
+/// both were false positives on a real TypeScript test in llama.cpp:
+/// `const apiKeyField = fields.find(...)` bound a secret-looking name to the
+/// result of a call, and `const apiKeyField: SettingsField = lookup(...)` bound
+/// it to a type. Neither is a credential sitting in a config file.
+///
+/// The distinction is not "contains a symbol" but "would have to be evaluated".
+/// Brackets, arrows and a leading `.` or `$` all mean evaluation. A colon and an
+/// equals do not: `sk_live_...` has neither, a Kubernetes Secret value is base64
+/// with trailing `=` padding, and a quoted string may contain anything at all. An
+/// earlier version disqualified on `=` and on `:`, which silently dropped a real
+/// Kubernetes finding and a real TypeScript one.
+fn is_literal_value(v: &str) -> bool {
+    let t = v.trim();
+    if t.is_empty() {
+        return false;
+    }
+    // Quoted is unambiguously a literal, whatever is inside it.
+    for q in ['"', '\'', '`'] {
+        if t.len() >= 2 && t.starts_with(q) && t.ends_with(q) {
+            return true;
+        }
+    }
+    // These all mean the value has to be computed: a call, an index, a lambda, an
+    // optional chain, a binary operation, a comparison.
+    for marker in [
+        "(", ")", "[", "]", "{", "}", "=>", "?.", "&&", "||", "<", ">", "+ ", " * ",
+    ] {
+        if t.contains(marker) {
+            return false;
+        }
+    }
+    // A leading dot or dollar means a member access or an interpolation.
+    if t.starts_with('.') || t.starts_with('$') {
+        return false;
+    }
+    // A bare token with no whitespace is a literal. Anything with whitespace is
+    // either prose, which `looks_like_prose` handles, or an expression, which
+    // the brackets above already caught.
+    if t.chars().any(char::is_whitespace) {
+        return false;
+    }
+    true
 }
 
 /// A value that reads as English rather than as a secret.
