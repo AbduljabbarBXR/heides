@@ -2,7 +2,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use heides::{
-    deps, frameworks, grounding, harmony, indexer, server, spine, ui::Stopwatch, ui::Ui, watch,
+    deadcode, deps, frameworks, grounding, harmony, indexer, server, spine, ui::Stopwatch, ui::Ui,
+    watch,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -1377,13 +1378,24 @@ fn describe_workspace(graph: &spine::CodeGraph, root: &std::path::Path) {
         })
         .copied()
         .collect();
-    let rest: Vec<&str> = entry_names
-        .iter()
-        .filter(|n| !named.contains(n))
-        .copied()
-        .collect();
     print_entries(named, "named entrypoints", 10);
-    print_entries(rest, "uncalled roots", 20);
+    // Dead roots, with the reason attached. The old list named symbols and
+    // nothing else, and an agent acting on it had to re-derive why each was
+    // listed. The refinement also removes the false claims: exports, decorated
+    // functions, overrides, test helpers and callback registrations are all
+    // called by something the call graph cannot see.
+    let dead = deadcode::dead_roots(graph, root);
+    if dead.is_empty() {
+        println!("uncalled roots: none, every function is reached, dispatched, exported or tested");
+    } else {
+        println!("uncalled roots, {} total", dead.len());
+        for d in dead.iter().take(20) {
+            println!("  {} at {}:{} — {}", d.name, d.file, d.line, d.reason);
+        }
+        if dead.len() > 20 {
+            println!("  ... and {} more", dead.len() - 20);
+        }
+    }
 
     // Hubs, the symbols with the most wiring in and out.
     let mut hub_scores: Vec<(&str, usize)> = Vec::new();

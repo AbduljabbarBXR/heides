@@ -6,6 +6,7 @@
 
 pub mod config;
 pub mod db;
+pub mod deadcode;
 pub mod deps;
 pub mod edge;
 pub mod frameworks;
