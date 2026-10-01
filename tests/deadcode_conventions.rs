@@ -28,8 +28,8 @@ fn write(dir: &Path, rel: &str, body: &str) {
 }
 
 fn reported(dir: &Path) -> Vec<String> {
-    let graph = heides::indexer::build_graph(&dir).0;
-    deadcode::dead_roots(&graph, &dir)
+    let graph = heides::indexer::build_graph(dir).0;
+    deadcode::dead_roots(&graph, dir)
         .into_iter()
         .map(|r| r.name)
         .collect()
