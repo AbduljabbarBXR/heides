@@ -578,7 +578,66 @@ fn article(class: &str) -> &'static str {
 }
 
 /// Scan one source file for taint flows.
+/// True when a path belongs to third party code rather than to this project.
+///
+/// A measured decision, not a preference. On a 313 file corpus the taint pass
+/// spent 267 seconds, and 62 of them were in three files under
+/// `lib/vendors/nerdamer-prime`, the largest being 634KB of generated algebra
+/// code. Findings in vendored code are real but they are not actionable for the
+/// person running the check, and they cost the same to produce as findings in
+/// code the user actually owns.
+///
+/// The trade is stated rather than hidden: vendored and generated code is not
+/// analysed, so a vulnerability that lives only in a dependency is invisible to
+/// the taint pass. `deps` and the advisory guard are the layers that cover
+/// third party risk, and they do not have this blind spot.
+///
+/// Matching is on whole path segments rather than substrings, because a
+/// substring rule eats first party code: `src/vendor-portal/client.js` and
+/// `src/distillery/rules.js` both contain a vendor word without being vendored,
+/// and both have tests above asserting they are still scanned.
+fn is_third_party(path: &Path) -> bool {
+    const DIRS: [&str; 8] = [
+        "vendor",
+        "vendors",
+        "node_modules",
+        "third_party",
+        "thirdparty",
+        "external",
+        "dist",
+        "build",
+    ];
+    let Some(text) = path.to_str() else {
+        // No usable path means no way to judge. Scanning is the safe default,
+        // because silently skipping a file on a path encoding quirk would be a
+        // coverage hole with no receipt.
+        return false;
+    };
+    let lower = text.replace('\\', "/").to_ascii_lowercase();
+    for seg in lower.split('/') {
+        let seg = seg.trim();
+        // A generated bundle, matched on the file name because that is where
+        // `.min.` and `.bundle.` appear.
+        if seg.ends_with(".min.js")
+            || seg.ends_with(".bundle.js")
+            || seg.ends_with(".min.css")
+            || seg.ends_with(".generated.ts")
+        {
+            return true;
+        }
+        if DIRS.contains(&seg) {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn scan_file(path: &Path, content: &str) -> Vec<TaintReport> {
+    // Third party code is not analysed. See `is_third_party` for the measurement
+    // behind this and for what it costs.
+    if is_third_party(path) {
+        return Vec::new();
+    }
     let Some(lang) = crate::parser::detect_language(path) else {
         return Vec::new();
     };
@@ -1725,5 +1784,84 @@ mod tests {
         assert_eq!(article("NoSQL"), "a");
         assert_eq!(article("cloud metadata fetch"), "a");
         assert_eq!(article("SQL"), "a");
+    }
+    // -------------------------------------------- third party code is not our code
+    //
+    // The corpus that took 600 seconds contained three vendored files that together
+    // accounted for 62 of the 267 seconds the taint pass spent, and the largest was
+    // 634KB of generated algebra code. `practice.rs` already declines to police
+    // third party assets but its test only looks at the file name, so a file at
+    // `lib/vendors/nerdamer-prime/nerdamer.core.js` slipped through even there.
+    //
+    // These assert the limit rather than the intent: a taint finding inside vendored
+    // code is a real finding about code heides did not write, and dropping it is a
+    // deliberate trade, not a free win. First party code must be unaffected, so every
+    // case has a first party twin.
+
+    // `super::*` is already in scope in this module, so it is not repeated here.
+
+    fn tainted_in(path: &str, src: &str) -> bool {
+        !scan_file(std::path::Path::new(path), src).is_empty()
+    }
+
+    /// A first party file with the identical flow. If this ever goes quiet, the
+    /// vendor rule has eaten real code and that is the bug worth catching.
+    #[test]
+    fn first_party_code_is_still_scanned() {
+        let src = "function load(req) {\n  const q = req.query.id;\n  db.query(q);\n}\n";
+        assert!(
+            tainted_in("src/routes/users.js", src),
+            "first party code must be scanned"
+        );
+    }
+
+    #[test]
+    fn a_vendored_directory_is_not_scanned() {
+        let src = "function load(req) {\n  const q = req.query.id;\n  db.query(q);\n}\n";
+        assert!(
+            !tainted_in("lib/vendors/nerdamer-prime/nerdamer.core.js", src),
+            "a vendored directory is third party code"
+        );
+    }
+
+    #[test]
+    fn the_other_vendor_spellings_are_covered() {
+        let src = "function load(req) {\n  const q = req.query.id;\n  db.query(q);\n}\n";
+        for p in [
+            "node_modules/pkg/index.js",
+            "third_party/lib/thing.js",
+            "vendor/bundle.js",
+            "static/vendor.min.js",
+            "dist/build.js",
+            "build/output.js",
+            "external/dep.js",
+        ] {
+            assert!(!tainted_in(p, src), "should be treated as third party: {p}");
+        }
+    }
+
+    /// The twin that keeps the rule honest. A directory merely named like one of
+    /// these, in a first party location, is still first party.
+    #[test]
+    fn a_first_party_path_containing_a_vendor_word_is_still_scanned() {
+        let src = "function load(req) {\n  const q = req.query.id;\n  db.query(q);\n}\n";
+        for p in [
+            "src/vendor-portal/client.js",
+            "app/distribution/index.js",
+            "src/distillery/rules.js",
+        ] {
+            assert!(tainted_in(p, src), "must stay first party: {p}");
+        }
+    }
+
+    /// A directory named `vendor` nested deeper, because that is where the measured
+    /// cost was and a prefix match on the first segment would miss it.
+    #[test]
+    fn a_nested_vendor_directory_is_still_recognised() {
+        let src = "def go(request):\n    q = request.args['q']\n    db.query(q)\n";
+        assert!(
+            !tainted_in("app/lib/vendors/pkg/thing.py", src),
+            "nesting must not defeat the rule"
+        );
     }
 }
