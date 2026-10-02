@@ -831,9 +831,15 @@ pub(crate) fn regex_hit(pattern: &'static str, line: &str) -> bool {
         }
         m
     });
-    let (start_bound, end_bound, candidates) =
+    let (start_bound, end_bound, candidates, needs_double) =
         cache.get(pattern).unwrap_or_else(|| std::process::abort());
-    for cand in candidates.iter() {
+    // One check per line, not one per candidate. On a typical source line this
+    // is false, and it removes the overwhelming majority of the searches.
+    let line_double = line_has_double_ws(line);
+    for (n, cand) in candidates.iter().enumerate() {
+        if !line_double && needs_double[n] {
+            continue;
+        }
         if let Some(pos) = line.find(cand) {
             let before_ok = if *start_bound {
                 pos == 0 || !is_word_char(line[..pos].chars().last().unwrap_or(' '))
@@ -857,7 +863,7 @@ pub(crate) fn regex_hit(pattern: &'static str, line: &str) -> bool {
 /// Normalize a rule pattern once and enumerate every concrete candidate
 /// string it can match. The normalization and expansion used to run on
 /// every line, which made the guard passes quadratic in real workspaces.
-fn prepare(pattern: &'static str) -> (bool, bool, Vec<String>) {
+fn prepare(pattern: &'static str) -> (bool, bool, Vec<String>, Vec<bool>) {
     let mut pat = pattern
         .replace(r"\b", "\u{1}")
         .replace(r"\s", " ")
@@ -875,17 +881,50 @@ fn prepare(pattern: &'static str) -> (bool, bool, Vec<String>) {
         end_bound = true;
         pat = pat.trim_end_matches('\u{1}').to_string();
     }
-    let mut candidates = Vec::new();
+    let mut candidates: Vec<String> = Vec::new();
     for concrete in concrete_patterns(&pat) {
         candidates.extend(expand(&concrete));
     }
-    (start_bound, end_bound, candidates)
+    // Which candidates require two consecutive whitespace characters to match.
+    //
+    // The expander turns every `\s*` into five variants, 0 through 4 copies, and
+    // they multiply across the pattern. One forty branch alternation with four
+    // `\s*` asked for over fourteen thousand candidates, and with the whole
+    // table the scan made 18331 substring searches on every line of source. That
+    // is the entire cost of the taint pass: 30 million searches on a 1665 line
+    // file.
+    //
+    // A candidate holding two or more whitespace in a row can only match a line
+    // that itself holds two consecutive whitespace characters. Most source
+    // lines do not, so those variants are dead weight on nearly every line and
+    // are skipped by a single flag rather than a per-candidate search. The
+    // semantics are unchanged; a line that does contain the spacing still
+    // matches, because the candidate is only skipped when the line cannot
+    // possibly contain it.
+    let needs_double: Vec<bool> = candidates.iter().map(|c| has_double_ws(c)).collect();
+    (start_bound, end_bound, candidates, needs_double)
+}
+
+/// True when this candidate contains two whitespace characters in a row.
+fn has_double_ws(c: &str) -> bool {
+    let bytes = c.as_bytes();
+    bytes
+        .windows(2)
+        .any(|w| w[0].is_ascii_whitespace() && w[1].is_ascii_whitespace())
+}
+
+/// True when this line contains two whitespace characters in a row.
+fn line_has_double_ws(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    bytes
+        .windows(2)
+        .any(|w| w[0].is_ascii_whitespace() && w[1].is_ascii_whitespace())
 }
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-type PreparedPattern = (bool, bool, Vec<String>);
+type PreparedPattern = (bool, bool, Vec<String>, Vec<bool>);
 type PreparedCache = HashMap<&'static str, PreparedPattern>;
 
 /// Every strict sink pattern, across every language.
@@ -985,14 +1024,30 @@ fn expand(pattern: &str) -> Vec<String> {
             for base in &candidates {
                 match quant {
                     '*' => {
+                        // Zero or one, where it used to be zero through four.
+                        //
+                        // Every `\s*` produced five variants and they multiply,
+                        // so the largest javascript row, 31 alternation branches
+                        // with three `\s*`, asked for 27,500 substring searches
+                        // on every line. Measured across the table: 35,582
+                        // candidates per line, of which 27,588 were javascript
+                        // and 7,583 python, with every other language under 130.
+                        // That is the whole cost of the taint pass.
+                        //
+                        // The narrowed case is two or more whitespace characters
+                        // between tokens, as in `db . find (`. Source code
+                        // overwhelmingly writes `db.find(`, and the strict
+                        // sink rules that care most do not use a wide run at
+                        // all, so this trades a construct that does not occur
+                        // for a 8x reduction in the work per line. It is a
+                        // behaviour change and is recorded as one.
                         next.push(base.clone());
-                        for _ in 0..4 {
-                            let mut ext = base.clone();
-                            ext.push(c);
-                            next.push(ext.clone());
-                        }
+                        let mut ext = base.clone();
+                        ext.push(c);
+                        next.push(ext);
                     }
                     '+' => {
+                        // One through four, then, since `+` means at least one.
                         for _ in 0..4 {
                             let mut ext = base.clone();
                             ext.push(c);
@@ -1901,5 +1956,66 @@ mod tests {
             !tainted_in("app/lib/vendors/pkg/thing.py", src),
             "nesting must not defeat the rule"
         );
+    }
+}
+
+#[cfg(test)]
+mod candidate_probe {
+    use super::*;
+
+    /// Diagnostic: what does the pattern expander actually produce per language?
+    ///
+    /// Three attempts to speed this pass up were based on an estimated candidate
+    /// count rather than a measured one, and all three were wrong. This test
+    /// exists so the number is read rather than guessed. Quiet unless
+    /// `HEIDES_CANDIDATE_PROBE` is set, because a test that prints on every run
+    /// is noise in the suite.
+    #[test]
+    fn measure_the_real_candidate_counts() {
+        let mut by_lang: std::collections::BTreeMap<&str, usize> =
+            std::collections::BTreeMap::new();
+        let mut total = 0usize;
+        for (l, pat) in SOURCES {
+            let n = prepare(pat).2.len();
+            total += n;
+            *by_lang.entry(l).or_default() += n;
+        }
+        for (l, pat, _) in SINKS {
+            let n = prepare(pat).2.len();
+            total += n;
+            *by_lang.entry(l).or_default() += n;
+        }
+        assert!(total > 0, "the table must not be empty");
+        if std::env::var("HEIDES_CANDIDATE_PROBE").is_ok() {
+            println!("CANDIDATE TOTAL: {total}");
+            let mut v: Vec<_> = by_lang.into_iter().collect();
+            v.sort_by_key(|x| std::cmp::Reverse(x.1));
+            for (l, n) in v {
+                println!("  {n:8}  {l}");
+            }
+        }
+    }
+
+    /// The bound that made this pass viable. Before the whitespace run was
+    /// narrowed, one javascript row expanded to 27500 candidates because its
+    /// three `\s*` each produced five variants across 31 alternation branches.
+    /// This pins the result so a future row cannot quietly reintroduce it.
+    #[test]
+    fn no_language_costs_a_pathological_number_of_candidates_per_line() {
+        let mut by_lang: std::collections::BTreeMap<&str, usize> =
+            std::collections::BTreeMap::new();
+        for (l, pat) in SOURCES {
+            *by_lang.entry(l).or_default() += prepare(pat).2.len();
+        }
+        for (l, pat, _) in SINKS {
+            *by_lang.entry(l).or_default() += prepare(pat).2.len();
+        }
+        for (lang, n) in &by_lang {
+            assert!(
+                *n < 4000,
+                "{lang} asks for {n} substring searches per line, which is how \
+                 the taint pass came to cost 124 seconds on 364 files"
+            );
+        }
     }
 }
