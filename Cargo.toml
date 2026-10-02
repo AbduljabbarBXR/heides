@@ -32,3 +32,16 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 lto = true
 strip = true
 codegen-units = 1
+
+# A build that keeps symbols so a stack can be read.
+#
+# The release profile strips, which makes a slow check impossible to profile: the
+# frames come back as `??` and every guess about the hot loop has to be settled by
+# editing code and rebuilding. This profile is the same optimisation level with
+# `strip = false`, so `gdb -p <pid> -ex bt` names the function.
+#
+# Not used for releases. The stripped binary is what ships.
+[profile.profiling]
+inherits = "release"
+strip = false
+debug = 1

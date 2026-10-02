@@ -345,50 +345,133 @@ pub fn check_workspace_with_database(root: &Path) -> Vec<GuardReport> {
     reports
 }
 
-/// Per-layer timings, printed to stderr when `HEIDES_TIMING` is set.
+/// Where a check spent its time, in seconds, printed when `HEIDES_TIMING` is set.
 ///
-/// This exists because the expensive layer was guessed at four times and was
-/// wrong every time, and because a 26 minute check on a real repository is
-/// indistinguishable from a hang if nothing says where the time went. Prints go
-/// to stderr so they never contaminate machine-readable stdout.
-struct LayerTimer {
-    on: bool,
-    started: std::time::Instant,
+/// This exists because the expensive layer was guessed at five times and was
+/// wrong every time. Two of those guesses were misread timings rather than wrong
+/// theories: a cumulative figure was read as a per-file one, and a lap printed
+/// once per file was read as a total. Both mistakes were made possible by an
+/// instrument that printed running laps instead of totals.
+///
+/// So: every counter here accumulates, and one line per layer is printed at the
+/// end with a total in seconds. Nothing prints per file except the slowest few,
+/// which are a ranked list rather than a stream. Output goes to stderr so
+/// machine readable stdout stays clean.
+#[derive(Default)]
+struct LayerTimes {
+    /// Whether HEIDES_TIMING is set. Stored rather than re-read, because every
+    /// report path needs it and reading the environment per file is wasteful.
+    enabled: bool,
+    read_s: f64,
+    taint_s: f64,
+    edge_s: f64,
+    practice_s: f64,
+    long_fn_s: f64,
+    interproc_s: f64,
+    /// Per-file costs, kept so the worst offenders can be named. A cost spread
+    /// over hundreds of files hides the one that costs everything.
+    slowest: Vec<(f64, String, &'static str)>,
 }
 
-impl LayerTimer {
+impl LayerTimes {
     fn new() -> Self {
         Self {
-            on: std::env::var("HEIDES_TIMING").is_ok(),
-            started: std::time::Instant::now(),
+            enabled: std::env::var("HEIDES_TIMING").is_ok(),
+            ..Default::default()
         }
     }
 
-    /// Report a single pass that is slow on its own. Per-file costs are otherwise
-    /// invisible when the total is spread over hundreds of files, and one file
-    /// taking 700ms inside a 26 minute check is the whole story.
-    fn slow(&self, label: &str, file: &str, ms: u128) {
-        if self.on && ms > 100 {
-            eprintln!("  heides slow   {label} on {file}: {ms}ms");
+    /// Record one file's cost for one layer, keeping a ranked worst list.
+    fn add_file(&mut self, layer: &'static str, secs: f64, file: &str) {
+        if secs > 0.05 {
+            self.slowest.push((secs, file.to_string(), layer));
         }
     }
 
-    fn lap(&mut self, label: &str) {
-        if self.on {
-            eprintln!("  heides timing  {label}: {:?}", self.started.elapsed());
-            self.started = std::time::Instant::now();
+    /// Report one layer as soon as it finishes, and flush.
+    ///
+    /// This exists because the previous version printed everything at the end.
+    /// That made the one run worth reading, the one that does not finish, print
+    /// nothing at all: a hang in a later layer threw away the numbers for every
+    /// earlier layer. A profiler that cannot observe the failure it was built to
+    /// diagnose is worse than no profiler, so each layer reports on completion
+    /// and the flush survives a kill.
+    ///
+    /// The summary is still printed at the end, where the ranked worst list lives.
+    fn emit(&self, layer: &str, secs: f64) {
+        if !self.enabled {
+            return;
         }
+        use std::io::Write;
+        let mut err = std::io::stderr();
+        let _ = writeln!(err, "heides timing: {layer} {secs:.2}s");
+        // Flushed explicitly. A buffered line lost to SIGTERM is the case this
+        // whole change is about.
+        let _ = err.flush();
+    }
+
+    fn report(&self) {
+        if !self.enabled {
+            return;
+        }
+        let total = self.read_s
+            + self.taint_s
+            + self.edge_s
+            + self.practice_s
+            + self.long_fn_s
+            + self.interproc_s;
+        eprintln!("heides timing: total {:.2}s", total);
+        let mut rows: Vec<(&str, f64)> = vec![
+            ("taint::scan_file", self.taint_s),
+            ("edge::scan_file", self.edge_s),
+            ("practice::scan_file", self.practice_s),
+            ("interproc::run_workspace", self.interproc_s),
+            ("long_functions", self.long_fn_s),
+            ("read files", self.read_s),
+        ];
+        rows.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        for (name, secs) in rows {
+            let pct = if total > 0.0 {
+                secs / total * 100.0
+            } else {
+                0.0
+            };
+            eprintln!("  {:<26} {:>8.2}s  {:>5.1}%", name, secs, pct);
+        }
+        self.emit_worst();
+    }
+
+    /// The ranked per file costs, printed and flushed on its own.
+    ///
+    /// Separate from `report` so it can also be printed before the expensive
+    /// interprocedural pass. A per file cost spread over hundreds of files hides
+    /// the one file that costs everything, so this is the part that can name a
+    /// culprit.
+    fn emit_worst(&self) {
+        if !self.enabled || self.slowest.is_empty() {
+            return;
+        }
+        use std::io::Write;
+        let mut worst = self.slowest.clone();
+        worst.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut err = std::io::stderr();
+        let _ = writeln!(err, "heides timing: slowest files");
+        for (secs, file, layer) in worst.iter().take(10) {
+            let _ = writeln!(err, "  {secs:>8.2}s  {layer:<22} {file}");
+        }
+        let _ = err.flush();
     }
 }
 
 pub fn check_workspace_without_deps(graph: &CodeGraph) -> Vec<GuardReport> {
     let mut reports = Vec::new();
-    let mut timer = LayerTimer::new();
+    let mut times = LayerTimes::new();
 
     // Read every indexed file once. The intra guards and the interprocedural
     // taint pass share the same contents so nothing is parsed twice. Stored
     // paths are keys relative to the recorded scan root, so a check returns
     // the same findings from any working directory.
+    let t = std::time::Instant::now();
     let mut contents: HashMap<String, String> = HashMap::new();
     for f in &graph.files {
         let path = graph.file_path_of(&f.path);
@@ -396,7 +479,8 @@ pub fn check_workspace_without_deps(graph: &CodeGraph) -> Vec<GuardReport> {
             contents.insert(f.path.trim_start_matches("./").replace('\\', "/"), content);
         }
     }
-    timer.lap("read files");
+    times.read_s = t.elapsed().as_secs_f64();
+    times.emit("read files", times.read_s);
 
     for f in &graph.files {
         let path = Path::new(&f.path);
@@ -404,8 +488,13 @@ pub fn check_workspace_without_deps(graph: &CodeGraph) -> Vec<GuardReport> {
         let Some(content) = contents.get(&key) else {
             continue;
         };
-        let mut _lt = LayerTimer::new();
-        for r in crate::taint::scan_file(path, content) {
+
+        let t = std::time::Instant::now();
+        let out = crate::taint::scan_file(path, content);
+        let d = t.elapsed().as_secs_f64();
+        times.taint_s += d;
+        times.add_file("taint", d, &f.path);
+        for r in out {
             reports.push(GuardReport {
                 guard: "security.taint".to_string(),
                 severity: r.severity,
@@ -414,22 +503,11 @@ pub fn check_workspace_without_deps(graph: &CodeGraph) -> Vec<GuardReport> {
                 line: r.line,
             });
         }
-        {
-            let t = std::time::Instant::now();
-            let out = crate::taint::scan_file(path, content);
-            _lt.slow("taint", &f.path, t.elapsed().as_millis());
-            for r in out {
-                reports.push(GuardReport {
-                    guard: "security.taint".to_string(),
-                    severity: r.severity,
-                    message: r.message,
-                    file: r.file,
-                    line: r.line,
-                });
-            }
-        }
-        _lt.lap("  taint::scan_file");
-        for r in crate::edge::scan_file(path, content) {
+
+        let t = std::time::Instant::now();
+        let out = crate::edge::scan_file(path, content);
+        times.edge_s += t.elapsed().as_secs_f64();
+        for r in out {
             reports.push(GuardReport {
                 guard: "edge.cases".to_string(),
                 severity: r.severity,
@@ -438,8 +516,13 @@ pub fn check_workspace_without_deps(graph: &CodeGraph) -> Vec<GuardReport> {
                 line: r.line,
             });
         }
-        _lt.lap("  edge::scan_file");
-        for r in crate::practice::scan_file(path, content, &f.lang) {
+
+        let t = std::time::Instant::now();
+        let out = crate::practice::scan_file(path, content, &f.lang);
+        let d = t.elapsed().as_secs_f64();
+        times.practice_s += d;
+        times.add_file("practice", d, &f.path);
+        for r in out {
             reports.push(GuardReport {
                 guard: "best.practice".to_string(),
                 severity: r.severity,
@@ -450,9 +533,19 @@ pub fn check_workspace_without_deps(graph: &CodeGraph) -> Vec<GuardReport> {
         }
     }
 
-    timer.lap("  practice::scan_file");
+    // The three per file guards finish together, so they report together. Emitted
+    // here rather than inside the loop because a total is what is useful: 400
+    // individual file costs is a stream nobody reads, and the ranked worst list
+    // at the end is where per file detail belongs.
+    times.emit("taint::scan_file", times.taint_s);
+    times.emit("edge::scan_file", times.edge_s);
+    times.emit("practice::scan_file", times.practice_s);
 
-    for r in crate::practice::long_functions(graph) {
+    let t = std::time::Instant::now();
+    let out = crate::practice::long_functions(graph);
+    times.long_fn_s = t.elapsed().as_secs_f64();
+    times.emit("long_functions", times.long_fn_s);
+    for r in out {
         reports.push(GuardReport {
             guard: "best.practice".to_string(),
             severity: r.severity,
@@ -462,9 +555,18 @@ pub fn check_workspace_without_deps(graph: &CodeGraph) -> Vec<GuardReport> {
         });
     }
 
-    timer.lap("long functions");
+    // The worst file list is printed before the interprocedural pass, not only at
+    // the end. Two runs in this corpus disagreed about whether file count alone
+    // explained the time, which is what a single pathological file looks like,
+    // and this list is the data that finds it. Emitted here so a hang downstream
+    // does not take the evidence with it.
+    times.emit_worst();
 
-    for r in crate::interproc::run_workspace(graph, &contents) {
+    let t = std::time::Instant::now();
+    let out = crate::interproc::run_workspace(graph, &contents);
+    times.interproc_s = t.elapsed().as_secs_f64();
+    times.emit("interproc::run_workspace", times.interproc_s);
+    for r in out {
         reports.push(GuardReport {
             guard: "security.taint".to_string(),
             severity: r.severity,
@@ -474,8 +576,7 @@ pub fn check_workspace_without_deps(graph: &CodeGraph) -> Vec<GuardReport> {
         });
     }
 
-    timer.lap("interprocedural taint");
-
+    times.report();
     reports
 }
 
