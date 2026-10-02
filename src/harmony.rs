@@ -345,8 +345,46 @@ pub fn check_workspace_with_database(root: &Path) -> Vec<GuardReport> {
     reports
 }
 
+/// Per-layer timings, printed to stderr when `HEIDES_TIMING` is set.
+///
+/// This exists because the expensive layer was guessed at four times and was
+/// wrong every time, and because a 26 minute check on a real repository is
+/// indistinguishable from a hang if nothing says where the time went. Prints go
+/// to stderr so they never contaminate machine-readable stdout.
+struct LayerTimer {
+    on: bool,
+    started: std::time::Instant,
+}
+
+impl LayerTimer {
+    fn new() -> Self {
+        Self {
+            on: std::env::var("HEIDES_TIMING").is_ok(),
+            started: std::time::Instant::now(),
+        }
+    }
+
+    /// Report a single pass that is slow on its own. Per-file costs are otherwise
+    /// invisible when the total is spread over hundreds of files, and one file
+    /// taking 700ms inside a 26 minute check is the whole story.
+    fn slow(&self, label: &str, file: &str, ms: u128) {
+        if self.on && ms > 100 {
+            eprintln!("  heides slow   {label} on {file}: {ms}ms");
+        }
+    }
+
+    fn lap(&mut self, label: &str) {
+        if self.on {
+            eprintln!("  heides timing  {label}: {:?}", self.started.elapsed());
+            self.started = std::time::Instant::now();
+        }
+    }
+}
+
 pub fn check_workspace_without_deps(graph: &CodeGraph) -> Vec<GuardReport> {
     let mut reports = Vec::new();
+    let mut timer = LayerTimer::new();
+
     // Read every indexed file once. The intra guards and the interprocedural
     // taint pass share the same contents so nothing is parsed twice. Stored
     // paths are keys relative to the recorded scan root, so a check returns
@@ -358,6 +396,7 @@ pub fn check_workspace_without_deps(graph: &CodeGraph) -> Vec<GuardReport> {
             contents.insert(f.path.trim_start_matches("./").replace('\\', "/"), content);
         }
     }
+    timer.lap("read files");
 
     for f in &graph.files {
         let path = Path::new(&f.path);
@@ -365,6 +404,7 @@ pub fn check_workspace_without_deps(graph: &CodeGraph) -> Vec<GuardReport> {
         let Some(content) = contents.get(&key) else {
             continue;
         };
+        let mut _lt = LayerTimer::new();
         for r in crate::taint::scan_file(path, content) {
             reports.push(GuardReport {
                 guard: "security.taint".to_string(),
@@ -374,6 +414,21 @@ pub fn check_workspace_without_deps(graph: &CodeGraph) -> Vec<GuardReport> {
                 line: r.line,
             });
         }
+        {
+            let t = std::time::Instant::now();
+            let out = crate::taint::scan_file(path, content);
+            _lt.slow("taint", &f.path, t.elapsed().as_millis());
+            for r in out {
+                reports.push(GuardReport {
+                    guard: "security.taint".to_string(),
+                    severity: r.severity,
+                    message: r.message,
+                    file: r.file,
+                    line: r.line,
+                });
+            }
+        }
+        _lt.lap("  taint::scan_file");
         for r in crate::edge::scan_file(path, content) {
             reports.push(GuardReport {
                 guard: "edge.cases".to_string(),
@@ -383,6 +438,7 @@ pub fn check_workspace_without_deps(graph: &CodeGraph) -> Vec<GuardReport> {
                 line: r.line,
             });
         }
+        _lt.lap("  edge::scan_file");
         for r in crate::practice::scan_file(path, content, &f.lang) {
             reports.push(GuardReport {
                 guard: "best.practice".to_string(),
@@ -394,6 +450,8 @@ pub fn check_workspace_without_deps(graph: &CodeGraph) -> Vec<GuardReport> {
         }
     }
 
+    timer.lap("  practice::scan_file");
+
     for r in crate::practice::long_functions(graph) {
         reports.push(GuardReport {
             guard: "best.practice".to_string(),
@@ -404,6 +462,8 @@ pub fn check_workspace_without_deps(graph: &CodeGraph) -> Vec<GuardReport> {
         });
     }
 
+    timer.lap("long functions");
+
     for r in crate::interproc::run_workspace(graph, &contents) {
         reports.push(GuardReport {
             guard: "security.taint".to_string(),
@@ -413,6 +473,8 @@ pub fn check_workspace_without_deps(graph: &CodeGraph) -> Vec<GuardReport> {
             line: r.line,
         });
     }
+
+    timer.lap("interprocedural taint");
 
     reports
 }
