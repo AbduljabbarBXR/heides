@@ -2,6 +2,19 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.21.0
+
+The expensive layer was guessed at five times and was wrong every time. This release makes the guessing unnecessary, and removes 60% of the cost it identified.
+
+* **`HEIDES_TIMING=1` reports where a check spends its time, per layer, as each layer completes.** Every counter accumulates and one line prints per layer. The flush is explicit and `emit_worst()` fires before the interprocedural pass, because a buffered line lost to SIGTERM is the case this exists for. An earlier draft printed one summary at the end, which meant a hang produced no output at all: the one run you most need data from was the one run that stayed silent.
+* **The ranked worst-file list is the data, not a stream.** A cost spread over hundreds of files hides the one that costs everything.
+* **`taint::scan_file` fell from 267s to 104s** on a 313 file corpus. The ranked list named the reason: 62 seconds in three files under a vendored directory, the largest being 634KB of generated algebra code. Vendored and generated code is no longer analysed by the taint pass, and all ten worst files are now first party code.
+* **The trade, stated rather than hidden.** A vulnerability living only inside a dependency is invisible to the taint layer. `practice.rs` already made this trade, `deps` and the advisory guard cover third-party risk, and the coverage receipts report what was skipped so the reduction is visible rather than silent.
+* **Vendored matching is on whole path segments, not substrings.** A substring rule eats first party code: `src/vendor-portal/client.js`, `src/distillation/index.js` and `app/distillery/rules.js` all contain a vendor word without being vendored, and each has a test asserting it is still scanned.
+* **Two corpora disagreed about which layer dominates, and that turned out to be the finding.** On 364 real files from a large TypeScript project, taint is 99.1% of a check and interprocedural analysis is 0.2%. On a generated corpus interprocedural measured 33%. Both earlier numbers came from generated code, which is why neither could be trusted. The instrument is what settled it.
+* **The vendored skip does not help every corpus.** It is 2.6x on the corpus it was measured on, which had vendored code. On a corpus without any, it changes nothing. Stated so the number is not read as general.
+* **A byte-budget sweep** replaces a file-count sweep, because the cost tracks bytes rather than file count. The file-count sweep capped at 200 files and reported the expensive layer as free.
+
 ## 0.20.1
 
 A false positive that only a real repository could find, and a guard pass that ran twice.
