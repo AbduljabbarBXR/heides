@@ -2,6 +2,18 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.22.0
+
+The taint pass was 99% of a check, and it was one arithmetic mistake.
+
+* **`taint::scan_file` fell from 123s to 9.3s on 364 real files.** Total check time went from 124s to 11s.
+* **The cause was the pattern expander, and it was measured rather than guessed.** Three attempts to fix this were based on an estimated candidate count and all three were wrong. Read properly, the table asked for **35,582 substring searches on every line** of source: 27,588 of them javascript and 7,583 python, with every other language under 130. One javascript row, 31 alternation branches with three `\s*`, accounted for 27,500 on its own, because every `\s*` became five variants and they multiplied. At roughly 154ns per search, 1,665 lines is 4.7s, which is exactly what the instrument reported.
+* **The whitespace run is narrowed from zero through four copies to zero or one**, which takes javascript to 1,806 candidates per line, 15x fewer.
+* **That is a behaviour change and it is stated as one.** A call written with two or more whitespace characters between tokens, as in `db . find (`, is no longer matched by that row. Source overwhelmingly writes `db.find(`, and the wide run was paying an 8x multiplier for a construct that does not occur. The narrowed spacing is a security-relevant miss, not a formatting preference, and a future row that needs it must say so.
+* **The prepared pattern cache took a mutex on every call.** `regex_hit` runs about seventy thousand times on a 49KB file and every one of them locked. The cache is filled once and never mutated, so a `OnceLock` over an immutable map is the correct shape. Worth 11.5% on its own.
+* **The sink dedup was quadratic with an allocation inside its predicate**, walking every report with a `format!` per sink row per line. Now a `HashSet`.
+* **A test pins the bound.** Any language exceeding 4,000 candidates per line fails the build, so a future rule row cannot quietly reintroduce a pathological one. The probe test reads the number so it never has to be estimated again.
+
 ## 0.21.0
 
 The expensive layer was guessed at five times and was wrong every time. This release makes the guessing unnecessary, and removes 60% of the cost it identified.
