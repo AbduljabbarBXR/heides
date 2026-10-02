@@ -653,6 +653,15 @@ pub fn scan_file(path: &Path, content: &str) -> Vec<TaintReport> {
     let mut reports = Vec::new();
     let lines: Vec<&str> = content.lines().collect();
     let blocks = function_blocks(&lines, &lang);
+    // (line, sink class) pairs already reported.
+    //
+    // This used to be a linear scan of every report so far, with a `format!`
+    // allocated inside the predicate, run once per sink row per line. On a
+    // 1665 line file that is a quadratic walk with an allocation on every step.
+    // A set makes it a lookup, and the sink phrase is built once per row rather
+    // than once per comparison.
+    let mut reported_pairs: std::collections::HashSet<(u64, &'static str)> =
+        std::collections::HashSet::new();
     for (block_start, block_end, indent) in blocks {
         let mut tainted: Vec<(String, usize)> = Vec::new();
         for i in block_start..=block_end {
@@ -684,9 +693,7 @@ pub fn scan_file(path: &Path, content: &str) -> Vec<TaintReport> {
                 }
                 // Overlapping patterns are deliberate (a bare name plus a
                 // receiver scoped one). Report a line and sink class once.
-                if reports.iter().any(|r: &TaintReport| {
-                    r.line == line_no && r.message.contains(&format!("a {} sink", sink))
-                }) {
+                if !reported_pairs.insert((line_no, sink)) {
                     continue;
                 }
                 let used = tainted.iter().any(|(v, _)| line.contains(v.as_str()));
@@ -802,10 +809,30 @@ fn is_word_char(c: char) -> bool {
 
 /// Match a rule pattern against a line with word boundary support.
 pub(crate) fn regex_hit(pattern: &'static str, line: &str) -> bool {
-    let cache = PREPARED.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = cache.lock().unwrap();
+    // Lock free on the hot path. This runs once per rule row per line, so a
+    // 49KB file took roughly seventy thousand calls, and every one of them took
+    // a mutex. Measured at 75 microseconds per call on one large file, which is
+    // three orders of magnitude more than the substring search it guards.
+    //
+    // The cache is filled once and never mutated again, so a `OnceLock` holding
+    // an immutable map is the correct shape: the first caller pays to build it
+    // and every later caller pays an atomic load and a hash lookup.
+    static CACHE: OnceLock<PreparedCache> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| {
+        let mut m: PreparedCache = HashMap::new();
+        for (_l, pat) in SOURCES {
+            m.entry(pat).or_insert_with(|| prepare(pat));
+        }
+        for (_l, pat, _) in SINKS {
+            m.entry(pat).or_insert_with(|| prepare(pat));
+        }
+        for rule in strict_sinks_all() {
+            m.entry(rule).or_insert_with(|| prepare(rule));
+        }
+        m
+    });
     let (start_bound, end_bound, candidates) =
-        guard.entry(pattern).or_insert_with(|| prepare(pattern));
+        cache.get(pattern).unwrap_or_else(|| std::process::abort());
     for cand in candidates.iter() {
         if let Some(pos) = line.find(cand) {
             let before_ok = if *start_bound {
@@ -856,12 +883,23 @@ fn prepare(pattern: &'static str) -> (bool, bool, Vec<String>) {
 }
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 type PreparedPattern = (bool, bool, Vec<String>);
 type PreparedCache = HashMap<&'static str, PreparedPattern>;
 
-static PREPARED: OnceLock<Mutex<PreparedCache>> = OnceLock::new();
+/// Every strict sink pattern, across every language.
+///
+/// The strict sink table is per language and its rows are filtered at scan
+/// time, so the set of patterns is not statically known. It is walked here once
+/// to fill the prepared cache, which is what lets the hot path stay lock free.
+fn strict_sinks_all() -> Vec<&'static str> {
+    SSRF_SINKS
+        .iter()
+        .chain(NOSQL_SINKS.iter())
+        .map(|s| s.pattern)
+        .collect()
+}
 
 /// Expand alternation groups like (a|b|c) into concrete patterns.
 /// Handles multiple flat groups; nested groups are supported one level deep.
