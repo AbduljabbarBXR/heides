@@ -327,8 +327,71 @@ pub fn endpoints(files: &[String], root: &Path) -> Vec<Endpoint> {
     out
 }
 
+/// Join a registration with the lines its body spans, so a multi line route is
+/// scanned at all.
+///
+/// The scanner read one line at a time, which is why
+/// `app.post('/users', async (req, res) => {` on one line with its body on the
+/// next three was not a route at all: the closing of the call never appeared on
+/// the line the registration started on. That is the shape Express emits by
+/// default once a handler has a body, so the omission was most real routes.
+///
+/// Lines are only joined while brackets stay open, so unrelated code between two
+/// registrations is never merged into one blob.
+fn logical_lines(body: &str) -> Vec<(usize, String)> {
+    let lines: Vec<&str> = body.lines().collect();
+    let mut out: Vec<(usize, String)> = Vec::new();
+    let mut i = 0usize;
+    while i < lines.len() {
+        let start = i;
+        let mut buf = String::new();
+        let mut depth = 0i32;
+        // Accumulate until the brackets balance. A line with no open bracket is
+        // already complete, so the common one line registration is never joined to
+        // whatever happens to follow it.
+        while let Some(l) = lines.get(i) {
+            if !buf.is_empty() {
+                buf.push('\n');
+            }
+            buf.push_str(l);
+            depth += bracket_delta(l);
+            i += 1;
+            if depth <= 0 {
+                break;
+            }
+        }
+        out.push((start, buf));
+    }
+    out
+}
+
+/// Net bracket movement in a line, ignoring brackets inside strings and comments
+/// well enough for the shapes that matter here.
+fn bracket_delta(line: &str) -> i32 {
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut prev_backslash = false;
+    for ch in line.chars() {
+        match quote {
+            Some(q) => {
+                if ch == q && !prev_backslash {
+                    quote = None;
+                }
+                prev_backslash = ch == '\\';
+            }
+            None => match ch {
+                '\'' | '"' | '`' => quote = Some(ch),
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                _ => {}
+            },
+        }
+    }
+    depth
+}
+
 fn scan_js_endpoints(body: &str, file: &str, out: &mut Vec<Endpoint>) {
-    for (i, line) in body.lines().enumerate() {
+    for (i, line) in logical_lines(body) {
         let trimmed = line.trim_start();
         for router in JS_ROUTERS {
             for verb in JS_VERBS {
@@ -359,11 +422,101 @@ fn scan_js_endpoints(body: &str, file: &str, out: &mut Vec<Endpoint>) {
 /// any middleware, while the path is the first string literal. Both are
 /// required: a registration with no recognisable path is not something to
 /// report, since inventing one would put a wrong answer in an agent's hands.
+/// The handler an inline route expression reaches, when the registration has no
+/// named handler to point at.
+///
+/// `app.post('/users', async (req, res) => { await svc.insertUser(req.body.id) })`
+/// is not a route with no handler, it is a route whose handler is an expression.
+/// Reporting nothing for it made the API graph claim the endpoint does not exist,
+/// which is the worst failure mode this tool has: an agent reads the absence and
+/// concludes the feature is not implemented.
+///
+/// So the calls made inside the expression body are read, and the first one that
+/// looks like service or model access becomes the handler. A heuristic is being
+/// used here, so two things guard it:
+///
+///   - Only a dotted call qualifies. A bare local call is not evidence of a
+///     handler, because it is usually something like `res.send(...)`.
+///   - The route must still have a recognisable path. Without one there is
+///     nothing to report, and inventing a path would be worse than reporting
+///     nothing at all.
+///
+/// The reported handler is the callee the route invokes, not a symbol standing
+/// for the anonymous function. That is a weaker claim than a named handler and it
+/// is stated as such in the endpoint's own file and line: the answer answers "what
+/// does this route act on", which is the question the caller asked. A traversal
+/// that cannot find that symbol then reports nothing reachable rather than
+/// inventing a chain.
+fn inline_handler(parts: &[String]) -> Option<(String, String)> {
+    let path = parts.iter().find_map(|p| {
+        let t = p.trim();
+        for quote in ['\'', '"', '`'] {
+            if let Some(rest) = t.strip_prefix(quote)
+                && let Some(end) = rest.find(quote)
+            {
+                return Some(rest[..end].to_string());
+            }
+        }
+        None
+    })?;
+    let last = parts.last()?.trim();
+    if !(last.contains("=>") || last.contains("function")) {
+        return None;
+    }
+    // The calls inside the body, in order. The first dotted one wins, because a
+    // route handler's first action is nearly always the thing it acts on.
+    // `str::split` takes one pattern, so a `['(', ')']` pattern matches that exact
+    // two character sequence rather than either character. Using a closure is the
+    // way to split on a set, and getting this wrong silently produced no chunks at
+    // all, which is why the middleware case reported nothing.
+    let chunks: Vec<&str> = last
+        .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$' || c == '.'))
+        .filter(|c| !c.is_empty())
+        .collect();
+    // Rejoin into `receiver.callee` pairs, since the split keeps the dot.
+    for chunk in chunks.iter().filter(|c| c.contains('.')) {
+        // `svc.insertUser` is receiver, dot, callee. The callee is what a
+        // traversal can look up, so that is what is reported; the receiver is
+        // only used to decide whether the call leaves the handler.
+        let mut parts = chunk.split('.');
+        let receiver = parts.next().unwrap_or("").trim();
+        let Some(callee) = parts.next().map(|c| {
+            c.chars()
+                .take_while(|ch| ch.is_alphanumeric() || *ch == '_' || *ch == '$')
+                .collect::<String>()
+        }) else {
+            continue;
+        };
+        if callee.is_empty() || receiver.is_empty() {
+            continue;
+        }
+        // `res.json`, `console.log` and friends are how a handler talks back to the
+        // caller, not what it acts on. Following them would answer a question
+        // nobody asked.
+        if matches!(
+            receiver,
+            "res" | "response" | "console" | "req" | "request" | "next" | "this" | "self"
+        ) {
+            continue;
+        }
+        return Some((path, callee));
+    }
+    None
+}
+
 fn split_route_args(args: &str) -> Option<(String, String)> {
     let trimmed = args.trim_start();
     let inner = trimmed.strip_prefix('(').unwrap_or(trimmed);
     let (inner, _) = balanced_slice(inner);
     let parts = split_top_level(inner);
+    // An inline handler is the commonest Express shape and it has no name. So when
+    // the last argument is an arrow or function expression, read the calls it
+    // makes and take the first service-looking one. That is a weaker answer than
+    // a named handler, and it is why the endpoint carries the inline label rather
+    // than pretending a symbol was found.
+    if let Some((path, inline)) = inline_handler(&parts) {
+        return Some((path, inline));
+    }
 
     let path = parts.iter().find_map(|p| {
         let t = p.trim();

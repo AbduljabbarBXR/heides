@@ -305,3 +305,165 @@ fn a_depth_limit_stops_a_deep_chain_without_hanging() {
     // Bounded either way, but it must return rather than loop.
     assert!(got.len() <= 1, "depth limited, got {got:?}");
 }
+
+// ------------------------------------------- inline handlers, the real shape
+//
+// An Express route with the handler written inline across several lines is the
+// commonest shape in modern Express, and the API graph reported `no route here`
+// for every one of them. A flagship feature that silently under-reports is worse
+// than one that is absent, because an agent trusts the absence and concludes the
+// route does not exist.
+//
+// The scanner was line based, so a handler whose body crossed a line boundary was
+// simply not a route. These pin the shapes that broke.
+
+/// The exact file that failed against the published 0.22.0 binary.
+#[test]
+fn a_multi_line_inline_arrow_handler_is_an_endpoint() {
+    let dir = fixture("inline-arrow-multiline");
+    write(
+        &dir,
+        "routes/users.js",
+        "const express = require('express');\n\
+         const svc = require('../service');\n\
+         const app = express();\n\
+         app.post('/users', async (req, res) => {\n\
+         \x20 const row = await svc.insertUser(req.body.id);\n\
+         \x20 res.json(row);\n\
+         });\n\
+         module.exports = app;\n",
+    );
+    write(
+        &dir,
+        "service.js",
+        "function insertUser(data) { return prisma.user.create({ data }); }\n",
+    );
+    write(
+        &dir,
+        "schema.sql",
+        "CREATE TABLE users (id int primary key);\n",
+    );
+
+    let got = tables_for(&dir, "POST", "/users");
+    assert!(
+        got.contains(&"users".to_string()),
+        "an inline handler must resolve to its table, got {:?}",
+        got
+    );
+}
+
+#[test]
+fn a_single_line_inline_arrow_handler_is_an_endpoint() {
+    let dir = fixture("inline-arrow-oneline");
+    write(
+        &dir,
+        "routes/users.js",
+        "const app = require('express')();\n\
+         const svc = require('../service');\n\
+         app.post('/users', (req, res) => svc.insertUser(req.body.id));\n",
+    );
+    write(
+        &dir,
+        "service.js",
+        "function insertUser(data) { return prisma.user.create({ data }); }\n",
+    );
+    write(
+        &dir,
+        "schema.sql",
+        "CREATE TABLE users (id int primary key);\n",
+    );
+
+    let got = tables_for(&dir, "POST", "/users");
+    assert!(got.contains(&"users".to_string()), "{got:?}");
+}
+
+/// The benign twin. A function that merely mentions a path is not a route, and
+/// reporting it would put a fabricated endpoint in an agent's hands.
+#[test]
+fn a_call_that_is_not_a_route_stays_quiet() {
+    let dir = fixture("not-a-route");
+    write(
+        &dir,
+        "app.js",
+        "const svc = require('./service');\n\
+         function load() {\n\
+         \x20 log('/users', svc.insertUser);\n\
+         \x20 const x = cfg.get('/settings');\n\
+         }\n",
+    );
+    write(
+        &dir,
+        "service.js",
+        "function insertUser(data) { return prisma.user.create({ data }); }\n",
+    );
+    write(
+        &dir,
+        "schema.sql",
+        "CREATE TABLE users (id int primary key);\n",
+    );
+
+    let got = tables_for(&dir, "POST", "/users");
+    assert!(
+        got.is_empty(),
+        "no route was registered, so nothing may be reported: {got:?}"
+    );
+}
+
+/// Middleware between the path and an inline handler is ordinary Express, and the
+/// handler is still the last argument.
+#[test]
+fn an_inline_handler_behind_middleware_is_an_endpoint() {
+    let dir = fixture("inline-behind-middleware");
+    write(
+        &dir,
+        "routes/admin.js",
+        "const app = require('express')();\n\
+         const svc = require('../service');\n\
+         app.post('/users', requireAuth, async (req, res) => {\n\
+         \x20 res.json(await svc.insertUser(req.body.id));\n\
+         });\n",
+    );
+    write(
+        &dir,
+        "service.js",
+        "function insertUser(data) { return prisma.user.create({ data }); }\n",
+    );
+    write(
+        &dir,
+        "schema.sql",
+        "CREATE TABLE users (id int primary key);\n",
+    );
+
+    let got = tables_for(&dir, "POST", "/users");
+    assert!(
+        got.contains(&"users".to_string()),
+        "middleware must not hide the handler: {got:?}"
+    );
+}
+
+/// A named handler on its own line, the shape that already worked, must keep
+/// working. A fix that only handles the new shape would be a regression.
+#[test]
+fn a_named_handler_still_resolves() {
+    let dir = fixture("inline-named-control");
+    write(
+        &dir,
+        "routes/users.js",
+        "const router = require('express').Router();\n\
+         router.post('/users', createUser);\n\
+         function createUser(req, res) { return insertUser(req.body); }\n",
+    );
+    write(
+        &dir,
+        "service.js",
+        "function insertUser(data) { return prisma.user.create({ data }); }\n",
+    );
+    write(
+        &dir,
+        "schema.sql",
+        "CREATE TABLE users (id int primary key);\n",
+    );
+
+    let got = tables_for(&dir, "POST", "/users");
+    assert!(got.contains(&"users".to_string()), "{got:?}");
+}
