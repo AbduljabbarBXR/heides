@@ -278,6 +278,38 @@ fn leading_spaces(line: &str) -> usize {
 
 /// True when this file is test code, or this line sits inside a test module.
 ///
+/// The module does not end at the first closing brace. Walking backwards and
+/// bailing on the first `}` finds the end of the *previous test function*,
+/// which is the most common brace in the file, and concludes it left test
+/// scope. In heides' own source that turned 127 `unwrap` warnings into
+/// findings when most are inside `#[cfg(test)] mod tests` in `src/`.
+///
+/// The rule has to count braces rather than trip on the first one.
+#[test]
+fn a_brace_inside_a_test_module_does_not_end_it() {
+    let src = "#[cfg(test)]\nmod tests {\n    use super::*;\n    #[test]\n    fn one() {\n        a.unwrap()\n    }\n\n    #[test]\n    fn two() {\n        y.unwrap()\n    }\n}\nfn production() {\n    b.unwrap()\n}\n";
+    let lines: Vec<&str> = src.lines().collect();
+    let at = lines.iter().position(|l| l.contains("y.unwrap()")).unwrap();
+    assert!(
+        is_test_context(std::path::Path::new("src/thing.rs"), &lines, at),
+        "a brace closing a sibling test fn must not end the test module"
+    );
+}
+
+/// The negative: after the module closes, code is real again. A fix that
+/// simply treats everything after the first `mod tests` as test code would
+/// suppress every finding in the rest of the file.
+#[test]
+fn code_after_the_test_module_is_real_code() {
+    let src = "#[cfg(test)]\nmod tests {\n    fn one() {\n        a.unwrap()\n    }\n}\nfn production() {\n    b.unwrap()\n}\n";
+    let lines: Vec<&str> = src.lines().collect();
+    let at = lines.iter().position(|l| l.contains("b.unwrap()")).unwrap();
+    assert!(
+        !is_test_context(std::path::Path::new("src/thing.rs"), &lines, at),
+        "production code after the test module must not be suppressed"
+    );
+}
+
 /// A `#[cfg(test)]` module or a `tests/` path holds assertions about the code,
 /// not code that runs in production. Flagging an `unwrap` there says nothing
 /// about the shipped binary, and 41 of the 152 findings on this repository were
@@ -293,20 +325,43 @@ pub(crate) fn is_test_context(path: &Path, lines: &[&str], at: usize) -> bool {
     {
         return true;
     }
-    // Walk back to the start of the enclosing item. `mod tests` with the usual
-    // `#[cfg(test)]` attribute above it is the shape almost every Rust file uses.
-    let mut i = at;
-    while i > 0 {
-        i -= 1;
-        let t = lines[i].trim_start();
-        if t.starts_with('}') {
-            // Left the module, so we are back in the parent scope.
-            return false;
+    // Scan forward and track which modules are open at `at`.
+    //
+    // Every earlier version of this walked backwards and looked for the nearest
+    // `mod`, bail point or brace, and each one got a case wrong. Walking back from
+    // a line inside `#[cfg(test)] mod tests` finds the end of the *previous test
+    // function*, which is the commonest brace in the file, and concludes the
+    // module ended there. On heides' own source that mislabelled most of 127
+    // `unwrap` warnings, in the tool's own test modules.
+    //
+    // Forward is unambiguous: a module is open at a line if its braces opened
+    // before it and have not closed yet. Modules are pushed and popped with the
+    // depth, so a sibling module later in the file cannot be mistaken for an
+    // enclosing one.
+    let mut depth: i32 = 0;
+    // Depth at which each currently open module began, and whether it is a test
+    // module. Parallel vectors rather than a tuple stack, so the pop is readable.
+    let mut open_at: Vec<i32> = Vec::new();
+    let mut is_test: Vec<bool> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim_start();
+        let opens = t.matches('{').count() as i32;
+        let closes = t.matches('}').count() as i32;
+        if opens > 0 && (t.starts_with("mod ") || t.starts_with("pub mod ")) {
+            open_at.push(depth);
+            is_test.push(lines[i].contains("cfg(test)") || t.contains("tests"));
         }
-        if (t.starts_with("mod ") || t.starts_with("pub mod "))
-            && (lines[i].contains("cfg(test)") || t.contains("tests"))
-        {
-            return true;
+        depth += opens - closes;
+        while let Some(d) = open_at.last() {
+            if depth <= *d {
+                open_at.pop();
+                is_test.pop();
+            } else {
+                break;
+            }
+        }
+        if i == at {
+            return is_test.iter().any(|t| *t);
         }
     }
     false
