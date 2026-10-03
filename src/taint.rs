@@ -18,7 +18,7 @@ pub struct TaintReport {
 /// Source patterns per language, user input entry points. Shared with the
 /// interprocedural engine, which reads the same rows so the two layers can
 /// never disagree about what a source is.
-pub(crate) const SOURCES: [(&str, &str); 16] = [
+pub(crate) const SOURCES: [(&str, &str); 32] = [
     (
         "javascript",
         r"\b(req|request)\.(query|params|body|headers|cookies)\b",
@@ -65,12 +65,73 @@ pub(crate) const SOURCES: [(&str, &str); 16] = [
     // the pattern silently stops matching anything.
     ("ruby", r"\bparams\s*["),
     ("ruby", r"\brequest\s*\.\s*(GET|POST|params|body|cookies)\b"),
+    // C and C++. `getenv` is the canonical untrusted input in C: it is the
+    // environment, which on a web service is attacker controlled often enough
+    // that treating it as a source is the safe default. `scanf` reads from a
+    // stream rather than the environment but is the same class of taint.
+    //
+    // `argv` is included: command line arguments reach a fixed size buffer in
+    // real programs often enough that the copy is the thing worth seeing.
+    ("c", r"\bgetenv\s*\("),
+    ("c", r"\bsecure_getenv\s*\("),
+    ("c", r"\bgetenv_s\s*\("),
+    ("c", r"\bread\s*\(\s*0\s*\)"),
+    ("c", r"\bfgets\s*\("),
+    ("c", r"\bgetline\s*\("),
+    ("c", r"\bargv\b"),
+    ("c", r"\benviron\b"),
+    ("c", r"\bread\s*\(\s*STDIN_FILENO"),
+    ("c", r"\brecv\s*\("),
+    ("cpp", r"\bgetenv\s*\("),
+    ("cpp", r"\bsecure_getenv\s*\("),
+    ("cpp", r"\bcin\s*>>"),
+    ("cpp", r"\bstd::cin\b"),
+    ("cpp", r"\bgetline\s*\("),
+    ("cpp", r"\bargv\b"),
 ];
 
 /// Sinks are per language. Where a name is ambiguous between SQL and something
 /// harmless, it only counts when it is called on a database-ish receiver, so
 /// `run(` in a task runner stays silent while `db.run(` is SQL.
 pub(crate) const SINKS: &[(&str, &str, &str)] = &[
+    // C and C++. Memory corruption is the dominant class in these languages and
+    // it was entirely absent before: heides indexed no C at all, so a `strcpy`
+    // into a fixed buffer was invisible to every layer.
+    //
+    // The unbounded copies are named individually rather than as a group because
+    // `strcpy` with an attacker controlled source is a stack smash and `strncpy`
+    // is frequently the safe choice. A single `(strcpy|strcat|sprintf)` row would
+    // put a critical on code that is fine.
+    ("c", r"\bstrcpy\s*\(", "unbounded copy"),
+    ("c", r"\bstrcat\s*\(", "unbounded copy"),
+    ("c", r"\bsprintf\s*\(", "unbounded format"),
+    ("c", r"\bgets\s*\(", "unbounded read"),
+    ("c", r"\bscanf\s*\(", "unbounded read"),
+    ("c", r"\bfscanf\s*\(", "unbounded read"),
+    ("c", r"\bmemcpy\s*\(", "memory copy"),
+    ("c", r"\bmemmove\s*\(", "memory copy"),
+    ("c", r"\bprintf\s*\(", "format"),
+    ("c", r"\bfprintf\s*\(", "format"),
+    // The command and query families, so a C project is not silently unanalysed
+    // just because its hazards are spelled differently.
+    ("c", r"\bsystem\s*\(", "shell"),
+    ("c", r"\bpopen\s*\(", "shell"),
+    ("c", r"\bexeclp?\s*\(", "exec"),
+    ("c", r"\bexecvp?\s*\(", "exec"),
+    ("c", r"\b(fopen|open)\s*\(", "filesystem"),
+    ("c", r"\b(sqlite3_exec|sqlite3_prepare)\s*\(", "SQL"),
+    ("c", r"\balloca\s*\(", "stack allocation"),
+    ("c", r"\bdlopen\s*\(", "dynamic load"),
+    // C++ shares every C row, plus its own.
+    ("cpp", r"\bstrcpy\s*\(", "unbounded copy"),
+    ("cpp", r"\bstrcat\s*\(", "unbounded copy"),
+    ("cpp", r"\bsprintf\s*\(", "unbounded format"),
+    ("cpp", r"\bgets\s*\(", "unbounded read"),
+    ("cpp", r"\bmemcpy\s*\(", "memory copy"),
+    ("cpp", r"\bsystem\s*\(", "shell"),
+    ("cpp", r"\bpopen\s*\(", "shell"),
+    ("cpp", r"\b(fopen|open)\s*\(", "filesystem"),
+    ("cpp", r"\bstd::(system|popen)\s*\(", "shell"),
     ("javascript", r"\b(query|execute|exec)\s*\(", "SQL"),
     (
         "javascript",

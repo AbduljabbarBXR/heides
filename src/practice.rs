@@ -539,6 +539,8 @@ fn secret_assignment(line: &str) -> bool {
 
 /// Scan one source file for practice issues.
 pub fn scan_file(path: &Path, content: &str, lang: &str) -> Vec<PracticeReport> {
+    // Computed once per file, not once per line. See `test_module_lines`.
+    let test_lines = test_module_lines(content);
     let mut reports = Vec::new();
     let lines: Vec<&str> = content.lines().collect();
     let has_definitions = lines.iter().any(|l| {
@@ -706,7 +708,7 @@ pub fn scan_file(path: &Path, content: &str, lang: &str) -> Vec<PracticeReport> 
         }
         // Value shaped credentials fire first so a correctly named secret is
         // reported once with the specific reason rather than the generic one.
-        let in_test = in_test_module(content, line_no);
+        let in_test = in_test_line(&test_lines, line_no);
         let value_shaped = if in_test {
             // Inside a `#[cfg(test)]` module a credential shape is a fixture by
             // construction. Reported as nothing rather than downgraded, because a
@@ -803,47 +805,44 @@ fn is_comment_line(line: &str) -> bool {
 /// is `src/` rather than `tests/`, every one of those fixtures was reported as a
 /// leaked key. A scanner that flags its own unit tests gets muted by whoever runs
 /// it, and this is the same class of finding as the truncated ones.
-fn in_test_module(body: &str, line_no: u64) -> bool {
+/// A precomputed map of which lines sit inside a test module.
+///
+/// This exists because the first version asked the question per line, and each
+/// question re-walked the whole file and re-scanned every module declaration. On a
+/// 400 file C++ corpus that made `practice::scan_file` 130 seconds of a 144 second
+/// check: quadratic in the lines of each file, which is a cost I introduced while
+/// fixing the credential false positives.
+///
+/// The answer does not change between lines, so it is computed once per file and
+/// then looked up. Same question, same answer, one pass.
+fn test_module_lines(body: &str) -> Vec<bool> {
     let lines: Vec<&str> = body.lines().collect();
-    let idx = line_no.saturating_sub(1) as usize;
-    if idx >= lines.len() {
-        return false;
+    let mut out = vec![false; lines.len()];
+    if lines.is_empty() {
+        return out;
     }
-    // The reliable signal is the brace depth of the target line, counted forward
-    // from the top of the file. Walking backwards and trying to spot the closing
-    // brace of the enclosing block fails on the first `}` it meets, which is the
-    // end of the previous function rather than the end of the module.
-    //
-    // So: compute the depth at the target, then scan forward from the top for a
-    // `mod` declaration whose opening brace lands at a lower depth, and check
-    // whether that mod is test gated. That is unambiguous and cheap.
+    // Brace depth at the start of each line, counted forward once.
     let mut depth_at = vec![0i32; lines.len() + 1];
     let mut depth = 0i32;
     for (n, line) in lines.iter().enumerate() {
         depth_at[n] = depth;
         let t = line.trim();
-        // Braces inside a string or a char literal are not structure. Only the
-        // common cases are handled, because a miscount here would misclassify a
-        // test as first party code, which is the safe direction.
         let mut in_str = false;
         let mut prev = '\0';
         for ch in t.chars() {
             match ch {
                 '"' if prev != '\\' => in_str = !in_str,
-                '{' | '}' if !in_str => {
-                    if ch == '{' {
-                        depth += 1;
-                    } else {
-                        depth -= 1;
-                    }
-                }
+                '{' if !in_str => depth += 1,
+                '}' if !in_str => depth -= 1,
                 _ => {}
             }
             prev = ch;
         }
     }
-    let target_depth = depth_at[idx];
-    // Scan forward for a module declaration that encloses the target.
+    // Every module declaration that looks like a test module, with the range it
+    // covers. A declaration at a shallower depth than the body is the enclosing
+    // one; the end is where its braces balance back to where they started.
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
     for (n, line) in lines.iter().enumerate() {
         let t = line.trim();
         let Some(rest) = t.strip_prefix("mod ") else {
@@ -853,13 +852,7 @@ fn in_test_module(body: &str, line_no: u64) -> bool {
         if name != "tests" && !name.ends_with("tests") {
             continue;
         }
-        // This mod must sit at a depth strictly below the target, and its body
-        // must extend past the target line.
-        if depth_at[n] >= target_depth {
-            continue;
-        }
-        // Find where this mod ends.
-        let mut d = 0i32;
+        let mut d = depth_at[n];
         let mut end = lines.len();
         for (m, l) in lines.iter().enumerate().skip(n) {
             let lt = l.trim();
@@ -868,21 +861,27 @@ fn in_test_module(body: &str, line_no: u64) -> bool {
             }
             d += lt.matches('{').count() as i32;
             d -= lt.matches('}').count() as i32;
-            if d <= 0 && m > n {
+            if d <= depth_at[n] && m > n {
                 end = m;
                 break;
             }
         }
-        if idx > n && idx < end {
-            // Test gated by attribute, or by living under src/ where every mod
-            // named tests is a test module.
-            let gated = n > 0 && lines[n - 1].trim().starts_with("#[cfg(test)]");
-            if gated || name == "tests" || name.ends_with("tests") {
-                return true;
-            }
+        ranges.push((n + 1, end));
+    }
+    for (a, b) in ranges {
+        for slot in out.iter_mut().take(b).skip(a) {
+            *slot = true;
         }
     }
-    false
+    out
+}
+
+/// Whether a 1-based line number is inside a test module.
+fn in_test_line(test_lines: &[bool], line_no: u64) -> bool {
+    test_lines
+        .get(line_no.saturating_sub(1) as usize)
+        .copied()
+        .unwrap_or(false)
 }
 
 fn is_test_path(path: &Path) -> bool {
@@ -1578,7 +1577,7 @@ mod inmodule_tests {
         let src = body();
         let line = 5u64; // the `let x = ...` line
         assert!(
-            in_test_module(&src, line),
+            in_test_line(&test_module_lines(&src), line),
             "line 5 is inside mod tests and must be recognised"
         );
     }
@@ -1589,7 +1588,7 @@ mod inmodule_tests {
     fn a_credential_in_first_party_code_is_not_test_code() {
         let src = "fn helper() {\n    let api_key = \"AKIAIOSFODNN7EXAMPLE1\";\n}\n";
         assert!(
-            !in_test_module(src, 2),
+            !in_test_line(&test_module_lines(src), 2),
             "line 2 is ordinary code and must not be excused"
         );
     }
@@ -1599,6 +1598,9 @@ mod inmodule_tests {
     #[test]
     fn a_non_test_module_does_not_capture() {
         let src = "mod helpers {\n    pub fn f() {\n        let k = \"AKIAIOSFODNN7EXAMPLE1\";\n    }\n}\n";
-        assert!(!in_test_module(src, 3), "mod helpers is not a test module");
+        assert!(
+            !in_test_line(&test_module_lines(src), 3),
+            "mod helpers is not a test module"
+        );
     }
 }
