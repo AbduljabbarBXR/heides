@@ -357,6 +357,25 @@ pub fn check_workspace_with_database(root: &Path) -> Vec<GuardReport> {
 /// end with a total in seconds. Nothing prints per file except the slowest few,
 /// which are a ranked list rather than a stream. Output goes to stderr so
 /// machine readable stdout stays clean.
+/// Fixpoint steps the interprocedural pass may take before it stops and reports.
+///
+/// Sized from measurement rather than taste: the pass cost 0.13s at 180 files and
+/// 58.92s at 312 on a real corpus, so the growth is concentrated above roughly 300
+/// files. The budget is a ceiling on work, not a guess at a time, because work is
+/// what actually scales and a time limit would vary by machine.
+///
+/// Generous enough that ordinary repositories never reach it. The point is that
+/// pathological graphs terminate with a receipt rather than hanging.
+const DEFAULT_INTERPROC_BUDGET: usize = 400_000;
+
+fn interproc_budget() -> usize {
+    std::env::var("HEIDES_INTERPROC_BUDGET")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_INTERPROC_BUDGET)
+}
+
 #[derive(Default)]
 struct LayerTimes {
     /// Whether HEIDES_TIMING is set. Stored rather than re-read, because every
@@ -563,9 +582,29 @@ pub fn check_workspace_without_deps(graph: &CodeGraph) -> Vec<GuardReport> {
     times.emit_worst();
 
     let t = std::time::Instant::now();
-    let out = crate::interproc::run_workspace(graph, &contents);
+    let ws = crate::interproc::run_workspace_bounded(graph, &contents, interproc_budget());
     times.interproc_s = t.elapsed().as_secs_f64();
     times.emit("interproc::run_workspace", times.interproc_s);
+    let out = ws.reports;
+    if ws.truncated {
+        // Never silent. A bounded pass that said nothing would report a clean
+        // workspace over code it never analysed, which is the one outcome this
+        // tool must not produce.
+        reports.push(GuardReport {
+            guard: "security.taint.truncated".to_string(),
+            severity: "warning".to_string(),
+            message: format!(
+                "interprocedural taint analysis stopped after {} steps at a work budget of {}: \
+                 cross function flows beyond this point were not followed. \
+                 Raise HEIDES_INTERPROC_BUDGET to analyse more, or accept that \
+                 cross function taint is partially reported.",
+                ws.steps,
+                interproc_budget()
+            ),
+            file: String::new(),
+            line: 0,
+        });
+    }
     for r in out {
         reports.push(GuardReport {
             guard: "security.taint".to_string(),
