@@ -2,6 +2,18 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.24.0
+
+C and C++ are indexed, Ruby is indexed, and the offline opt-out now actually opts out.
+
+* **C and C++ are indexed, with the memory safety class they need.** Before this, a `main.c` containing `strcpy` indexed zero files, because there was no grammar. `strcpy` of a `getenv` value is now a critical finding and `strcpy` of a literal stays silent.
+* **Ruby is indexed,** and a test roundtrip is no longer called a critical. Reporting a thing that is correct behaviour as critical is how a scanner teaches people to ignore it.
+* **`--no-deps` and `HEIDES_OFFLINE` still made live requests.** The flags parsed correctly and `deps_enabled()` was correct and unit tested; nothing on the `deps` code path ever called it, which is exactly why every test for the flag passed while the command ignored it. An opt out that silently does nothing is worse than no opt out, because it is the control a privacy conscious user reaches for and then trusts. Found by running it rather than reading it: a cold cache with `HEIDES_OFFLINE=1` still returned a live advisory for a known vulnerable version.
+* **The gate is at the single entry point `heides deps` calls,** and it states the skip rather than returning an empty result, because silence here reads as "no vulnerabilities". `advisories_ok` is false, since a run that checked nothing has not established there is nothing to find. A project with no manifests still reports no manifests found and keeps `advisories_ok` true, because nothing to check is not a failure of the check.
+* **`DEPS_OVERRIDE` was one `Mutex<Option<bool>>` for the whole process,** so tests calling `set_deps_enabled` raced each other and the first version of the gate test failed by observing another test's value. The opt out is a parameter now, so it is testable without touching global state.
+* **The memory safety sink class renders its article correctly.** The C rule hardcoded "a" where every other taint rule calls the helper, so it read "a unbounded copy sink".
+* Verified live in three directions: `heides deps --no-deps .` skips with no lookup, `heides deps .` finds a live advisory, `heides deps <empty dir>` reports no manifests found.
+
 ## 0.23.0
 
 The interprocedural budget did not bound the work, so the receipt it promised never fired. Three corrections, one of them mine.
