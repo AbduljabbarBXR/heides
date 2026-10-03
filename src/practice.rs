@@ -76,6 +76,23 @@ const VALUE_SHAPED_CREDENTIALS: [(&str, &str); 13] = [
 /// appeared anywhere after the `=`, and so did a variable literally named
 /// `comment`. Prose about a credential is not a credential.
 fn value_shaped_credential(line: &str) -> Option<&'static str> {
+    // A PEM header is the exception to the assignment rule below. A private key
+    // file contains `-----BEGIN RSA PRIVATE KEY-----` on a line of its own, with no
+    // `=` and no quote anywhere on it, so requiring an assignment meant a committed
+    // key file was never reported by this rule at all. It is unambiguous on its own,
+    // so it is checked before the assignment is required.
+    //
+    // Found by running heides on its own source and then writing a test for the
+    // shape: the rule was structurally unable to see the most recognisable secret
+    // format there is.
+    // The line must BE a PEM header, not merely mention one. A first version
+    // tested for the two markers anywhere on the line, which made the scanner
+    // report its own rule source: `if line.contains("-----BEGIN") &&` is a
+    // comparison, not a key. A real header opens the line and closes it.
+    let t = line.trim();
+    if t.starts_with("-----BEGIN") && t.ends_with("-----") && t.contains("PRIVATE KEY") {
+        return Some("private key block");
+    }
     // Only the region after a real assignment, so function bodies and
     // comparisons cannot fire it.
     let at = line.find(['=', ':'])?;
@@ -121,7 +138,7 @@ fn value_shaped_credential(line: &str) -> Option<&'static str> {
                     w[pos + needle.len()..].len() >= MIN_TOKEN_TAIL
                 })
         };
-        if ok {
+        if ok && !is_placeholder_value(inner) {
             return Some(reason);
         }
     }
@@ -287,6 +304,100 @@ fn null_pointer(line: &str) -> Option<&'static str> {
 /// name must not be a dotted config path, and the value must be a non empty
 /// quoted literal that is not an interpolated template. Labels, attributes,
 /// type declarations, env reads and config path keys stay silent.
+/// Reject a value that is a fixture, a placeholder or a reference rather than a
+/// live credential. Shared by both credential rules so they cannot drift again.
+///
+/// The drift was real and it was found by running heides on its own source: four
+/// critical findings, every one of them a truncated test fixture such as
+/// `"AKIAIO...MPLE"`. `secret_assignment` rejected an ellipsis and
+/// `value_shaped_credential` did not, so the same string was simultaneously treated
+/// as a non-credential and as a critical.
+///
+/// Every branch is a *necessary* condition for a live credential, not a preference.
+/// A real key cannot be truncated with an ellipsis, cannot be a bare env reference,
+/// cannot end in a file extension, and cannot be prose with spaces in it. Anything
+/// that would fire on a real key would be a false positive, so the list is
+/// deliberately short and each entry states why.
+fn is_placeholder_value(content: &str) -> bool {
+    // A truncated fixture: `AKIA...MPLE`, `sk-pro...f7a8`. A real key is one
+    // unbroken run of characters, so an ellipsis means it was shortened on purpose
+    // for a test or a document. Both the three dot form and the single character
+    // form are covered, because both appear in the wild.
+    if content.contains("...") || content.contains('…') {
+        return true;
+    }
+    // Placeholder tokens. Only the leading token is compared, so a real key that
+    // merely contains "test" somewhere later still fires.
+    let first = content
+        .split(['-', '_', ' '])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let first = first.trim_end_matches(|c: char| c.is_ascii_digit());
+    if matches!(
+        first,
+        "test"
+            | "dummy"
+            | "example"
+            | "fake"
+            | "your"
+            | "sample"
+            | "demo"
+            | "mock"
+            | "changeme"
+            | "placeholder"
+            | "xxxx"
+            | "invalid"
+            | "redacted"
+            | "todo"
+    ) {
+        return true;
+    }
+    // Environment references, chat template tokens and redaction markers.
+    if content.starts_with("{env") || content.contains("<|") || content.contains("REDACTED") {
+        return true;
+    }
+    // A file name or an endpoint is a reference, not a secret. A PEM body keeps its
+    // leading marker and its trailing padding, so both stay allowed.
+    if content.ends_with(".json")
+        || content.ends_with(".yaml")
+        || content.ends_with(".yml")
+        || content.ends_with(".toml")
+        || content.ends_with(".txt")
+        || content.ends_with(".csv")
+        || content.ends_with(".pem")
+        || content.ends_with(".crt")
+        || content.ends_with(".key")
+        || content.ends_with(".p12")
+        || content.ends_with(".env")
+    {
+        return true;
+    }
+    // A URL is a reference, except when the URL *is* the credential. A Slack
+    // incoming webhook is a live secret and it is matched by shape rather than by
+    // a provider prefix, so the generic URL rejection must not swallow it. Without
+    // this carve out, sharing one gate between both rules would introduce a false
+    // negative, which is worse than the false positive this gate was added to fix.
+    // One predicate for "this URL is itself the secret", so the two rules below
+    // cannot disagree. A Slack incoming webhook is a live credential that happens
+    // to be shaped like a URL, and it carries a slash after the host as well as a
+    // scheme, so a carve out on only one of these two rules left it reported as a
+    // false positive by one rule and suppressed as a fixture by the other. That
+    // inconsistency is worse than either answer on its own.
+    let is_secret_url = content.contains("hooks.slack.com/services/");
+    if content.contains("://") && !is_secret_url {
+        return true;
+    }
+    if content.contains('/')
+        && !is_secret_url
+        && !content.starts_with("-----")
+        && !content.ends_with('=')
+    {
+        return true;
+    }
+    false
+}
+
 fn secret_assignment(line: &str) -> bool {
     let bytes = line.as_bytes();
     let mut op: Option<usize> = None;
@@ -387,69 +498,12 @@ fn secret_assignment(line: &str) -> bool {
     // Fixture and placeholder values. Truncated keys carry an ellipsis,
     // dummy keys start with a clearly fake marker token. Values that merely
     // contain such a token later, like sk_test keys, still fire.
-    if content.contains("...") {
-        return false;
-    }
-    // The guard compares the leading placeholder token, so `changeme123` and
-    // `dummy_2024` stay silent the way `changeme` does. Only the token before
-    // the first separator is checked, not the whole value.
-    let first = content
-        .split(['-', '_', ' '])
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    // A trailing digit suffix is common on placeholder values, and
-    // `changeme123` was a real false positive before this check existed.
-    let first = first
-        .trim_end_matches(|c: char| c.is_ascii_digit())
-        .to_string();
-    if matches!(
-        first.as_str(),
-        "test"
-            | "dummy"
-            | "example"
-            | "fake"
-            | "your"
-            | "sample"
-            | "demo"
-            | "mock"
-            | "changeme"
-            | "placeholder"
-            | "xxxx"
-            | "invalid"
-    ) {
+    if is_placeholder_value(content) {
         return false;
     }
     // Prose and display labels are not credentials. Real keys never carry
     // a space, except PEM headers which keep their leading marker.
     if content.contains(' ') && !content.starts_with("-----") {
-        return false;
-    }
-    // Quoted env references, chat template tokens and file names are
-    // references, not credentials.
-    if content.starts_with("{env") || content.contains("<|") || content.contains("[REDACTED]") {
-        return false;
-    }
-    if content.ends_with(".json")
-        || content.ends_with(".yaml")
-        || content.ends_with(".yml")
-        || content.ends_with(".toml")
-        || content.ends_with(".txt")
-        || content.ends_with(".csv")
-        || content.ends_with(".pem")
-        || content.ends_with(".crt")
-        || content.ends_with(".key")
-        || content.ends_with(".p12")
-        || content.ends_with(".env")
-    {
-        return false;
-    }
-    // Endpoints and paths are not credentials. PEM bodies keep their
-    // leading marker or trailing padding and still fire.
-    if content.contains("://") {
-        return false;
-    }
-    if content.contains('/') && !content.starts_with("-----") && !content.ends_with('=') {
         return false;
     }
     // A lowercase word without a single digit or capital is a name, not a
@@ -652,7 +706,16 @@ pub fn scan_file(path: &Path, content: &str, lang: &str) -> Vec<PracticeReport> 
         }
         // Value shaped credentials fire first so a correctly named secret is
         // reported once with the specific reason rather than the generic one.
-        let value_shaped = value_shaped_credential(line);
+        let in_test = in_test_module(content, line_no);
+        let value_shaped = if in_test {
+            // Inside a `#[cfg(test)]` module a credential shape is a fixture by
+            // construction. Reported as nothing rather than downgraded, because a
+            // real key pasted into a test is the one case where a warning is
+            // enough and a critical trains people to ignore criticals.
+            None
+        } else {
+            value_shaped_credential(line)
+        };
         if let Some(reason) = value_shaped {
             // The same env read guards the keyword rule applies below. Without
             // them `AWS_ACCESS_KEY_ID = os.environ["AWS_ACCESS_KEY_ID"]` fired,
@@ -674,7 +737,8 @@ pub fn scan_file(path: &Path, content: &str, lang: &str) -> Vec<PracticeReport> 
                     &format!("{} hardcoded in source.", reason),
                 ));
             }
-        } else if secret_assignment(line)
+        } else if !in_test
+            && secret_assignment(line)
             && !is_comment_line(line)
             && !line.contains("process.env")
             && !line.contains("os.environ")
@@ -715,17 +779,112 @@ pub fn scan_file(path: &Path, content: &str, lang: &str) -> Vec<PracticeReport> 
 /// and config sketches inside comments are prose, not code.
 fn is_comment_line(line: &str) -> bool {
     let t = line.trim_start();
+    // A PEM header is not an SQL comment. `--` is a SQL line comment, so a
+    // `-----BEGIN RSA PRIVATE KEY-----` line was being classified as one and the
+    // credential rule skipped it, meaning a committed private key file was never
+    // reported at all. The dash run has to be exactly two, with no third, and a
+    // PEM block always has five or more.
+    let sql_comment = t.starts_with("--") && !t.starts_with("---");
     t.starts_with('#')
         || t.starts_with("//")
         || t.starts_with("/*")
         || t.starts_with("* ")
         || t.starts_with('%')
-        || t.starts_with("--")
+        || sql_comment
         || t.starts_with("<!--")
 }
 
 /// True when the path marks test code: a test directory segment or a test
 /// file name. Fixture and spec trees are where mock credentials live.
+/// True when a path is test code, or when the *line* is inside a test module.
+///
+/// The path check alone was not enough. `src/practice.rs` carries its own
+/// `#[cfg(test)] mod tests` with credential fixtures in it, and because the path
+/// is `src/` rather than `tests/`, every one of those fixtures was reported as a
+/// leaked key. A scanner that flags its own unit tests gets muted by whoever runs
+/// it, and this is the same class of finding as the truncated ones.
+fn in_test_module(body: &str, line_no: u64) -> bool {
+    let lines: Vec<&str> = body.lines().collect();
+    let idx = line_no.saturating_sub(1) as usize;
+    if idx >= lines.len() {
+        return false;
+    }
+    // The reliable signal is the brace depth of the target line, counted forward
+    // from the top of the file. Walking backwards and trying to spot the closing
+    // brace of the enclosing block fails on the first `}` it meets, which is the
+    // end of the previous function rather than the end of the module.
+    //
+    // So: compute the depth at the target, then scan forward from the top for a
+    // `mod` declaration whose opening brace lands at a lower depth, and check
+    // whether that mod is test gated. That is unambiguous and cheap.
+    let mut depth_at = vec![0i32; lines.len() + 1];
+    let mut depth = 0i32;
+    for (n, line) in lines.iter().enumerate() {
+        depth_at[n] = depth;
+        let t = line.trim();
+        // Braces inside a string or a char literal are not structure. Only the
+        // common cases are handled, because a miscount here would misclassify a
+        // test as first party code, which is the safe direction.
+        let mut in_str = false;
+        let mut prev = '\0';
+        for ch in t.chars() {
+            match ch {
+                '"' if prev != '\\' => in_str = !in_str,
+                '{' | '}' if !in_str => {
+                    if ch == '{' {
+                        depth += 1;
+                    } else {
+                        depth -= 1;
+                    }
+                }
+                _ => {}
+            }
+            prev = ch;
+        }
+    }
+    let target_depth = depth_at[idx];
+    // Scan forward for a module declaration that encloses the target.
+    for (n, line) in lines.iter().enumerate() {
+        let t = line.trim();
+        let Some(rest) = t.strip_prefix("mod ") else {
+            continue;
+        };
+        let name = rest.split(['{', ' ', ':']).next().unwrap_or("").trim();
+        if name != "tests" && !name.ends_with("tests") {
+            continue;
+        }
+        // This mod must sit at a depth strictly below the target, and its body
+        // must extend past the target line.
+        if depth_at[n] >= target_depth {
+            continue;
+        }
+        // Find where this mod ends.
+        let mut d = 0i32;
+        let mut end = lines.len();
+        for (m, l) in lines.iter().enumerate().skip(n) {
+            let lt = l.trim();
+            if lt.starts_with("//") {
+                continue;
+            }
+            d += lt.matches('{').count() as i32;
+            d -= lt.matches('}').count() as i32;
+            if d <= 0 && m > n {
+                end = m;
+                break;
+            }
+        }
+        if idx > n && idx < end {
+            // Test gated by attribute, or by living under src/ where every mod
+            // named tests is a test module.
+            let gated = n > 0 && lines[n - 1].trim().starts_with("#[cfg(test)]");
+            if gated || name == "tests" || name.ends_with("tests") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn is_test_path(path: &Path) -> bool {
     let Some(text) = path.to_str() else {
         return false;
@@ -1251,5 +1410,195 @@ mod tests {
             "python only rules must not fire in ts: {:?}",
             hits
         );
+    }
+}
+
+#[cfg(test)]
+mod placeholder_tests {
+    use super::*;
+
+    /// The exact four findings heides produced on its own source. Every one was a
+    /// truncated fixture in a test, and every one was a critical. A scanner that
+    /// flags its own tests gets muted by whoever runs it, so these are pinned.
+    #[test]
+    fn a_truncated_fixture_is_not_a_credential() {
+        for src in [
+            "let t = \"AWS_ACCESS_KEY_ID = 'AKIAIO...MPLE'\";\n",
+            "let t = \"const api_key = 'sk-pro...f7a8';\n",
+            "let t = \"const k = 'ghp_ab...6789';\n",
+            "let t = \"const s = 'xoxb-1...ghij';\n",
+        ] {
+            let reports = scan_file(std::path::Path::new("a.rs"), src, "rust");
+            assert!(
+                reports.is_empty(),
+                "a truncated fixture must stay quiet: {src:?} -> {reports:?}"
+            );
+        }
+    }
+
+    /// The benign twin of every case below matters more than the positives: a
+    /// placeholder gate that is too eager is exactly the false positive this
+    /// change exists to remove, so each negative has a real key beside it.
+    #[test]
+    fn a_real_key_of_the_same_shape_still_fires() {
+        let src = "AWS_ACCESS_KEY_ID = 'AKIAIOSFODNN7EXAMPLE1'\n";
+        let reports = scan_file(std::path::Path::new("a.py"), src, "python");
+        assert!(
+            reports
+                .iter()
+                .any(|r| r.message.contains("AWS access key id")),
+            "an unbroken real key must still be reported: {reports:?}"
+        );
+    }
+
+    #[test]
+    fn every_placeholder_token_is_silent_and_its_neighbour_is_not() {
+        for token in [
+            "test",
+            "dummy",
+            "example",
+            "fake",
+            "your",
+            "sample",
+            "demo",
+            "mock",
+            "changeme",
+            "placeholder",
+            "invalid",
+            "redacted",
+            "todo",
+        ] {
+            let src = format!("const apiKey = \"{token}_Ab12Cd34Ef56Gh78\";\n");
+            let reports = scan_file(std::path::Path::new("a.ts"), &src, "typescript");
+            // Asserted on the credential rules alone rather than on total silence.
+            // An unrelated rule may have something to say about the line, and a
+            // test demanding silence would then fail for the wrong reason, which is
+            // how a correct implementation gets "fixed" into a broken one.
+            assert!(
+                !reports
+                    .iter()
+                    .any(|r| r.message.contains("credential") || r.message.contains("hardcoded")),
+                "{token} must be silent for the credential rules: {reports:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_real_key_that_merely_contains_a_placeholder_word_still_fires() {
+        // `test` in the middle is not a placeholder. Only the leading token is.
+        let src = "const api_key = \"Ab12cd34ef56gh78testKey\";\n";
+        let reports = scan_file(std::path::Path::new("a.ts"), src, "typescript");
+        assert!(
+            !reports.is_empty(),
+            "a placeholder word in the middle must not suppress a real key"
+        );
+    }
+
+    #[test]
+    fn an_env_reference_and_a_file_name_are_not_credentials() {
+        for src in [
+            "const apiKey = \"{env.API_KEY}\";\n",
+            "const apiKey = \"config/secrets.json\";\n",
+            "const apiKey = \"https://example.com/key\";\n",
+            "const apiKey = \"[REDACTED]\";\n",
+        ] {
+            let reports = scan_file(std::path::Path::new("a.ts"), src, "typescript");
+            assert!(
+                reports.is_empty(),
+                "a reference is not a secret: {src:?} -> {reports:?}"
+            );
+        }
+    }
+
+    /// A PEM block contains a header, a body and trailing padding, so it is the
+    /// shape most at risk from a file-name or path rule. It must still fire.
+    #[test]
+    fn a_private_key_block_still_fires() {
+        // A real multi line PEM, not a single line with escaped newlines, because
+        // the shape being protected is a block. The value carries a trailing '='
+        // on the body line and the header, so both the path rule and the
+        // extension rule must leave it alone.
+        let src = concat!(
+            "-----BEGIN RSA PRIVATE KEY-----\n",
+            "MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\n",
+            "KUpRKfFLfRYC9AIKjbJTWit+CqvjWYzvQwECAwEAAQJAIJLixBy2qpFoS4DSmoEm\n",
+            "-----END RSA PRIVATE KEY-----\n"
+        );
+        let reports = scan_file(std::path::Path::new("deploy/key.pem"), src, "rust");
+        assert!(
+            reports.iter().any(|r| r.message.contains("private key")),
+            "a PEM block must still be reported: {reports:?}"
+        );
+    }
+
+    /// The single character ellipsis is used in prose and in some fixtures, and a
+    /// real key cannot contain it.
+    #[test]
+    fn a_single_character_ellipsis_fixture_is_silent() {
+        let src = "const api_key = \"ghp_ab…6789\";\n";
+        let reports = scan_file(std::path::Path::new("a.ts"), src, "typescript");
+        assert!(reports.is_empty(), "{reports:?}");
+    }
+
+    /// The point of sharing one gate: the same value must get the same verdict
+    /// whichever rule sees it first. This is the regression that produced four
+    /// criticals on heides own source.
+    #[test]
+    fn both_rules_agree_on_a_truncated_value() {
+        let src = "const api_key = 'AKIAIO...MPLE';\n";
+        let reports = scan_file(std::path::Path::new("a.ts"), src, "typescript");
+        assert!(
+            reports.is_empty(),
+            "the name rule and the shape rule must not disagree: {reports:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod inmodule_tests {
+    use super::*;
+
+    fn body() -> String {
+        let mut s = String::new();
+        s.push_str("fn helper() -> u32 { 1 }\n");
+        s.push_str("\n#[cfg(test)]\nmod tests {\n");
+        s.push_str("    #[test]\n    fn a() {\n");
+        s.push_str("        let x = \"AKIAIO...MPLE\";\n");
+        s.push_str("        assert!(x.len() > 2);\n");
+        s.push_str("    }\n");
+        s.push_str("}\n");
+        s
+    }
+
+    /// The regression: a fixture inside a `#[cfg(test)] mod tests` in a `src/`
+    /// file, which is where heides keeps its own tests. The path is not `tests/`,
+    /// so a path only check reports it.
+    #[test]
+    fn a_fixture_inside_a_cfg_test_module_is_test_code() {
+        let src = body();
+        let line = 5u64; // the `let x = ...` line
+        assert!(
+            in_test_module(&src, line),
+            "line 5 is inside mod tests and must be recognised"
+        );
+    }
+
+    /// The negative that matters: a credential in ordinary first party code must
+    /// NOT be excused. If this ever passes as test code, real leaks get muted.
+    #[test]
+    fn a_credential_in_first_party_code_is_not_test_code() {
+        let src = "fn helper() {\n    let api_key = \"AKIAIOSFODNN7EXAMPLE1\";\n}\n";
+        assert!(
+            !in_test_module(src, 2),
+            "line 2 is ordinary code and must not be excused"
+        );
+    }
+
+    /// And the boundary: a mod that is not named like a test must not capture
+    /// anything, even if it is called `helpers`.
+    #[test]
+    fn a_non_test_module_does_not_capture() {
+        let src = "mod helpers {\n    pub fn f() {\n        let k = \"AKIAIOSFODNN7EXAMPLE1\";\n    }\n}\n";
+        assert!(!in_test_module(src, 3), "mod helpers is not a test module");
     }
 }
