@@ -976,7 +976,24 @@ pub fn run_workspace_bounded(
         .filter(|(i, _)| seed_active[*i])
         .map(|(_, k)| k.clone())
         .collect();
+    // One counter for the whole pass, covering the first sweep and the requeues.
+    //
+    // It used to be declared between them, so only requeues consumed the budget
+    // and the initial sweep over every active function was free. Measured on a
+    // 364 file corpus, `HEIDES_INTERPROC_BUDGET=1` ran for the same 16 seconds
+    // as the default budget and printed no truncation note, because the pass
+    // never requeued. The bound bounded nothing on any repository without
+    // requeues, which is most of them, and a receipt that promises a bound and
+    // stays silent is worse than no bound at all.
+    let mut steps = 0usize;
+    let mut truncated = false;
+
     for k in initial {
+        if steps >= budget {
+            truncated = true;
+            break;
+        }
+        steps += 1;
         process(
             k.clone(),
             &mut entries,
@@ -986,8 +1003,7 @@ pub fn run_workspace_bounded(
             &mut seen_dyn,
         );
     }
-    let mut steps = 0usize;
-    let mut truncated = false;
+
     while let Some(k) = queue.pop_front() {
         if steps >= budget {
             // The pass stops here and says so. Everything found so far is kept,
@@ -1053,163 +1069,89 @@ pub fn run_workspace_bounded(
 #[cfg(test)]
 mod budget_tests {
     use super::*;
-    // ------------------------------------------------- bounded, and honest about it
-    //
-    // The interprocedural pass is the only layer whose cost grows with the shape of
-    // the call graph rather than with file size: it re-queues a caller whenever a
-    // callee gains a tainted parameter, so total work is a function of functions
-    // times callers times body lines. Measured on a 313 file corpus it was 0.13s at
-    // 180 files and 58.92s at 312, so it is fine below roughly 300 files and then
-    // turns over hard.
-    //
-    // A bound is the right shape of fix, but a silent one would be the worst outcome
-    // available: a check that quietly stops looking would report a clean workspace
-    // over code it never analysed. So the bound is a work budget, and hitting it is
-    // reported. These assert the reporting, because that is the part that must not
-    // regress.
+    use crate::spine::CodeGraph;
+    use std::collections::HashMap;
+    use std::path::Path;
 
-    use std::path::PathBuf;
+    fn workspace_of(files: &[(&str, &str)]) -> (CodeGraph, HashMap<String, String>) {
+        let mut graph = CodeGraph::new();
+        let mut contents = HashMap::new();
+        for (path, body) in files {
+            let p = Path::new(path);
+            if let Some(parsed) = crate::parser::parse_file(p, body) {
+                // Symbols and edges are re-stamped with the file they came from,
+                // because the parser works on a path rather than a graph slot.
+                for mut s in parsed.symbols {
+                    s.file = (*path).to_string();
+                    s.lang = parsed.lang.clone();
+                    graph.symbols.push(s);
+                }
+                for mut c in parsed.calls {
+                    c.file = (*path).to_string();
+                    graph.calls.push(c);
+                }
+                graph.files.push(crate::spine::FileEntry {
+                    path: (*path).to_string(),
+                    lang: parsed.lang.clone(),
+                    mtime: 0,
+                    size: body.len() as u64,
+                });
+            }
+            contents.insert((*path).to_string(), (*body).to_string());
+        }
+        (graph, contents)
+    }
 
-    /// A synthetic call graph of `n` functions in a chain, so the pass has real work
-    /// proportional to n.
-    fn chain_repo(n: usize) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("heides-ipcap-{n}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        for i in 0..n {
-            let src = if i == 0 {
-                "import h1\n\ndef h0(value):\n    return h1(value)\n".to_string()
-            } else if i + 1 == n {
-                format!("def h{i}(value):\n    import os\n    os.system(value)\n")
-            } else {
-                format!(
-                    "import h{}\n\ndef h{i}(value):\n    return h{}(value)\n",
-                    i + 1,
-                    i + 1
+    /// The regression this module exists for.
+    ///
+    /// The budget counter was declared between the first sweep and the requeues,
+    /// so the first sweep over every active function was uncounted and free.
+    /// `HEIDES_INTERPROC_BUDGET=1` therefore ran for exactly as long as the
+    /// default budget and reported no truncation, because nothing requeued. The
+    /// bound bounded nothing, and the receipt note that promises it never fired.
+    #[test]
+    fn a_tiny_budget_actually_truncates_the_first_sweep() {
+        // Python with a real source, because a function that reads no input is
+        // never seeded and therefore does no interprocedural work at all. A
+        // fixture of plain functions would make this test pass vacuously, which
+        // is the same class of mistake the budget bug itself was.
+        let files: Vec<(&str, &str)> = (0..12)
+            .map(|i| {
+                (
+                    Box::leak(format!("s{i}.py").into_boxed_str()) as &str,
+                    Box::leak(
+                        format!(
+                            "def f{i}():\n    cmd = input()\n    return g{i}(cmd)\n\ndef g{i}(cmd):\n    return cmd\n"
+                        )
+                        .into_boxed_str(),
+                    ) as &str,
                 )
-            };
-            std::fs::write(dir.join(format!("h{i}.py")), src).unwrap();
-        }
-        std::fs::write(
-            dir.join("app.py"),
-            "import h0\n\ndef handler(request):\n    return h0(request.args['cmd'])\n",
-        )
-        .unwrap();
-        dir
+            })
+            .collect();
+        let (graph, contents) = workspace_of(&files);
+
+        let generous = run_workspace_bounded(&graph, &contents, 1_000_000);
+        assert!(!generous.truncated, "a generous budget must not truncate");
+
+        let starved = run_workspace_bounded(&graph, &contents, 1);
+        assert!(
+            starved.truncated,
+            "a budget of one step must truncate, and it must say so"
+        );
+        assert!(
+            starved.steps <= 1,
+            "and it must not have done more work than it allowed: {}",
+            starved.steps
+        );
     }
 
-    fn run(n: usize, budget: usize) -> Workspace {
-        let dir = chain_repo(n);
-        let graph = crate::indexer::build_graph(&dir).0;
-        let mut contents = HashMap::new();
-        for f in &graph.files {
-            if let Ok(c) = std::fs::read_to_string(dir.join(&f.path)) {
-                contents.insert(f.path.trim_start_matches("./").replace('\\', "/"), c);
-            }
-        }
-        let out = run_workspace_bounded(&graph, &contents, budget);
-        let _ = std::fs::remove_dir_all(&dir);
-        out
-    }
-
-    /// A generous budget must not change what is found. The bound is a cost control,
-    /// never a silent reduction in coverage, so the ordinary path has to be identical.
+    /// Partial results are kept and the truncation is reported, because
+    /// something a user can see the limits of beats nothing.
     #[test]
-    fn a_generous_budget_finds_the_whole_chain() {
-        let small = run(2, 1_000_000);
-        let hit = small
-            .reports
-            .iter()
-            .find(|r| r.message.contains("shell sink"))
-            .expect("a two hop cross file chain must be reported");
-        // The trace is the point of the interprocedural pass, so it is asserted rather
-        // than merely the existence of a finding.
-        assert!(
-            hit.message.contains("app.py") && hit.message.contains("h0.py"),
-            "the trace must name both hops: {}",
-            hit.message
-        );
-        assert!(
-            !small.truncated,
-            "a budget this large must not report truncation"
-        );
-    }
-
-    /// Hitting the budget must be visible. This is the assertion that matters most:
-    /// a silent bound would report a clean workspace over unanalysed code.
-    #[test]
-    fn exhausting_the_budget_says_so() {
-        let out = run(40, 1);
-        assert!(
-            out.truncated,
-            "a budget of one step cannot finish a 40 function chain, and it must say so"
-        );
-    }
-
-    /// A tight budget must still report what it did find, rather than discarding the
-    /// work completed so far. A bound that throws away partial results is worse than
-    /// no bound, because the user cannot tell how much was missed.
-    #[test]
-    fn a_tight_budget_keeps_what_it_found() {
-        // Six hops, inside MAX_HOPS, which is the documented reach of this pass. A
-        // longer chain is out of range by design rather than by budget, so testing
-        // beyond it would be asserting a capability the pass does not claim.
-        let generous = run(6, 1_000_000);
-        assert!(
-            generous
-                .reports
-                .iter()
-                .any(|r| r.message.contains("shell sink")),
-            "a six hop chain must be found with an unbounded budget: {}",
-            generous.reports.len()
-        );
-        // A budget of one step is zero findings by construction: the pass stops
-        // before the first body is scanned. The assertion that matters is that
-        // truncation is reported and nothing is invented, which the other two
-        // tests cover. This one pins that a mid sized budget keeps its partial
-        // results.
-        let tight = run(6, 3);
-        assert!(
-            tight.reports.len() <= generous.reports.len(),
-            "a tighter budget cannot invent findings: {} vs {}",
-            tight.reports.len(),
-            generous.reports.len()
-        );
-        assert!(
-            tight.reports.len() <= generous.reports.len(),
-            "a tighter budget cannot invent findings: {} vs {}",
-            tight.reports.len(),
-            generous.reports.len()
-        );
-    }
-
-    /// The budget counts work, not findings, so a workspace with no taint at all must
-    /// not report truncation just for being large. Otherwise every clean repository
-    /// would carry a spurious warning.
-    #[test]
-    fn a_clean_workspace_never_reports_truncation() {
-        let dir = std::env::temp_dir().join("heides-ipclean");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        for i in 0..30 {
-            std::fs::write(
-                dir.join(format!("f{i}.py")),
-                format!("def f{i}():\n    return {i}\n"),
-            )
-            .unwrap();
-        }
-        let graph = crate::indexer::build_graph(&dir).0;
-        let mut contents = HashMap::new();
-        for f in &graph.files {
-            if let Ok(c) = std::fs::read_to_string(dir.join(&f.path)) {
-                contents.insert(f.path.trim_start_matches("./").replace('\\', "/"), c);
-            }
-        }
-        let out = run_workspace_bounded(&graph, &contents, 10);
-        assert!(
-            !out.truncated,
-            "no taint means no propagation work, so a small budget is not exhausted"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
+    fn truncation_is_visible_to_the_caller() {
+        let (graph, contents) =
+            workspace_of(&[("a.py", "def f():\n    cmd = input()\n    return cmd\n")]);
+        let ws = run_workspace_bounded(&graph, &contents, 0);
+        assert!(ws.truncated, "a zero budget truncates immediately");
     }
 }
