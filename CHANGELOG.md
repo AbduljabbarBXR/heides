@@ -2,6 +2,15 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.24.1
+
+0.24.0 shipped a false negative in C and C++, and it was wider than one line of code.
+
+* **The inline source gate was ruby only.** `strcpy(buf, getenv("NAME"))` reads a source and reaches a sink with nothing in between to bind a name, so the flow was only recognised where a name was captured. C and C++ now get the same gate as ruby. `strcpy` of a literal stays silent in both.
+* **This was not limited to one line functions.** The reported case was a function written entirely on one line, where the braces open and close together and a block rule that only closes on a later line drops it. That part is fixed too. But the same shape in a normal multi-line function was also missed, because it failed the same gate for the same reason, and the reported fixture happened to be the one that was noticed.
+* **Measured on real code before widening the gate:** 401 real C and C++ files report zero false criticals, which is why javascript and java are still excluded. An inline `req.query.x` reaching a sink is rarer there, and an unmeasured gate is how a scanner starts crying wolf.
+* **The rule is stated as a measurement rather than a preference.** Ruby was measured across 536 files across rack, sinatra, redis-rb and faraday. C and C++ are measured now. Anything else has to earn the gate the same way.
+
 ## 0.24.0
 
 C and C++ are indexed, Ruby is indexed, and the offline opt-out now actually opts out.
