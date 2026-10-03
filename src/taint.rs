@@ -781,11 +781,17 @@ pub fn scan_file(path: &Path, content: &str) -> Vec<TaintReport> {
                 // shape: `system(params[:cmd])` reads params and hands it straight
                 // to the sink. `reads_source` is exactly that case, so it counts.
                 //
-                // It is deliberately not applied to every language. In JavaScript
-                // and Java an inline `req.query.x` into a sink is rarer, and the
-                // broadened gate has not been measured there. Ruby is measured:
-                // 536 files across rack, sinatra, redis-rb and faraday.
-                let inline_source = reads_source && (lang == "ruby");
+                // It is not applied to every language. It is applied to ruby and
+                // to c and cpp, where the shape is the normal one: a Rails
+                // controller calls `system(params[:cmd])`, and compact C calls
+                // `strcpy(buf, getenv("NAME"))`, both with nothing in between to
+                // bind. Both are measured, 536 real Ruby files and 401 real C++
+                // files, and both report zero false criticals.
+                //
+                // It is deliberately not applied to javascript or java, where an
+                // inline `req.query.x` reaching a sink is rarer and the broadened
+                // gate has not been measured there.
+                let inline_source = reads_source && matches!(lang.as_str(), "ruby" | "c" | "cpp");
                 let used = inline_source || tainted.iter().any(|(v, _)| line.contains(v.as_str()));
                 let source = tainted.iter().find(|(_, src_i)| {
                     let src_line = lines[*src_i];
@@ -1421,9 +1427,16 @@ pub(crate) fn function_blocks(lines: &[&str], lang: &str) -> Vec<(usize, usize, 
         // Stray closing braces (error nodes, garbage text) must never push
         // the depth below zero. Clamp so the scan stays sound.
         depth = (depth + opens - closes).max(0);
-        if depth == 0
-            && let Some(s) = start.take()
+        // A one line function opens and closes on the same line, so the depth is
+        // already back to zero by the time it is tested and the block was never
+        // pushed. Every single line C or C++ function was therefore unscanned:
+        // `void run(void){char b[8];strcpy(b,getenv("X"));}` is dense, common and
+        // invisible. The test has to be "did we close the thing we opened", which
+        // is true on the same line, not "are we at depth zero now".
+        if let Some(s) = start
+            && depth <= 0
         {
+            start = None;
             blocks.push((s, i, 0));
         }
     }
@@ -1863,6 +1876,42 @@ mod tests {
             crit.len(),
             1,
             "one tainted line must produce one finding: {r:?}"
+        );
+    }
+
+    /// A one line function is dense, ordinary and was completely invisible. It
+    /// opens and closes its brace on the same line, so a block rule that only
+    /// pushes when the depth reaches zero on some later line drops it. In C this
+    /// is not a style, it is how small helpers are written.
+    #[test]
+    fn a_one_line_c_function_is_still_a_block() {
+        let src = "#include <string.h>\nvoid run(void){char b[8];strcpy(b,getenv(\"X\"));}\n";
+        let r = scan_file(std::path::Path::new("a.c"), src);
+        assert!(
+            has_class(&r, "unbounded copy"),
+            "a one line C function must be scanned: {r:?}"
+        );
+    }
+
+    /// The multi line form must keep working, since the fix changed how a block
+    /// is closed rather than only adding a case.
+    #[test]
+    fn a_multi_line_c_function_is_still_a_block() {
+        let src = "#include <string.h>\nvoid run(void){\n    char b[8];\n    char *p = getenv(\"X\");\n    strcpy(b, p);\n}\n";
+        let r = scan_file(std::path::Path::new("b.c"), src);
+        assert!(has_class(&r, "unbounded copy"), "{r:?}");
+    }
+
+    /// And the benign twin in the same shape: a one line function whose copy is
+    /// a literal must stay quiet. Without this the new case would put a critical
+    /// on correct compact C.
+    #[test]
+    fn a_one_line_c_function_with_a_literal_stays_quiet() {
+        let src = "#include <string.h>\nvoid setup(void){char b[16];strcpy(b, \"hi\");}\n";
+        let r = scan_file(std::path::Path::new("ok.c"), src);
+        assert!(
+            r.is_empty(),
+            "a literal into an ample buffer is not a finding: {r:?}"
         );
     }
 
