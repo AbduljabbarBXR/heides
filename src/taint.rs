@@ -808,7 +808,8 @@ pub fn scan_file(path: &Path, content: &str) -> Vec<TaintReport> {
                         path,
                         line_no,
                         format!(
-                            "user controlled input reaches a {} sink on this line. source {}",
+                            "user controlled input reaches {} {} sink on this line. source {}",
+                            article(sink),
                             sink,
                             source_evidence(source, line_no)
                         ),
