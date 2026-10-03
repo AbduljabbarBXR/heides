@@ -2,6 +2,17 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.23.0
+
+The interprocedural budget did not bound the work, so the receipt it promised never fired. Three corrections, one of them mine.
+
+* **The budget was declared between the initial sweep and the requeue loop,** so only requeues consumed it and the first pass over every active function was free. `HEIDES_INTERPROC_BUDGET=1` ran for 25s against 21s for the default budget on a 364 file corpus, and printed no truncation note at all, because nothing requeued. The bound bounded nothing on any repository that does not requeue, which is most of them.
+* **A receipt that promises a bound and stays silent is worse than shipping none,** because a user cannot tell a pass that stopped from a pass that had nothing to do. Both loops now draw on one counter, checked before each step.
+* **Express routes whose handler is written inline** are recognised, so `router.get('/x', (req, res) => ...)` no longer reads as an uncalled function.
+* **The credential rules no longer flag heides own source.** `practice.rs` decides from the file and its context rather than from the name alone, which is why 0.19.1 had to de-entropy a fixture to make push protection happy. Fixing the rule was the right response and muting the test was the wrong one.
+* **The interprocedural budget is verified through the CLI**, not only in a unit test, because the real corpus does no interprocedural work to bound. On a fixture that does seed, `HEIDES_INTERPROC_BUDGET=1` reports `interprocedural taint analysis stopped after 1 steps at a work budget of 1: cross function flows beyond this point were not followed` and the default stays silent on the same tree.
+* **How it got in, since that is the part worth recording.** The three PRs were stacked on local `main`, so the budget commit was an ancestor of both other branches. Merging them by number pulled it in without passing review on its own. Stacked branches need the base checked, not the numbers.
+
 ## 0.22.0
 
 The taint pass was 99% of a check, and it was one arithmetic mistake.
