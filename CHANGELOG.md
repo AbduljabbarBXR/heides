@@ -2,6 +2,17 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.24.2
+
+Heides scanned Heides and did not like what it saw.
+
+* **Heides on Heides reported 144 warnings and 126 of the 127 `unwrap` warnings were inside Heides' own test modules.** An `unwrap` in `#[cfg(test)]` code says nothing about the shipped binary. A scanner that files its own fixtures as production risk teaches people to ignore it, which is the failure this project is supposed to exist to prevent.
+* **The cause was a bail point, not a misidentification.** `is_test_context` walked backwards from the finding and gave up at the first `}`. Inside `mod tests` the commonest brace in the file is the end of the *previous test function*, so the walk decided it had left test scope on nearly every line. It never got as far as looking for the module.
+* **It now scans forward and tracks which modules are open at the line,** pushing and popping with brace depth. A module is open at a line if its braces opened before it and have not closed yet. That is unambiguous, and a sibling module later in the file cannot be mistaken for an enclosing one.
+* **Two intermediate versions each broke one test, and that is why there are two tests.** One still treated a sibling `fn two() {` as a boundary. Fixing that reintroduced the pre-existing failure. The pair pins both directions: a sibling brace does not end the module, and code after the module is real code again.
+* **Measured on the tool itself: 144 warnings to 66, `unwrap` 127 to 49.** All 49 remaining are production code that cannot panic: mutex locks, `last()` after an `is_empty` guard, a quote matched by `Some` directly above. The one critical is the deliberate SQL fixture at `testdata/first_run/app.js`.
+* **Two limits are recorded rather than left to be rediscovered,** both pre-existing and neither introduced here: a `mod tests` written entirely on one line opens and closes together, so it is not recognised, which is the same shape as the one-line C function defect fixed in 0.24.1; and the `cfg(test)` check falls back to a substring test on the module name, so any production module whose name merely contains `tests` is treated as test code.
+
 ## 0.24.1
 
 0.24.0 shipped a false negative in C and C++, and it was wider than one line of code.
