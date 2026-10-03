@@ -430,10 +430,7 @@ fn c_declarator_name(node: Node, content: &str) -> Option<String> {
             cur.children(&mut w)
                 .find(|c| c.kind().contains("declarator"))
         });
-        match next {
-            Some(n) => cur = n,
-            None => return None,
-        }
+        cur = next?;
     }
     None
 }
