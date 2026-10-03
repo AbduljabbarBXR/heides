@@ -22,6 +22,12 @@ pub fn detect_language(path: &Path) -> Option<String> {
         "go" => "go",
         "java" => "java",
         "cs" => "csharp",
+        // C and C++. They are separate grammars because the languages differ, and
+        // parsing a .cpp with the C grammar produces a broken tree rather than a
+        // partial one. C is what heides had no answer for at all: a `strcpy` into
+        // a fixed buffer in a .c file was invisible to every layer.
+        "c" | "h" => "c",
+        "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => "cpp",
         // Ruby has no tree sitter grammar yet, so language_for returns None and
         // the symbol and call layers yield nothing for it. The file still has
         // to be recognised, because the taint guard works on lines and does not
@@ -51,11 +57,17 @@ pub fn has_grammar(lang: &str) -> bool {
 fn language_for(lang: &str) -> Option<tree_sitter::Language> {
     match lang {
         "rust" => Some(tree_sitter_rust::LANGUAGE.into()),
+        "c" => Some(tree_sitter_c::LANGUAGE.into()),
+        "cpp" => Some(tree_sitter_cpp::LANGUAGE.into()),
         "javascript" => Some(tree_sitter_javascript::LANGUAGE.into()),
         "typescript" => {
             // Prefer the TSX variant when the file uses JSX, otherwise plain TS.
             Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
         }
+        // Ruby had no grammar, so a .rb file was detected and then yielded no
+        // symbols and no call edges. Recognised, never parsed: the worst kind of
+        // coverage, because the receipt implied it had been looked at.
+        "ruby" => Some(tree_sitter_ruby::LANGUAGE.into()),
         "python" => Some(tree_sitter_python::LANGUAGE.into()),
         "php" => Some(tree_sitter_php::LANGUAGE_PHP.into()),
         "go" => Some(tree_sitter_go::LANGUAGE.into()),
@@ -388,6 +400,81 @@ fn field_text<'a>(node: Node<'a>, content: &'a str, field: &str) -> Option<Strin
     node.child_by_field_name(field).map(|n| text(n, content))
 }
 
+/// The declared name of a C or C++ function.
+///
+/// A C function definition has no `name` field. The name sits inside a chain of
+/// declarators: `function_definition -> function_declarator -> identifier`, and for
+/// a pointer return `function_declarator -> pointer_declarator -> function_declarator
+/// -> identifier`. A pointer to a function returning a pointer adds another level.
+/// So the declarator chain is followed to its end and the identifier found there is
+/// the name.
+///
+/// The generic `name_of` fallback cannot do this: it scans only direct children,
+/// and in C the direct children are the return type and the declarator, never the
+/// identifier. That is why C indexed zero symbols even with the grammar present.
+fn c_declarator_name(node: Node, content: &str) -> Option<String> {
+    let mut cur = node;
+    // Bounded so a malformed tree cannot loop forever.
+    for _ in 0..12 {
+        let kind = cur.kind();
+        if kind == "identifier" || kind == "field_identifier" || kind == "type_identifier" {
+            let t = text(cur, content).trim().to_string();
+            if !t.is_empty() {
+                return Some(t);
+            }
+        }
+        // Follow whichever declarator child exists. `declarator` is the usual
+        // field; the direct child scan covers grammars that nest without one.
+        let next = cur.child_by_field_name("declarator").or_else(|| {
+            let mut w = cur.walk();
+            cur.children(&mut w)
+                .find(|c| c.kind().contains("declarator"))
+        });
+        cur = next?;
+    }
+    None
+}
+
+/// The name of a C or C++ symbol node, using the declarator chain.
+///
+/// A `declaration` in C is also used for variables and typedefs, and the same
+/// chain gives the right answer for all three, so one helper covers them. The
+/// caller filters by kind.
+fn c_symbol_name(node: Node, kind: &str, content: &str) -> Option<String> {
+    match kind {
+        // A namespace, struct or class has a plain name field in both grammars.
+        "namespace_definition" | "class_specifier" | "struct_specifier" | "enum_specifier" => {
+            name_of(node, content)
+        }
+        // A function definition's declarator holds the name.
+        "function_definition" => {
+            let d = node.child_by_field_name("declarator").unwrap_or(node);
+            c_declarator_name(d, content)
+        }
+        // A bare declaration is a prototype or a variable; both name through the
+        // declarator chain.
+        "declaration" => {
+            let d = node.child_by_field_name("declarator").unwrap_or(node);
+            c_declarator_name(d, content)
+        }
+        "template_declaration" | "linkage_specification" | "type_definition" => {
+            // These wrap the real declaration, so descend and let the cases above
+            // handle it rather than guessing at a name here.
+            let mut w = node.walk();
+            for child in node.children(&mut w) {
+                if matches!(
+                    child.kind(),
+                    "declaration" | "function_definition" | "type_definition"
+                ) {
+                    return c_symbol_name(child, child.kind(), content);
+                }
+            }
+            name_of(node, content)
+        }
+        _ => name_of(node, content),
+    }
+}
+
 fn name_of(node: Node, content: &str) -> Option<String> {
     if let Some(name) = field_text(node, content, "name")
         && !name.is_empty()
@@ -647,6 +734,16 @@ fn value_names_of(node: Node, content: &str, lang: &str) -> Vec<String> {
 }
 
 const SYMBOL_KINDS: &[&str] = &[
+    // C and C++. `function_definition` is already listed for C# and is the node
+    // both C grammars use; the rest are C++ specific.
+    "function_definition",
+    "declaration",
+    "template_declaration",
+    "namespace_definition",
+    "field_declaration",
+    "enum_specifier",
+    "type_definition",
+    "linkage_specification",
     "function_item",
     "function_declaration",
     "generator_function_declaration",
@@ -671,6 +768,12 @@ const SYMBOL_KINDS: &[&str] = &[
     "mod_item",
     "const_item",
     "static_item",
+    // Ruby. `method` covers both `def name` and `def self.name`, since the
+    // grammar emits the same node kind and only the receiver differs. Blocks
+    // are deliberately absent: an iterator is not a method, and indexing one as
+    // a symbol makes dead code analysis report every `each` as dead.
+    "method",
+    "singleton_method",
     // Value symbols: one node per declaration in the grammars where that
     // holds, so names stay exact and the index stays clean.
     "enum_variant",
@@ -819,6 +922,8 @@ fn walk(
         // node, so a generic first identifier scan would name the type.
         let names: Vec<String> = if value_kind {
             value_names_of(node, content, &out.lang)
+        } else if out.lang == "c" || out.lang == "cpp" {
+            c_symbol_name(node, kind, content).into_iter().collect()
         } else {
             name_of(node, content).into_iter().collect()
         };
@@ -872,6 +977,7 @@ fn walk(
     // Calls
     let is_call = match out.lang.as_str() {
         "python" => kind == "call",
+        "ruby" => kind == "call",
         "java" => kind == "method_invocation",
         "php" => kind == "function_call_expression" || kind == "method_call_expression",
         "csharp" => kind == "invocation_expression",
@@ -882,6 +988,7 @@ fn walk(
             "java" | "php" if kind == "method_invocation" || kind == "method_call_expression" => {
                 field_text(node, content, "name")
             }
+            "ruby" => field_text(node, content, "method"),
             _ => field_text(node, content, "function"),
         };
         if let Some(callee) = callee_field
@@ -917,6 +1024,59 @@ fn walk(
 
     // Imports
     match kind {
+        // `#include <stdio.h>` and `#include "local.h"` are the C and C++ import
+        // edge. Without this a C file had no import edges at all, so a graph
+        // question like "what depends on this header" had no answer.
+        "preproc_include" => {
+            let t = text(node, content);
+            let target = t
+                .split_once('<')
+                .and_then(|(_, rest)| rest.split_once('>').map(|(a, _)| a.to_string()))
+                .or_else(|| {
+                    t.split_once('"')
+                        .and_then(|(_, rest)| rest.split_once('"').map(|(a, _)| a.to_string()))
+                });
+            if let Some(imp) = target {
+                let clean = imp.trim().to_string();
+                if !clean.is_empty() {
+                    out.imports.push(ImportEdge {
+                        file: path.display().to_string(),
+                        imported: clean,
+                        line,
+                    });
+                }
+            }
+        }
+        // `require 'x'` and `require_relative 'x'` are Ruby's import edge. They
+        // are the same `call` node as any other method call, so the distinction is
+        // the callee name and the string argument. Without this arm a Ruby file
+        // had no import edges at all, so the graph could not answer what a file
+        // depends on.
+        "call"
+            if out.lang == "ruby"
+                && field_text(node, content, "method")
+                    .as_deref()
+                    .is_some_and(|m| m == "require" || m == "require_relative") =>
+        {
+            let target = node
+                .child_by_field_name("arguments")
+                .map(|a| text(a, content))
+                .map(|a| {
+                    let a = a.trim().to_string();
+                    a.strip_prefix('(')
+                        .and_then(|r| r.strip_suffix(')').map(|r| r.to_string()))
+                        .unwrap_or(a)
+                })
+                .map(|a| a.trim().trim_matches(['"', '\'', ' ']).to_string())
+                .filter(|a| !a.is_empty());
+            if let Some(imp) = target {
+                out.imports.push(ImportEdge {
+                    file: path.display().to_string(),
+                    imported: imp,
+                    line,
+                });
+            }
+        }
         "use_declaration" => {
             // Rust: use a::b::Thing; the argument field holds the path.
             if let Some(imp) = field_text(node, content, "argument") {
@@ -1359,5 +1519,324 @@ fn main() {
             after.doc, "",
             "code between comment and symbol ends the capture"
         );
+    }
+}
+
+#[cfg(test)]
+mod c_cpp_tests {
+    use super::*;
+    // ------------------------------------------------------- C and C++ indexing
+    //
+    // Heides indexed zero files in a C and C++ codebase before this, so a `strcpy`
+    // into a fixed buffer was invisible to every layer. That is not a gap in coverage
+    // so much as an absence: `language_for` returned None and `detect_language`
+    // returned None, so the file was never even a candidate.
+    //
+    // These assert the three things the graph needs from a C or C++ file: functions
+    // with names, calls with names, and includes as import edges. A grammar with no
+    // extractor would index files and find nothing, which is worse than not indexing.
+
+    fn parsed(name: &str, src: &str) -> ParsedFile {
+        parse_file(Path::new(name), src).unwrap_or_else(|| panic!("{name} must parse"))
+    }
+
+    fn symbol_names(p: &ParsedFile) -> Vec<String> {
+        let mut v: Vec<String> = p.symbols.iter().map(|s| s.name.clone()).collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    fn callees(p: &ParsedFile) -> Vec<String> {
+        let mut v: Vec<String> = p.calls.iter().map(|c| c.callee.clone()).collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    #[test]
+    fn a_c_function_is_a_symbol() {
+        let p = parsed("a.c", "int add(int a, int b) {\n    return a + b;\n}\n");
+        assert!(
+            symbol_names(&p).contains(&"add".to_string()),
+            "a C function must be indexed: {:?}",
+            symbol_names(&p)
+        );
+    }
+
+    #[test]
+    fn a_c_call_is_an_edge() {
+        let p = parsed(
+            "a.c",
+            "int helper(int x) { return x; }\nint main(void) { return helper(1); }\n",
+        );
+        assert!(
+            callees(&p).contains(&"helper".to_string()),
+            "a C call must be an edge: {:?}",
+            callees(&p)
+        );
+    }
+
+    #[test]
+    fn a_c_include_is_an_import() {
+        let p = parsed(
+            "a.c",
+            "#include <stdio.h>\n#include \"local.h\"\nint f(void){return 0;}\n",
+        );
+        let mut imports: Vec<String> = p.imports.iter().map(|i| i.imported.clone()).collect();
+        imports.sort();
+        assert!(
+            imports.iter().any(|m| m.contains("stdio")),
+            "an include must be an import edge: {imports:?}"
+        );
+    }
+
+    /// The shape that motivated all of this: a fixed size buffer overflowed by a
+    /// copy. Before C was indexed, a `strcpy` was invisible to every layer.
+    ///
+    /// The flow here is a value read from a source, not a bare parameter. A parameter
+    /// alone is deliberately not a source: blanket "every parameter is untrusted" was
+    /// implemented and reverted because it fired on `read_config(path)` and on
+    /// `escape`-then-`mark_safe`. A parameter reaching a sink is caught by the
+    /// interprocedural pass instead, which seeds from the caller. Asserting it here
+    /// would be asserting a capability heides does not claim.
+    #[test]
+    fn a_c_unbounded_copy_from_a_source_is_reported() {
+        let src = "#include <string.h>\n\nvoid run(void) {\n    char buf[8];\n    char *p = getenv(\"NAME\");\n    strcpy(buf, p);\n}\n";
+        let reports = crate::taint::scan_file(Path::new("vuln.c"), src);
+        assert!(
+            reports.iter().any(|r| r.message.contains("unbounded copy")),
+            "strcpy of a source derived value must be reported: {reports:?}"
+        );
+    }
+
+    /// The benign twin. A copy of a literal into a buffer of known size is ordinary
+    /// C, and reporting it would put a critical on correct code.
+    #[test]
+    fn a_c_copy_of_a_literal_stays_quiet() {
+        let src = "#include <string.h>\n\nvoid run(void) {\n    char buf[16];\n    strcpy(buf, \"hello\");\n}\n";
+        let reports = crate::taint::scan_file(Path::new("ok.c"), src);
+        assert!(
+            reports.is_empty(),
+            "a literal into an ample buffer is not a finding: {reports:?}"
+        );
+    }
+
+    /// And the documented limit, asserted so it cannot be quietly forgotten: a
+    /// parameter reaching a sink is the interprocedural pass's job.
+    #[test]
+    fn a_c_parameter_alone_is_not_a_source_here() {
+        let src = "void copy(char *src) {\n    char buf[8];\n    strcpy(buf, src);\n}\n";
+        let reports = crate::taint::scan_file(Path::new("a.c"), src);
+        assert!(
+            reports.is_empty(),
+            "a parameter is not untrusted on its own: {reports:?}"
+        );
+    }
+
+    #[test]
+    fn a_cpp_class_method_and_call_are_indexed() {
+        let p = parsed(
+            "a.cpp",
+            "class Greeter {\npublic:\n    void greet() { helper(); }\n};\nvoid helper() {}\n",
+        );
+        assert!(
+            symbol_names(&p).contains(&"greet".to_string()),
+            "a C++ method must be indexed: {:?}",
+            symbol_names(&p)
+        );
+        assert!(
+            callees(&p).contains(&"helper".to_string()),
+            "a call from inside a C++ method must be an edge: {:?}",
+            callees(&p)
+        );
+    }
+
+    #[test]
+    fn a_cpp_namespace_function_is_indexed() {
+        let p = parsed(
+            "a.cpp",
+            "namespace app { void run() { step(); } void step() {} }\n",
+        );
+        assert!(
+            symbol_names(&p).contains(&"run".to_string()),
+            "a namespaced function must be indexed: {:?}",
+            symbol_names(&p)
+        );
+    }
+
+    /// The negative that matters most: recognising C must not mean every file in the
+    /// tree becomes a symbol. A C file with one function yields one symbol, not one
+    /// per line or per token.
+    #[test]
+    fn a_c_file_yields_one_symbol_per_function_and_no_more() {
+        let p = parsed(
+            "a.c",
+            "int one(void) { return 1; }\nint two(void) { return 2; }\n",
+        );
+        assert_eq!(
+            symbol_names(&p),
+            vec!["one".to_string(), "two".to_string()],
+            "only the two functions"
+        );
+    }
+
+    /// A header is a real artefact of a C project and must not be counted as source
+    /// twice. It is scanned, and its functions are real, but the receipt must be able
+    /// to say what was seen.
+    #[test]
+    fn a_c_header_is_recognised() {
+        assert_eq!(
+            detect_language(Path::new("foo.h")).as_deref(),
+            Some("c"),
+            "a .h file is C by convention when it has no C++ marker"
+        );
+        assert_eq!(
+            detect_language(Path::new("foo.hpp")).as_deref(),
+            Some("cpp"),
+            "a .hpp file is C++"
+        );
+    }
+
+    /// A C++ file that is also valid C must be treated as C++, because the grammars
+    /// differ and the wrong one produces a broken tree.
+    #[test]
+    fn cpp_is_not_mistaken_for_c() {
+        assert_eq!(detect_language(Path::new("a.cpp")).as_deref(), Some("cpp"));
+        assert_eq!(detect_language(Path::new("a.cc")).as_deref(), Some("cpp"));
+        assert_eq!(detect_language(Path::new("a.cxx")).as_deref(), Some("cpp"));
+        assert_eq!(detect_language(Path::new("a.c")).as_deref(), Some("c"));
+    }
+
+    /// C++ has no C-compatible file extension, so the receipt has to be able to say
+    /// a language is recognised and parsed rather than recognised and empty.
+    #[test]
+    fn c_and_cpp_have_grammars() {
+        assert!(has_grammar("c"), "C must have a grammar");
+        assert!(has_grammar("cpp"), "C++ must have a grammar");
+    }
+}
+
+#[cfg(test)]
+mod ruby_tests {
+    use super::*;
+
+    fn parsed_ruby(src: &str) -> ParsedFile {
+        let p = std::path::Path::new("a.rb");
+        parse_file(p, src).expect("a .rb file must parse")
+    }
+    fn names(p: &ParsedFile) -> Vec<String> {
+        p.symbols.iter().map(|s| s.name.clone()).collect()
+    }
+    fn callees(p: &ParsedFile) -> Vec<String> {
+        p.calls.iter().map(|c| c.callee.clone()).collect()
+    }
+
+    /// A Ruby method is a `method` node with the name in a `name` field, which is
+    /// the shape the generic walk already handles. This test exists to prove the
+    /// grammar is wired, not to prove the extractor is clever.
+    #[test]
+    fn a_ruby_method_is_a_symbol() {
+        let p = parsed_ruby("class Greeter\n  def greet(name)\n    puts name\n  end\nend\n");
+        assert!(
+            names(&p).contains(&"greet".to_string()),
+            "got {:?}",
+            names(&p)
+        );
+    }
+
+    /// The call inside it must produce an edge, otherwise a Ruby graph has
+    /// symbols but no relationships and `query callers` silently answers nothing.
+    #[test]
+    fn a_ruby_call_is_an_edge() {
+        let p = parsed_ruby("def run(x)\n  helper(x)\nend\n");
+        assert!(
+            callees(&p).iter().any(|c| c == "helper"),
+            "got {:?}",
+            callees(&p)
+        );
+    }
+
+    /// `require` and `require_relative` are Ruby's import edge. Without them
+    /// there is no way to ask what a file depends on.
+    #[test]
+    fn a_ruby_require_is_an_import() {
+        let p = parsed_ruby("require 'json'\nrequire_relative 'helper'\n");
+        let mods: Vec<String> = p.imports.iter().map(|i| i.imported.clone()).collect();
+        assert!(mods.iter().any(|m| m.contains("json")), "got {:?}", mods);
+        assert!(mods.iter().any(|m| m.contains("helper")), "got {:?}", mods);
+    }
+
+    /// The singular form, which is what most real files use. A plural-only
+    /// implementation would parse every test fixture and miss every real file.
+    #[test]
+    fn a_singular_def_is_a_symbol() {
+        let p = parsed_ruby("def process(x)\n  x\nend\n");
+        assert!(
+            names(&p).contains(&"process".to_string()),
+            "got {:?}",
+            names(&p)
+        );
+    }
+
+    /// Blocks are not methods. `items.each do |x|` must not become a symbol
+    /// named "each", or dead code analysis reports every iterator as dead.
+    #[test]
+    fn a_block_is_not_a_symbol() {
+        let p = parsed_ruby("[1,2].each do |x|\n  puts x\nend\n");
+        assert!(
+            !names(&p).contains(&"each".to_string()),
+            "got {:?}",
+            names(&p)
+        );
+    }
+
+    /// The grammar must actually be wired, which is the entire gap being closed.
+    #[test]
+    fn ruby_has_a_grammar() {
+        assert!(
+            has_grammar("ruby"),
+            "ruby must have a grammar to be indexed"
+        );
+    }
+
+    /// And the honest negative: C is not Ruby, and a wrong grammar produces a
+    /// broken tree rather than a partial one, so this must not silently pass.
+    #[test]
+    fn ruby_files_are_not_parsed_as_something_else() {
+        let p = parsed_ruby("def go\n  system(params[:cmd])\nend\n");
+        assert_eq!(p.lang.as_str(), "ruby");
+    }
+
+    /// The benign twin of the shell rows. A `system` call with a literal command
+    /// is ordinary Ruby and must stay quiet, and so must a method merely named
+    /// `execute_system` or a string that happens to contain a backtick. Without
+    /// these the new rows would put criticals on correct code, which is the
+    /// failure mode that matters most.
+    #[test]
+    fn a_ruby_shell_call_with_a_literal_stays_quiet() {
+        let src = "def build\n  system('make clean')\nend\n";
+        let r = crate::taint::scan_file(std::path::Path::new("ok.rb"), src);
+        assert!(r.is_empty(), "a literal command is not a finding: {r:?}");
+    }
+
+    /// An interpolated string that is not a command is not backticks either.
+    #[test]
+    fn an_ordinary_interpolated_string_is_not_a_shell_sink() {
+        let src = "def label\n  puts \"value: #{name}\"\nend\n";
+        let r = crate::taint::scan_file(std::path::Path::new("ok.rb"), src);
+        assert!(
+            r.is_empty(),
+            "string interpolation is not command execution: {r:?}"
+        );
+    }
+
+    /// Taint: a Rails params value reaching a shell sink. This is the shape the
+    /// Ruby source rows were written for and it must fire.
+    #[test]
+    fn a_rails_param_reaching_a_shell_sink_is_reported() {
+        let src = "def run\n  system(params[:cmd])\nend\n";
+        let r = crate::taint::scan_file(std::path::Path::new("a.rb"), src);
+        assert!(r.iter().any(|x| x.message.contains("sink")), "got {r:?}");
     }
 }

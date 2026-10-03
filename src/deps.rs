@@ -1251,6 +1251,7 @@ fn canonical_ecosystem(eco: &str) -> &'static str {
 
 /// Run the dependency guard. Returns reports plus a network status flag.
 static DEPS_OVERRIDE: Mutex<Option<bool>> = Mutex::new(None);
+
 static REQUIRE_ADVISORIES: Mutex<bool> = Mutex::new(false);
 
 /// Whether the dependency guard is allowed to run.
@@ -1393,8 +1394,21 @@ pub fn check_with_depth(root: &Path) -> (Vec<DepReport>, DepsHealth, Vec<LockGra
 }
 
 pub fn check(root: &Path) -> (Vec<DepReport>, DepsHealth) {
+    check_with_opt_out(root, deps_enabled())
+}
+
+/// `check` with the opt out passed in rather than read from a process global.
+///
+/// The global exists because a command line flag has to reach a deep call, and
+/// that is fine for the binary. It is not fine for a test: `DEPS_OVERRIDE` is one
+/// `Mutex<Option<bool>>` for the whole process, so tests that call
+/// `set_deps_enabled` race each other and a test asserting "deps are off" can
+/// observe another test's "deps are on". Both of the tests for this gate failed
+/// that way before it was split out.
+fn check_with_opt_out(root: &Path, enabled: bool) -> (Vec<DepReport>, DepsHealth) {
     let deps = read_manifests(root);
     let mut reports = Vec::new();
+
     if deps.is_empty() {
         reports.push(DepReport {
             severity: "info".to_string(),
@@ -1408,6 +1422,39 @@ pub fn check(root: &Path) -> (Vec<DepReport>, DepsHealth) {
             DepsHealth {
                 advisories_ok: true,
                 versions_ok: true,
+                cache: Default::default(),
+            },
+        );
+    }
+
+    // `--no-deps` and `HEIDES_OFFLINE=1` are the user's instruction that nothing
+    // leaves the machine. This check comes after the empty manifest test on
+    // purpose: "this project has no dependencies" and "we did not look" are
+    // different facts, and the first one is true regardless of the flags. This function is what `heides deps` calls, and it used
+    // to call `osv_check` and `latest_version` without consulting either, so both
+    // opt outs were silently ignored by that command. The gate belongs here, at
+    // the single entry point, rather than at each call site.
+    //
+    // It says so out loud rather than returning an empty result. A silent empty
+    // result reads as "no vulnerabilities", which is the one conclusion this
+    // guard must never support without having actually looked.
+    if !enabled {
+        reports.push(DepReport {
+            severity: "info".to_string(),
+            message: format!(
+                "dependency check skipped: --no-deps or HEIDES_OFFLINE=1, so {} pinned version(s) were not checked against any registry",
+                deps.len()
+            ),
+            file: root.display().to_string(),
+            line: 0,
+        });
+        return (
+            reports,
+            DepsHealth {
+                // Not a clean bill of health. A run that checked nothing has not
+                // established that there is nothing to find.
+                advisories_ok: false,
+                versions_ok: false,
                 cache: Default::default(),
             },
         );
@@ -1793,6 +1840,99 @@ mod tests {
         assert!(!offline_env_value(Some("false")));
         assert!(!offline_env_value(Some("")));
         assert!(!offline_env_value(None), "unset must mean online");
+    }
+
+    /// `--no-deps` and `HEIDES_OFFLINE=1` are both promises that nothing leaves
+    /// the machine. `deps::check` was reachable from `heides deps` and called
+    /// `osv_check` and `latest_version` unconditionally, so `heides deps
+    /// --no-deps .` still made live requests to registry.npmjs.org and
+    /// api.osv.dev. An opt-out that silently does nothing is worse than no
+    /// opt-out, because it is the control a privacy conscious user reaches for.
+    ///
+    /// The flag was parsed correctly and `deps_enabled()` was correct. Nothing
+    /// on the `deps` code path ever consulted either, which is why the unit
+    /// tests for the flag all passed while the command ignored it.
+    #[test]
+    fn the_deps_subcommand_honours_the_opt_out() {
+        let dir = std::env::temp_dir().join("heides-deps-optout-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            "{\"name\":\"x\",\"dependencies\":{\"left-pad\":\"1.3.0\"}}",
+        )
+        .unwrap();
+        let (reports, health) = check_with_opt_out(&dir, false);
+        assert!(
+            !reports.iter().any(|r| r.severity != "info"),
+            "with deps disabled nothing may be looked up: {reports:?}"
+        );
+        assert!(
+            reports.iter().any(|r| r.message.contains("skipped")),
+            "the skip must be stated, not left to look like a clean result: {reports:?}"
+        );
+        assert!(
+            !health.advisories_ok,
+            "a run that checked nothing must not claim advisories were ok"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// "This project has no dependencies" and "we did not look" are different
+    /// facts. The gate was placed before the empty manifest test, so a directory
+    /// with no manifests reported "skipped" and never said there was nothing to
+    /// look at. The existing suite caught it, which is the only reason it was
+    /// found, so the ordering is pinned here directly.
+    #[test]
+    fn no_manifests_is_not_reported_as_a_skip() {
+        let dir = std::env::temp_dir().join("heides-deps-nomanifest-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (reports, health) = check_with_opt_out(&dir, false);
+        assert!(
+            reports
+                .iter()
+                .any(|r| r.message.contains("no dependency manifests found")),
+            "a project with no manifests must say so: {reports:?}"
+        );
+        assert!(
+            !reports.iter().any(|r| r.message.contains("skipped")),
+            "and must not claim it skipped a check that had nothing to do: {reports:?}"
+        );
+        assert!(
+            health.advisories_ok,
+            "nothing to check is not a failure of the check: {health:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Guards against the regression in the direction that matters: the gate must
+    /// not have swallowed the command and made `heides deps` silently useless.
+    ///
+    /// The manifest is read from disk and the run is allowed to reach the
+    /// network, but the assertion is about the shape of the result rather than
+    /// any particular advisory: a real check produces one report per dependency
+    /// and no skip line. A skip line means the gate is stuck on.
+    #[test]
+    fn the_deps_subcommand_still_checks_when_enabled() {
+        let dir = std::env::temp_dir().join("heides-deps-enabled-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            "{\"name\":\"x\",\"dependencies\":{\"left-pad\":\"1.3.0\"}}",
+        )
+        .unwrap();
+        let (reports, _) = check_with_opt_out(&dir, true);
+        assert!(
+            !reports.iter().any(|r| r.message.contains("skipped")),
+            "with deps enabled the check must actually run: {reports:?}"
+        );
+        assert!(
+            reports.iter().any(|r| r.message.contains("left-pad")),
+            "the dependency must be looked up, not ignored: {reports:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
