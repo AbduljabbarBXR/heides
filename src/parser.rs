@@ -64,6 +64,10 @@ fn language_for(lang: &str) -> Option<tree_sitter::Language> {
             // Prefer the TSX variant when the file uses JSX, otherwise plain TS.
             Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
         }
+        // Ruby had no grammar, so a .rb file was detected and then yielded no
+        // symbols and no call edges. Recognised, never parsed: the worst kind of
+        // coverage, because the receipt implied it had been looked at.
+        "ruby" => Some(tree_sitter_ruby::LANGUAGE.into()),
         "python" => Some(tree_sitter_python::LANGUAGE.into()),
         "php" => Some(tree_sitter_php::LANGUAGE_PHP.into()),
         "go" => Some(tree_sitter_go::LANGUAGE.into()),
@@ -767,6 +771,12 @@ const SYMBOL_KINDS: &[&str] = &[
     "mod_item",
     "const_item",
     "static_item",
+    // Ruby. `method` covers both `def name` and `def self.name`, since the
+    // grammar emits the same node kind and only the receiver differs. Blocks
+    // are deliberately absent: an iterator is not a method, and indexing one as
+    // a symbol makes dead code analysis report every `each` as dead.
+    "method",
+    "singleton_method",
     // Value symbols: one node per declaration in the grammars where that
     // holds, so names stay exact and the index stays clean.
     "enum_variant",
@@ -970,6 +980,7 @@ fn walk(
     // Calls
     let is_call = match out.lang.as_str() {
         "python" => kind == "call",
+        "ruby" => kind == "call",
         "java" => kind == "method_invocation",
         "php" => kind == "function_call_expression" || kind == "method_call_expression",
         "csharp" => kind == "invocation_expression",
@@ -980,6 +991,7 @@ fn walk(
             "java" | "php" if kind == "method_invocation" || kind == "method_call_expression" => {
                 field_text(node, content, "name")
             }
+            "ruby" => field_text(node, content, "method"),
             _ => field_text(node, content, "function"),
         };
         if let Some(callee) = callee_field
@@ -1036,6 +1048,36 @@ fn walk(
                         line,
                     });
                 }
+            }
+        }
+        // `require 'x'` and `require_relative 'x'` are Ruby's import edge. They
+        // are the same `call` node as any other method call, so the distinction is
+        // the callee name and the string argument. Without this arm a Ruby file
+        // had no import edges at all, so the graph could not answer what a file
+        // depends on.
+        "call"
+            if out.lang == "ruby"
+                && field_text(node, content, "method")
+                    .as_deref()
+                    .is_some_and(|m| m == "require" || m == "require_relative") =>
+        {
+            let target = node
+                .child_by_field_name("arguments")
+                .map(|a| text(a, content))
+                .map(|a| {
+                    let a = a.trim().to_string();
+                    a.strip_prefix('(')
+                        .and_then(|r| r.strip_suffix(')').map(|r| r.to_string()))
+                        .unwrap_or(a)
+                })
+                .map(|a| a.trim().trim_matches(['"', '\'', ' ']).to_string())
+                .filter(|a| !a.is_empty());
+            if let Some(imp) = target {
+                out.imports.push(ImportEdge {
+                    file: path.display().to_string(),
+                    imported: imp,
+                    line,
+                });
             }
         }
         "use_declaration" => {
@@ -1675,5 +1717,129 @@ mod c_cpp_tests {
     fn c_and_cpp_have_grammars() {
         assert!(has_grammar("c"), "C must have a grammar");
         assert!(has_grammar("cpp"), "C++ must have a grammar");
+    }
+}
+
+#[cfg(test)]
+mod ruby_tests {
+    use super::*;
+
+    fn parsed_ruby(src: &str) -> ParsedFile {
+        let p = std::path::Path::new("a.rb");
+        parse_file(p, src).expect("a .rb file must parse")
+    }
+    fn names(p: &ParsedFile) -> Vec<String> {
+        p.symbols.iter().map(|s| s.name.clone()).collect()
+    }
+    fn callees(p: &ParsedFile) -> Vec<String> {
+        p.calls.iter().map(|c| c.callee.clone()).collect()
+    }
+
+    /// A Ruby method is a `method` node with the name in a `name` field, which is
+    /// the shape the generic walk already handles. This test exists to prove the
+    /// grammar is wired, not to prove the extractor is clever.
+    #[test]
+    fn a_ruby_method_is_a_symbol() {
+        let p = parsed_ruby("class Greeter\n  def greet(name)\n    puts name\n  end\nend\n");
+        assert!(
+            names(&p).contains(&"greet".to_string()),
+            "got {:?}",
+            names(&p)
+        );
+    }
+
+    /// The call inside it must produce an edge, otherwise a Ruby graph has
+    /// symbols but no relationships and `query callers` silently answers nothing.
+    #[test]
+    fn a_ruby_call_is_an_edge() {
+        let p = parsed_ruby("def run(x)\n  helper(x)\nend\n");
+        assert!(
+            callees(&p).iter().any(|c| c == "helper"),
+            "got {:?}",
+            callees(&p)
+        );
+    }
+
+    /// `require` and `require_relative` are Ruby's import edge. Without them
+    /// there is no way to ask what a file depends on.
+    #[test]
+    fn a_ruby_require_is_an_import() {
+        let p = parsed_ruby("require 'json'\nrequire_relative 'helper'\n");
+        let mods: Vec<String> = p.imports.iter().map(|i| i.imported.clone()).collect();
+        assert!(mods.iter().any(|m| m.contains("json")), "got {:?}", mods);
+        assert!(mods.iter().any(|m| m.contains("helper")), "got {:?}", mods);
+    }
+
+    /// The singular form, which is what most real files use. A plural-only
+    /// implementation would parse every test fixture and miss every real file.
+    #[test]
+    fn a_singular_def_is_a_symbol() {
+        let p = parsed_ruby("def process(x)\n  x\nend\n");
+        assert!(
+            names(&p).contains(&"process".to_string()),
+            "got {:?}",
+            names(&p)
+        );
+    }
+
+    /// Blocks are not methods. `items.each do |x|` must not become a symbol
+    /// named "each", or dead code analysis reports every iterator as dead.
+    #[test]
+    fn a_block_is_not_a_symbol() {
+        let p = parsed_ruby("[1,2].each do |x|\n  puts x\nend\n");
+        assert!(
+            !names(&p).contains(&"each".to_string()),
+            "got {:?}",
+            names(&p)
+        );
+    }
+
+    /// The grammar must actually be wired, which is the entire gap being closed.
+    #[test]
+    fn ruby_has_a_grammar() {
+        assert!(
+            has_grammar("ruby"),
+            "ruby must have a grammar to be indexed"
+        );
+    }
+
+    /// And the honest negative: C is not Ruby, and a wrong grammar produces a
+    /// broken tree rather than a partial one, so this must not silently pass.
+    #[test]
+    fn ruby_files_are_not_parsed_as_something_else() {
+        let p = parsed_ruby("def go\n  system(params[:cmd])\nend\n");
+        assert_eq!(p.lang.as_str(), "ruby");
+    }
+
+    /// The benign twin of the shell rows. A `system` call with a literal command
+    /// is ordinary Ruby and must stay quiet, and so must a method merely named
+    /// `execute_system` or a string that happens to contain a backtick. Without
+    /// these the new rows would put criticals on correct code, which is the
+    /// failure mode that matters most.
+    #[test]
+    fn a_ruby_shell_call_with_a_literal_stays_quiet() {
+        let src = "def build\n  system('make clean')\nend\n";
+        let r = crate::taint::scan_file(std::path::Path::new("ok.rb"), src);
+        assert!(r.is_empty(), "a literal command is not a finding: {r:?}");
+    }
+
+    /// An interpolated string that is not a command is not backticks either.
+    #[test]
+    fn an_ordinary_interpolated_string_is_not_a_shell_sink() {
+        let src = "def label\n  puts \"value: #{name}\"\nend\n";
+        let r = crate::taint::scan_file(std::path::Path::new("ok.rb"), src);
+        assert!(
+            r.is_empty(),
+            "string interpolation is not command execution: {r:?}"
+        );
+    }
+
+    /// Taint: a Rails params value reaching a shell sink. This is the shape the
+    /// Ruby source rows were written for and it must fire.
+    #[test]
+    fn a_rails_param_reaching_a_shell_sink_is_reported() {
+        let src = "def run\n  system(params[:cmd])\nend\n";
+        let r = crate::taint::scan_file(std::path::Path::new("a.rb"), src);
+        assert!(r.iter().any(|x| x.message.contains("sink")), "got {r:?}");
     }
 }

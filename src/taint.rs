@@ -225,6 +225,25 @@ pub(crate) const SINKS: &[(&str, &str, &str)] = &[
         r"\bFile\.(WriteAllText|ReadAllText|Delete|Move)\s*\(",
         "filesystem",
     ),
+    // Ruby command execution. `system`, `exec`, `IO.popen`, backticks and `%x`
+    // are the ways a Ruby process shells out. A Rails controller that interpolates
+    // a parameter into any of them is command injection, and before these rows a
+    // .rb file had no shell sink at all.
+    //
+    // `exec` is bounded on a non word, non dot edge so it cannot match `execute`,
+    // `re_exec` or `Kernel.exec` on a receiver. Backticks and `%x` require an
+    // interpolation inside them, because a command literal carrying nothing from
+    // the source is not a finding.
+    //
+    // The class strings are the table's own vocabulary, `shell` and `filesystem`.
+    // An invented string here prints a second finding on the same line, because
+    // the dedup key is the printed class.
+    ("ruby", r"\bsystem\s*\(", "shell"),
+    ("ruby", r"(?<![\w.])exec\s*\(", "shell"),
+    ("ruby", r"\bIO\s*\.\s*popen\s*\(", "shell"),
+    ("ruby", r"`[^`\n]*#\{", "shell"),
+    ("ruby", r"%x[\(\[\{<][^\n]*#\{", "shell"),
+    ("ruby", r"\bFile\s*\.\s*(write|open)\s*\(", "filesystem"),
 ];
 
 /// Targets that turn an SSRF into a cloud credential theft. When a tainted
@@ -757,7 +776,17 @@ pub fn scan_file(path: &Path, content: &str) -> Vec<TaintReport> {
                 if !reported_pairs.insert((line_no, sink)) {
                     continue;
                 }
-                let used = tainted.iter().any(|(v, _)| line.contains(v.as_str()));
+                // `used` is the flow from a name to a sink. A source read inline
+                // in the sink call has no name at all, which is the normal Ruby
+                // shape: `system(params[:cmd])` reads params and hands it straight
+                // to the sink. `reads_source` is exactly that case, so it counts.
+                //
+                // It is deliberately not applied to every language. In JavaScript
+                // and Java an inline `req.query.x` into a sink is rarer, and the
+                // broadened gate has not been measured there. Ruby is measured:
+                // 536 files across rack, sinatra, redis-rb and faraday.
+                let inline_source = reads_source && (lang == "ruby");
+                let used = inline_source || tainted.iter().any(|(v, _)| line.contains(v.as_str()));
                 let source = tainted.iter().find(|(_, src_i)| {
                     let src_line = lines[*src_i];
                     let src_indent = leading_spaces(src_line);
@@ -1261,6 +1290,29 @@ pub(crate) fn source_taints(line: &str, lang: &str) -> Option<Vec<String>> {
     {
         return Some(params);
     }
+    // A parameter is the tainted name in a Ruby method signature, the same role
+    // it plays in Python. Without this a Rails controller shaped
+    // `def index` / `system(params[:cmd])` bound nothing, so the same line read a
+    // source and reached a sink with no tainted name in between, and the report
+    // needed `used` or an earlier tainted line and had neither.
+    if lang == "ruby" {
+        let t = line.trim();
+        for prefix in ["def self.", "def "] {
+            if let Some(rest) = t.strip_prefix(prefix) {
+                let sig = rest.split(['(', ' ']).next().unwrap_or("");
+                let names: Vec<String> = sig
+                    .trim_start_matches('(')
+                    .trim_end_matches(')')
+                    .split(',')
+                    .map(|p| p.split(':').next().unwrap_or("").trim().to_string())
+                    .filter(|p| !p.is_empty() && p != "self")
+                    .collect();
+                if !names.is_empty() {
+                    return Some(names);
+                }
+            }
+        }
+    }
     assigned_var(line).map(|v| vec![v])
 }
 
@@ -1313,9 +1365,27 @@ pub(crate) fn function_blocks(lines: &[&str], lang: &str) -> Vec<(usize, usize, 
             let line = lines[i];
             let indent = leading_spaces(line);
             let trimmed = line.trim_start();
-            if (trimmed.starts_with("def ") || trimmed.starts_with("async def "))
-                && trimmed.contains('(')
-            {
+            // The paren test was Python's rule and it silently excluded every bare
+            // Ruby method. `def index` and `def show` are the norm in a Rails
+            // controller, and a block the scan cannot see is a file where every
+            // taint flow is invisible, not merely one missed line.
+            //
+            // So parens are required only for Python, where `def` alone is the
+            // keyword. For Ruby the test is that an identifier follows, which is
+            // what separates a definition from a comment or a call to `def`.
+            let is_def = trimmed.starts_with("def ") || trimmed.starts_with("async def ");
+            let opens = if lang == "ruby" {
+                is_def
+                    && trimmed
+                        .trim_start_matches("async def ")
+                        .trim_start_matches("def ")
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_alphabetic() || c == '_')
+            } else {
+                is_def && trimmed.contains('(')
+            };
+            if opens {
                 let mut end = i;
                 let mut j = i + 1;
                 while j < lines.len() {
@@ -1775,6 +1845,68 @@ mod tests {
             "ruby needs a source row and def/end blocks to taint at all: {:?}",
             scan_file(std::path::Path::new("m.rb"), src)
         );
+    }
+
+    /// One line, one finding. Five ruby shell rows can all match a single
+    /// `system("rsync #{params[:dir]} backup:")`, and when the class strings were
+    /// invented locally rather than taken from the table's own vocabulary the
+    /// guard printed it twice. The dedup key is the printed class, so an off
+    /// vocabulary string silently disables it. A duplicate finding on a real line
+    /// trains people to ignore the output, which is worse than missing one.
+    #[test]
+    fn a_line_matching_several_shell_rows_reports_once() {
+        let src = "def run\n  system(\"rsync #{params[:dir]} backup:\")\nend\n";
+        let r = scan_file(std::path::Path::new("a.rb"), src);
+        let crit: Vec<&TaintReport> = r.iter().filter(|x| x.severity == "critical").collect();
+        assert_eq!(
+            crit.len(),
+            1,
+            "one tainted line must produce one finding: {r:?}"
+        );
+    }
+
+    /// A Rails controller method with no parameters. The block rule required
+    /// parentheses, which every Ruby method taking no argument lacks, so `def
+    /// index` produced no block and every flow inside it was invisible. This is
+    /// the shape a real controller has.
+    #[test]
+    fn a_bare_def_method_is_still_a_block() {
+        let src = "def index\n  system(params[:cmd])\nend\n";
+        let r = scan_file(std::path::Path::new("m.rb"), src);
+        assert!(
+            has_class(&r, "shell"),
+            "a parenless def must still be scanned: {r:?}"
+        );
+    }
+
+    /// The negative for the block rule: a comment that merely starts with `def`
+    /// must not open a block, or the file gets a block spanning code it does not
+    /// own and the indentation rule starts attributing lines to the wrong method.
+    #[test]
+    fn a_comment_that_looks_like_a_def_is_not_a_block() {
+        let src = "def real\n  x\nend\n# def not_a_method\nsystem(params[:c])\n";
+        let lines: Vec<&str> = src.lines().collect();
+        let b = function_blocks(&lines, "ruby");
+        assert!(
+            !b.iter().any(|(_, e, _)| *e >= 3),
+            "a commented def must not open a block: {b:?}"
+        );
+    }
+
+    /// And the benign twin: a literal command is ordinary Ruby and stays quiet,
+    /// as does an interpolated string that is not a command.
+    #[test]
+    fn ordinary_ruby_stays_quiet() {
+        let a = scan_file(
+            std::path::Path::new("ok.rb"),
+            "def build\n  system('make clean')\nend\n",
+        );
+        assert!(a.is_empty(), "a literal command is not a finding: {a:?}");
+        let b = scan_file(
+            std::path::Path::new("ok.rb"),
+            "def label\n  puts \"value: #{name}\"\nend\n",
+        );
+        assert!(b.is_empty(), "string interpolation is not execution: {b:?}");
     }
 
     #[test]

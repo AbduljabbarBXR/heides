@@ -685,7 +685,18 @@ pub fn scan_file(path: &Path, content: &str, lang: &str) -> Vec<PracticeReport> 
                     continue;
                 }
                 if line.contains(needle) {
-                    reports.push(rep(path, line_no, sev, msg));
+                    // In a test file `pickle.loads(pickle.dumps(x))` is a
+                    // roundtrip being asserted, not an attack. Measured on attrs:
+                    // 15 criticals, every one of them a roundtrip under `tests/`,
+                    // none in production code.
+                    //
+                    // The finding is downgraded rather than removed. Suppressing
+                    // it outright would trade a false positive for a false
+                    // negative in the one case that matters: a test that loads a
+                    // pickle an attacker supplied, which is a real finding and
+                    // stays visible at warning. Production code is untouched.
+                    let severity = if is_test_path(path) { "warning" } else { sev };
+                    reports.push(rep(path, line_no, severity, msg));
                     break;
                 }
             }
@@ -899,7 +910,23 @@ fn is_test_path(path: &Path) -> bool {
     text.split('/').any(|seg| {
         let s = seg.to_ascii_lowercase();
         s == "test" || s == "tests" || s == "testing"
-    })
+    }) || is_python_test_file(path)
+}
+
+/// The Python and Ruby test naming conventions, which the directory rule above
+/// does not catch: pytest and unittest files are `test_foo.py` or `foo_test.py`,
+/// and neither lives in a `tests` directory when a project keeps them beside the
+/// code they cover. `conftest.py` holds fixtures rather than tests but is still
+/// test code for this purpose.
+///
+/// Without these, a project that names its tests `src/**/test_*.py` is treated as
+/// production code and every roundtrip in it is reported as a defect.
+fn is_python_test_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with("test_") || lower.ends_with("_test.py") || lower == "conftest.py"
 }
 
 /// True when the quoted value carries real credential structure: a long
@@ -1336,6 +1363,65 @@ mod tests {
             .filter(|r| r.message.contains("CSPRNG"))
             .count();
         assert_eq!(random_hits, 3, "one per random call: {:?}", reports);
+    }
+
+    /// The measured case. attrs has 15 pickle findings and every one of them is
+    /// `pickle.loads(pickle.dumps(x))` under `tests/`. Reported as critical they
+    /// are 15 false positives on a correct test suite, and a tool that says
+    /// "critical" 15 times about roundtrips is a tool whose output gets ignored.
+    #[test]
+    fn a_pickle_roundtrip_in_a_test_file_is_a_warning_not_a_critical() {
+        let src = "def test_roundtrip():\n    assert pickle.loads(pickle.dumps(x)) == x\n";
+        let r = scan_file(std::path::Path::new("tests/test_dunders.py"), src, "python");
+        assert!(
+            !r.iter().any(|x| x.severity == "critical"),
+            "a test roundtrip is not a critical: {r:?}"
+        );
+        assert!(
+            r.iter().any(|x| x.severity == "warning"),
+            "but it stays visible rather than suppressed: {r:?}"
+        );
+    }
+
+    /// The naming convention matters as much as the directory. A project that
+    /// keeps `test_converters.py` beside the module it covers is still writing
+    /// tests, and before this the file was treated as production code.
+    #[test]
+    fn a_python_test_file_beside_the_code_it_covers_is_still_test_code() {
+        assert!(
+            is_test_path(std::path::Path::new("src/attrs/test_converters.py")),
+            "test_ prefix must count"
+        );
+        assert!(
+            is_test_path(std::path::Path::new("src/attrs/converters_test.py")),
+            "_test.py suffix must count"
+        );
+        assert!(
+            is_test_path(std::path::Path::new("conftest.py")),
+            "conftest holds fixtures and is test code for this purpose"
+        );
+        assert!(
+            !is_test_path(std::path::Path::new("src/attrs/converters.py")),
+            "a production module must not be treated as a test"
+        );
+    }
+
+    /// The case that makes the downgrade safe. `pickle.loads` of something a test
+    /// downloaded is a real vulnerability even though it lives in a test file,
+    /// which is why the finding is downgraded and not deleted. Production code
+    /// must still block.
+    #[test]
+    fn pickle_in_production_code_is_still_critical() {
+        let src = "def restore(blob):\n    return pickle.loads(blob)\n";
+        let r = scan_file(
+            std::path::Path::new("src/attrs/converters.py"),
+            src,
+            "python",
+        );
+        assert!(
+            r.iter().any(|x| x.severity == "critical"),
+            "production pickle must stay critical: {r:?}"
+        );
     }
 
     /// The safe twins. These are the lines that make the rules above usable,

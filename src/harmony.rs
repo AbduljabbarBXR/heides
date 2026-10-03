@@ -1214,24 +1214,35 @@ mod liveness {
     }
 
     #[test]
-    fn the_receipt_separates_taint_scanned_from_indexed() {
-        // Ruby is recognised so the taint guard can scan it, and has no
-        // grammar, so it contributes nothing to the graph. The receipt has to
-        // distinguish that from a language with no rules at all.
-        let dir = scratch("rubyonly");
+    fn ruby_is_now_fully_covered_and_the_receipt_says_so() {
+        // This test used to assert the opposite: that ruby has no grammar and
+        // must be reported as "taint scanned, no grammar". That was true when
+        // ruby was recognised but never parsed, and it became false the moment
+        // the grammar landed.
+        //
+        // The receipt is unchanged and still has to work, so the property worth
+        // asserting is no longer "ruby is a hole" but "nothing is quietly left in
+        // either bucket for a language heides claims to index".
+        let dir = scratch("rubycovered");
         std::fs::write(dir.join("a.rb"), "def f\n  1\nend\n").unwrap();
         let (graph, _) = indexer::build_graph(&dir);
         let cov = coverage_of(&graph, DepsState::RanOnline);
         let text = cov.render();
         assert!(
             cov.taint_untested.is_empty(),
-            "ruby has taint rules, so it is not in the untested list: {text}"
+            "ruby has taint rules, so it is not untested: {text}"
         );
         assert!(
-            cov.no_grammar.iter().any(|l| l == "ruby"),
-            "ruby has no grammar and must be reported as such: {text}"
+            !cov.no_grammar.iter().any(|l| l == "ruby"),
+            "ruby has a grammar now and must not be reported as lacking one: {text}"
         );
-        assert!(text.contains("no grammar"), "{text}");
+        // And the symbols really are in the graph, which is the thing the old
+        // receipt was standing in for.
+        assert!(
+            graph.symbols.iter().any(|s| s.name == "f"),
+            "a ruby method must reach the graph, not just the receipt"
+        );
+        assert!(!text.contains("no grammar"), "{text}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
