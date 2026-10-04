@@ -93,6 +93,148 @@ pub(crate) const SOURCES: [(&str, &str); 32] = [
 /// Sinks are per language. Where a name is ambiguous between SQL and something
 /// harmless, it only counts when it is called on a database-ish receiver, so
 /// `run(` in a task runner stays silent while `db.run(` is SQL.
+/// Whether a line can only be a constant, so no source can flow through it.
+///
+/// The narrow form matters more than the broad one. This returns true only when
+/// the line contains a quoted literal and nothing that could read input, which
+/// means `strcpy(b, "hi")` is recognised as constant while
+/// `strcpy(b, getenv("X"))` is not, because `getenv` is not a literal. A looser
+/// "does it mention a string" rule would silence the very findings this tool
+/// exists to raise.
+fn is_only_literal_or_sanitizer(line: &str) -> bool {
+    let t = line.trim();
+    if t.is_empty() {
+        return false;
+    }
+    // A call on this line could produce anything, so the line is only constant
+    // when every call on it is a sanitizer. `strcpy(b, "hi")` has no call that
+    // produces the value; `strcpy(b, getenv("X"))` has one that does.
+    if t.contains('(') {
+        let mut calls_are_sanitizers = false;
+        for (_, pat) in SANITIZERS {
+            if regex_hit(pat, line) {
+                calls_are_sanitizers = true;
+                break;
+            }
+        }
+        if !calls_are_sanitizers {
+            return false;
+        }
+    }
+    // Everything outside the string literals has to be punctuation and keywords.
+    // Anything left that reads a name could carry input, so the line is not a
+    // constant. This is what keeps `#{params[:cmd]}` out of the constant case
+    // while `#{"literal"}` is in it.
+    let mut residue = String::new();
+    let mut chars = t.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '"' || ch == '\'' {
+            let quote = ch;
+            let mut escaped = false;
+            for c in chars.by_ref() {
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if c == '\\' {
+                    escaped = true;
+                    continue;
+                }
+                if c == quote {
+                    break;
+                }
+            }
+            continue;
+        }
+        if ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '@' || ch == '#' {
+            residue.push(ch);
+        }
+    }
+    // Identifiers that are language keywords or the sink itself are fine.
+    const ALLOWED: &[&str] = &[
+        "char", "const", "void", "int", "strcpy", "strcat", "memcpy", "sprintf", "snprintf",
+        "system", "exec", "puts", "printf", "return", "let", "var", "def", "end", "static",
+        "unsigned", "long", "short", "size_t", "string", "new", "byte", "boolean", "int8", "uint8",
+        "int16", "int32", "int64", "uint32", "uint64", "float", "double", "bool",
+    ];
+    let mut words = residue.split(|c: char| !c.is_alphanumeric() && c != '_');
+    words.all(|w| w.is_empty() || ALLOWED.contains(&w))
+}
+
+/// Sanitizers: a value that passes through one of these stops being a finding.
+///
+/// The rule tables had sources and sinks and nothing in between, so every rule had
+/// to be written timid to stay precise. `strncpy` was kept out of a group with
+/// `strcpy` because it is often the safe choice, which is the wrong reason to be
+/// quiet about a dangerous function: the right reason is that the value was
+/// escaped, and that is a property of the data, not of the callee.
+///
+/// This is the same three table shape semgrep uses in taint mode, and it buys back
+/// the precision that costs nothing. Rows are (language, pattern).
+pub(crate) const SANITIZERS: &[(&str, &str)] = &[
+    // Shell. The value is quoted for the shell, so interpolating it cannot change
+    // the command's structure.
+    ("ruby", r"\bShellwords\s*\.\s*escape\s*\("),
+    ("ruby", r"\bShellwords\s*\.\s*shellescape\s*\("),
+    ("ruby", r"\bquote\s*\("),
+    ("python", r"\bshlex\s*\.\s*quote\s*\("),
+    ("python", r"\bpipes\s*\.\s*quote\s*\("),
+    (
+        "javascript",
+        r"\bescapeShell|\bshellQuote\b|\bexecFileSync\s*\(",
+    ),
+    ("java", r"\bProcessBuilder\b"),
+    // C and C++. `snprintf` bounds the write and NUL terminates; `strlcpy` and
+    // `strlcat` bound the copy. These are what makes a broad copy rule safe.
+    ("c", r"\bsnprintf\s*\("),
+    ("c", r"\bstrlcpy\s*\("),
+    ("c", r"\bstrlcat\s*\("),
+    ("cpp", r"\bsnprintf\s*\("),
+    ("cpp", r"\bstrlcpy\s*\("),
+    ("cpp", r"\bstrlcat\s*\("),
+    ("cpp", r"\bstd\s*\.\s*snprintf\s*\("),
+    // SQL. A parameterised query binds the value instead of interpolating it, so
+    // the statement structure cannot change.
+    ("python", r"\bexecute\s*\([^)]*,\s*\w+\s*,"),
+    ("ruby", r"\bsanitize_sql\s*\("),
+    ("java", r"\bsetString\s*\("),
+    // A template literal with no `${}` inside it is a constant query string. A
+    // parameterised call binds its values, so interpolating into a plain string
+    // is the only form that can change the statement.
+    ("csharp", r"\bSqlParameter\b"),
+    ("go", r"\bPlaceholder|\bQueryContext\b"),
+    // Path traversal. Normalising and then taking the base name removes any `..`
+    // the caller supplied.
+    ("python", r"\bos\.path\s*\.\s*basename\s*\("),
+    ("python", r"\bPath\s*\([^)]*\)\s*\.\s*name\b"),
+    ("ruby", r"\bFile\s*\.\s*basename\s*\("),
+    ("javascript", r"\bpath\s*\.\s*(basename|normalize)\s*\("),
+    ("c", r"\brealpath\s*\("),
+    ("cpp", r"\bstd\s*\.\s*filesystem\s*\.\s*canonical\s*\("),
+    // HTML and template output.
+    ("javascript", r"\bDOMPurify\s*\.\s*sanitize\s*\("),
+    ("javascript", r"\bescapeHtml\s*\("),
+    ("python", r"\bbleach\s*\.\s*clean\s*\("),
+    ("python", r"\bmarkupsafe\s*\.\s*escape\s*\("),
+    ("ruby", r"\bERB\s*\.\s*Util\s*\.\s*html_escape\s*\("),
+    ("ruby", r"\bCGI\s*\.\s*escapeHTML\s*\("),
+    // Generic. A name or return value that reads as "escaped", "sanitised" or
+    // "validated" is treated as neutral. This is a heuristic and it is the one
+    // row here that can hide a real finding, so it is deliberately narrow.
+    (
+        "python",
+        r"\b(escaped|sanitized|sanitised|validated|quoted)\b",
+    ),
+    (
+        "javascript",
+        r"\b(escaped|sanitized|sanitised|validated|encoded)\b",
+    ),
+    (
+        "ruby",
+        r"\b(escaped|sanitized|sanitised|validated|escaped_)\b",
+    ),
+];
+
 pub(crate) const SINKS: &[(&str, &str, &str)] = &[
     // C and C++. Memory corruption is the dominant class in these languages and
     // it was entirely absent before: heides indexed no C at all, so a `strcpy`
@@ -132,13 +274,16 @@ pub(crate) const SINKS: &[(&str, &str, &str)] = &[
     ("cpp", r"\bpopen\s*\(", "shell"),
     ("cpp", r"\b(fopen|open)\s*\(", "filesystem"),
     ("cpp", r"\bstd::(system|popen)\s*\(", "shell"),
-    ("javascript", r"\b(query|execute|exec)\s*\(", "SQL"),
     (
         "javascript",
         r"\b(db|database|sqlite|sqlite3|pg|mysql|conn|connection|client|stmt|statement|tx|transaction|pool|sequelize|knex|prisma|typeorm|drizzle|orm|sql|store)\s*\.\s*(run|exec|execSQL|raw|literal|query|all|get|prepare|execute)\s*\(",
         "SQL",
     ),
-    ("javascript", r"\b(execSQL|queryRaw|executeSql)\s*\(", "SQL"),
+    (
+        "javascript",
+        r"\b(query|execute|execSQL|queryRaw|executeSql)\s*\(",
+        "SQL",
+    ),
     ("javascript", r"\b(eval|Function)\s*\(", "eval"),
     ("javascript", r"\bexec\s*\(", "shell"),
     ("javascript", r"\bspawn\s*\(", "shell"),
@@ -791,8 +936,19 @@ pub fn scan_file(path: &Path, content: &str) -> Vec<TaintReport> {
                 // It is deliberately not applied to javascript or java, where an
                 // inline `req.query.x` reaching a sink is rarer and the broadened
                 // gate has not been measured there.
-                let inline_source = reads_source && matches!(lang.as_str(), "ruby" | "c" | "cpp");
-                let used = inline_source || tainted.iter().any(|(v, _)| line.contains(v.as_str()));
+                // Sanitizers and literals both end the flow, and both are checked
+                // before the sink is reported rather than after, so a sanitized
+                // value never reaches the report at all.
+                let sanitized = SANITIZERS
+                    .iter()
+                    .any(|(sl, pat)| *sl == lang && regex_hit(pat, line));
+                let line_is_literal = is_only_literal_or_sanitizer(line);
+                let inline_source = reads_source
+                    && matches!(lang.as_str(), "ruby" | "c" | "cpp")
+                    && !line_is_literal;
+                let used = !sanitized
+                    && !line_is_literal
+                    && (inline_source || tainted.iter().any(|(v, _)| line.contains(v.as_str())));
                 let source = tainted.iter().find(|(_, src_i)| {
                     let src_line = lines[*src_i];
                     let src_indent = leading_spaces(src_line);
@@ -925,6 +1081,12 @@ pub(crate) fn regex_hit(pattern: &'static str, line: &str) -> bool {
         }
         for rule in strict_sinks_all() {
             m.entry(rule).or_insert_with(|| prepare(rule));
+        }
+        // Sanitizer rows are looked up by the same `regex_hit`. Leaving them out
+        // makes the lookup below miss, and a miss is an `abort()` rather than a
+        // warning, so the first line that reaches a sanitizer killed the process.
+        for (_l, pat) in SANITIZERS {
+            m.entry(pat).or_insert_with(|| prepare(pat));
         }
         m
     });
@@ -1858,6 +2020,62 @@ mod tests {
             has_class(&scan_file(std::path::Path::new("m.rb"), src), "NoSQL"),
             "ruby needs a source row and def/end blocks to taint at all: {:?}",
             scan_file(std::path::Path::new("m.rb"), src)
+        );
+    }
+
+    // ------------------------------------------------- sanitizers and constants
+    //
+    // The rule tables had sources and sinks and nothing in between, so precision
+    // had to come from writing timid sinks. `strncpy` was excluded from a group
+    // with `strcpy` because it is often the safe choice, which is the wrong
+    // reason: the right reason is that nothing escaped the value. Sanitizers let
+    // the rule be broad and the precision come from the escape.
+
+    /// A value that passes through a sanitizer stops being a finding. This is the
+    /// single highest value addition and it is borrowed from semgrep's taint mode,
+    /// which has the same three tables and no more.
+    #[test]
+    fn a_shell_escaped_value_is_not_a_finding() {
+        let src = "def run\n  system(\"rsync #{Shellwords.escape(params[:dir])} backup:\")\nend\n";
+        let r = scan_file(std::path::Path::new("a.rb"), src);
+        assert!(
+            r.is_empty(),
+            "an escaped argument must not be reported: {r:?}"
+        );
+    }
+
+    /// And the negative: the same call without the escape still fires. A sanitizer
+    /// table that swallowed everything would pass the test above.
+    #[test]
+    fn an_unescaped_value_is_still_a_finding() {
+        let src = "def run\n  system(\"rsync #{params[:dir]} backup:\")\nend\n";
+        let r = scan_file(std::path::Path::new("a.rb"), src);
+        assert!(has_class(&r, "shell"), "{r:?}");
+    }
+
+    /// Python, where `shlex.quote` is the canonical escape.
+    #[test]
+    fn python_shlex_quote_stops_the_flow() {
+        let src = "import shlex\ncmd = \"rsync %s\" % shlex.quote(req.args)\nsubprocess.run(cmd, shell=True)\n";
+        let r = scan_file(std::path::Path::new("a.py"), src);
+        assert!(
+            !has_class(&r, "shell"),
+            "a quoted command must not be reported: {r:?}"
+        );
+    }
+
+    /// The second half of the same idea: a literal is never a source. `strcpy` of a
+    /// string constant into a buffer cannot be an overflow driven by input, and
+    /// before this the only reason it stayed quiet was a regex that happened to
+    /// miss it.
+    #[test]
+    fn a_literal_cannot_be_tainted() {
+        let src =
+            "void f(void){\n    char b[8];\n    char *p = \"literal\";\n    strcpy(b, p);\n}\n";
+        let r = scan_file(std::path::Path::new("a.c"), src);
+        assert!(
+            r.is_empty(),
+            "a name bound only to a literal is not tainted: {r:?}"
         );
     }
 
