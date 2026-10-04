@@ -310,6 +310,63 @@ fn code_after_the_test_module_is_real_code() {
     );
 }
 
+/// A one line `mod tests` opens and closes on the line it is asked about, so the
+/// depth is already back to zero and a pop that runs before the question drops
+/// the module before it was ever seen. It is dense, ordinary formatting, and it
+/// is the same shape as the one line C function fixed in 0.24.1.
+#[test]
+fn a_one_line_test_module_is_still_a_test_module() {
+    let src = "#[cfg(test)]\nmod tests { #[test] fn one() { a.unwrap() } }\n";
+    let lines: Vec<&str> = src.lines().collect();
+    let at = lines.iter().position(|l| l.contains("a.unwrap()")).unwrap();
+    assert!(
+        is_test_context(std::path::Path::new("src/thing.rs"), &lines, at),
+        "a one line test module is still a test module: {src:?}"
+    );
+}
+
+/// The name is matched as a whole word. `mod tests_support` is ordinary
+/// production code that happens to contain the substring, and a substring test
+/// silenced every finding in it.
+#[test]
+fn a_production_module_whose_name_merely_contains_tests_is_not_test_code() {
+    let src = "mod tests_support {\n    pub fn p() {\n        d.unwrap()\n    }\n}\n";
+    let lines: Vec<&str> = src.lines().collect();
+    let at = lines.iter().position(|l| l.contains("d.unwrap()")).unwrap();
+    assert!(
+        !is_test_context(std::path::Path::new("src/thing.rs"), &lines, at),
+        "production code in mod tests_support must still be reported"
+    );
+}
+
+/// Tightening the name test is only safe because the attribute above is read.
+/// This is the real shape in this file: `#[cfg(test)] mod budget_tests`, where the
+/// name on its own would say production and the body is all test.
+#[test]
+fn a_cfg_test_attribute_above_any_name_is_honoured() {
+    let src = "#[cfg(test)]\nmod budget_tests {\n    fn one() {\n        a.unwrap()\n    }\n}\n";
+    let lines: Vec<&str> = src.lines().collect();
+    let at = lines.iter().position(|l| l.contains("a.unwrap()")).unwrap();
+    assert!(
+        is_test_context(std::path::Path::new("src/thing.rs"), &lines, at),
+        "#[cfg(test)] is authoritative whatever the module is called"
+    );
+}
+
+/// `#[cfg(not(test))]` compiles the item when tests are *not* running, so it is
+/// production code wearing a test attribute.
+#[test]
+fn a_cfg_not_test_module_is_production_code() {
+    let src =
+        "#[cfg(not(test))]\nmod budget_tests {\n    pub fn p() {\n        d.unwrap()\n    }\n}\n";
+    let lines: Vec<&str> = src.lines().collect();
+    let at = lines.iter().position(|l| l.contains("d.unwrap()")).unwrap();
+    assert!(
+        !is_test_context(std::path::Path::new("src/thing.rs"), &lines, at),
+        "#[cfg(not(test))] is production code, however it is named"
+    );
+}
+
 /// A `#[cfg(test)]` module or a `tests/` path holds assertions about the code,
 /// not code that runs in production. Flagging an `unwrap` there says nothing
 /// about the shipped binary, and 41 of the 152 findings on this repository were
@@ -347,9 +404,15 @@ pub(crate) fn is_test_context(path: &Path, lines: &[&str], at: usize) -> bool {
         let t = line.trim_start();
         let opens = t.matches('{').count() as i32;
         let closes = t.matches('}').count() as i32;
-        if opens > 0 && (t.starts_with("mod ") || t.starts_with("pub mod ")) {
+        if opens > 0 && module_name(t).is_some() {
             open_at.push(depth);
-            is_test.push(lines[i].contains("cfg(test)") || t.contains("tests"));
+            is_test.push(is_test_module(t, attr_above(lines, i).unwrap_or("")));
+        }
+        // Asked before the braces are applied, not after. A module that opens and
+        // closes on the same line is open *at* that line, so a pop that ran first
+        // would drop it before the question was ever put.
+        if i == at {
+            return is_test.iter().any(|t| *t);
         }
         depth += opens - closes;
         while let Some(d) = open_at.last() {
@@ -360,11 +423,94 @@ pub(crate) fn is_test_context(path: &Path, lines: &[&str], at: usize) -> bool {
                 break;
             }
         }
-        if i == at {
-            return is_test.iter().any(|t| *t);
-        }
     }
     false
+}
+
+/// The identifier in a `mod` declaration: `tests` for `pub(crate) mod tests {`.
+///
+/// `None` when the line is not a module declaration at all. The name is returned
+/// whole so callers can compare it exactly.
+fn module_name(line: &str) -> Option<&str> {
+    let t = line.trim_start();
+    // Step over the visibility: `pub`, `pub(crate)`, `pub(super)`, `pub(in crate)`.
+    let after_pub = match t.strip_prefix("pub") {
+        Some(r) => {
+            let r = r.trim_start();
+            match r.strip_prefix('(') {
+                Some(inner) => inner.split_once(')').map(|(_, after)| after.trim_start())?,
+                None => r,
+            }
+        }
+        None => t,
+    };
+    let name = after_pub
+        .strip_prefix("mod ")?
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .next()
+        .unwrap_or("");
+    (!name.is_empty()).then_some(name)
+}
+
+/// True when a `mod` declaration names a test module.
+///
+/// Two narrow signals. `#[cfg(test)]` is authoritative and conventionally sits on
+/// the line *above* the declaration, so it has to be read from there: tighten the
+/// name test without reading that line and `#[cfg(test)] mod budget_tests`, in this
+/// file's own source, starts reporting its own test bodies as production. The name
+/// is an exact match for the same reason, since `tests_support`, `retests` and
+/// `contests` are all spellings production code can have.
+fn is_test_module(decl: &str, attr: &str) -> bool {
+    decl.contains("cfg(test)")
+        || cfg_attr_is_test(attr)
+        || matches!(module_name(decl), Some("test" | "tests"))
+}
+
+/// True when a `#[cfg(...)]` line turns the item on under test.
+///
+/// `#[cfg(not(test))]` compiles the item when tests are *not* running, which makes
+/// it production code. Splitting on word boundaries keeps `all(test, unix)` true and
+/// `not(test)` false, and an expression that is ambiguous either way resolves to
+/// production, because silencing a real finding is the worse error to make.
+fn cfg_attr_is_test(attr: &str) -> bool {
+    let Some(inner) = attr
+        .trim()
+        .strip_prefix("#[cfg(")
+        .and_then(|r| r.strip_suffix(")]"))
+    else {
+        return false;
+    };
+    if inner.replace(' ', "").contains("not(test)") {
+        return false;
+    }
+    inner
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .any(|w| w == "test")
+}
+
+/// The `#[cfg(...)]` attribute directly above a declaration, if there is one.
+///
+/// Rust puts `#[cfg(test)]` on the line before `mod`, which is the layout rustfmt
+/// produces and the one every real crate uses. Walks back over blanks, comments
+/// and other attributes so a documented attribute is still found, and stops at the
+/// first line of anything else.
+fn attr_above<'a>(lines: &[&'a str], at: usize) -> Option<&'a str> {
+    let mut i = at;
+    while i > 0 {
+        i -= 1;
+        let t = lines[i].trim();
+        if t.is_empty() || t.starts_with("//") {
+            continue;
+        }
+        if t.starts_with("#[") || t.starts_with("#![") {
+            if t.starts_with("#[cfg(") {
+                return Some(t);
+            }
+            continue;
+        }
+        return None;
+    }
+    None
 }
 
 fn rep(path: &Path, line: u64, severity: &str, message: &str) -> EdgeReport {
