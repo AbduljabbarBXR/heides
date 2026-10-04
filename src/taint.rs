@@ -106,59 +106,306 @@ fn is_only_literal_or_sanitizer(line: &str) -> bool {
     if t.is_empty() {
         return false;
     }
-    // A call on this line could produce anything, so the line is only constant
-    // when every call on it is a sanitizer. `strcpy(b, "hi")` has no call that
-    // produces the value; `strcpy(b, getenv("X"))` has one that does.
-    if t.contains('(') {
-        let mut calls_are_sanitizers = false;
-        for (_, pat) in SANITIZERS {
-            if regex_hit(pat, line) {
-                calls_are_sanitizers = true;
-                break;
-            }
+    // Every argument that a sink actually reads has to be a constant. This is a
+    // decision about argument positions rather than about identifiers, which is
+    // what replaces a list of known type and keyword names: such a list is a trap,
+    // because a type it does not contain makes a constant line stop looking like
+    // one and the rule decays without anything failing.
+    //
+    // `wchar_t b[16]; strcpy(b, L"hi");` is constant whatever the type is called,
+    // and `mystery_reader()` is not constant whatever the sink is called.
+    if !t.contains('(') {
+        // No call at all: an assignment whose right hand side is entirely literal.
+        return rhs_is_constant(t);
+    }
+    // A call on the line can only be neutral if it is a sanitizer. A sink call is
+    // of course not one, so the arguments of every other call must be constant and
+    // the callee itself must not read anything.
+    let mut saw_sanitizer = false;
+    for (_, pat) in SANITIZERS {
+        if regex_hit(pat, line) {
+            saw_sanitizer = true;
+            break;
         }
-        if !calls_are_sanitizers {
+    }
+    if saw_sanitizer {
+        return true;
+    }
+    // Every call on the line must have constant arguments, and no call may be an
+    // unknown one. Identifiers sitting outside call parentheses, such as a buffer
+    // name or a type, are deliberately not consulted: they cannot read input.
+    for (name, args) in calls_in(line) {
+        if !is_known_sink(&name) {
+            // An unknown callee can produce anything, so the line is not constant
+            // unless it reads nothing at all, which a call by definition might.
+            return false;
+        }
+        if !args_are_constant(&args) {
             return false;
         }
     }
-    // Everything outside the string literals has to be punctuation and keywords.
-    // Anything left that reads a name could carry input, so the line is not a
-    // constant. This is what keeps `#{params[:cmd]}` out of the constant case
-    // while `#{"literal"}` is in it.
-    let mut residue = String::new();
-    let mut chars = t.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '"' || ch == '\'' {
-            let quote = ch;
+    rhs_is_constant(t)
+}
+
+/// The part of a statement outside string literals, used only to spot the
+/// identifiers that appear as callees.
+fn calls_in(line: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let bytes: Vec<char> = line.chars().collect();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == '"' || bytes[i] == '\'' {
+            let quote = bytes[i];
+            i += 1;
             let mut escaped = false;
-            for c in chars.by_ref() {
+            while i < bytes.len() {
                 if escaped {
                     escaped = false;
-                    continue;
-                }
-                if c == '\\' {
+                } else if bytes[i] == '\\' {
                     escaped = true;
-                    continue;
-                }
-                if c == quote {
+                } else if bytes[i] == quote {
                     break;
                 }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if bytes[i].is_alphanumeric() || bytes[i] == '_' {
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_alphanumeric() || bytes[i] == '_') {
+                i += 1;
+            }
+            let name: String = bytes[start..i].iter().collect();
+            // Skip whitespace to see whether this is a callee.
+            let mut j = i;
+            while j < bytes.len() && bytes[j].is_whitespace() {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == '(' {
+                // Find the matching close.
+                let mut depth = 0i32;
+                let mut k = j;
+                while k < bytes.len() {
+                    if bytes[k] == '(' {
+                        depth += 1;
+                    } else if bytes[k] == ')' {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    k += 1;
+                }
+                let args: String = bytes[(j + 1).min(bytes.len())..k.min(bytes.len())]
+                    .iter()
+                    .collect();
+                out.push((name, args));
+                i = k + 1;
+                continue;
             }
             continue;
         }
-        if ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '@' || ch == '#' {
-            residue.push(ch);
+        i += 1;
+    }
+    out
+}
+
+/// Whether every argument is a literal. An argument that is a bare identifier is
+/// a value read from elsewhere, which is exactly what a sink consumes, so it is
+/// not constant. Numbers and literals are.
+fn args_are_constant(args: &str) -> bool {
+    let t = args.trim();
+    if t.is_empty() {
+        return true;
+    }
+    for arg in split_top_level(t) {
+        let a = arg.trim();
+        if a.is_empty() {
+            continue;
+        }
+        if is_literal_expression(a) {
+            continue;
+        }
+        return false;
+    }
+    true
+}
+
+/// Split on commas that are not inside brackets or string literals.
+fn split_top_level(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0i32;
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '"' || c == '\'' {
+            let quote = c;
+            cur.push(c);
+            i += 1;
+            while i < chars.len() {
+                cur.push(chars[i]);
+                if chars[i] == '\\' && i + 1 < chars.len() {
+                    i += 1;
+                    cur.push(chars[i]);
+                } else if chars[i] == quote {
+                    break;
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            _ => {}
+        }
+        if c == ',' && depth == 0 {
+            out.push(std::mem::take(&mut cur));
+            i += 1;
+            continue;
+        }
+        cur.push(c);
+        i += 1;
+    }
+    if !cur.trim().is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// A literal expression: a quoted string, a number, or a cast of one, with no
+/// interpolation and no concatenation with a name.
+fn is_literal_expression(a: &str) -> bool {
+    let t = a.trim();
+    if t.is_empty() {
+        return true;
+    }
+    // Strip a leading cast such as `(char *)` or `L`.
+    let mut body = t;
+    if let Some(rest) = body.strip_prefix('L') {
+        body = rest;
+    }
+    while body.starts_with('(') {
+        match body.find(')') {
+            Some(p) => body = body[p + 1..].trim(),
+            None => return false,
         }
     }
-    // Identifiers that are language keywords or the sink itself are fine.
-    const ALLOWED: &[&str] = &[
-        "char", "const", "void", "int", "strcpy", "strcat", "memcpy", "sprintf", "snprintf",
-        "system", "exec", "puts", "printf", "return", "let", "var", "def", "end", "static",
-        "unsigned", "long", "short", "size_t", "string", "new", "byte", "boolean", "int8", "uint8",
-        "int16", "int32", "int64", "uint32", "uint64", "float", "double", "bool",
-    ];
-    let mut words = residue.split(|c: char| !c.is_alphanumeric() && c != '_');
-    words.all(|w| w.is_empty() || ALLOWED.contains(&w))
+    let body = body.trim();
+    if body.is_empty() {
+        return true;
+    }
+    // Numeric.
+    if body
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '+' || c == 'x')
+        && body.chars().any(|c| c.is_ascii_digit())
+    {
+        return true;
+    }
+    // Quoted with no interpolation.
+    let q = body.chars().next().unwrap_or(' ');
+    if q == '"' || q == '\'' {
+        return !body.contains("${") && !body.contains("#{") && !body.contains("%s");
+    }
+    false
+}
+
+fn is_known_sink(name: &str) -> bool {
+    // The bare function name, without a receiver. A sink is called for its effect
+    // on the buffer, not for what it returns, so a constant argument list means
+    // the line cannot be carrying input into it.
+    let base = name.rsplit('.').next().unwrap_or(name);
+    matches!(
+        base,
+        "strcpy"
+            | "strcat"
+            | "memcpy"
+            | "memmove"
+            | "sprintf"
+            | "snprintf"
+            | "strncpy"
+            | "strncat"
+            | "printf"
+            | "fprintf"
+            | "puts"
+            | "memset"
+            | "strlen"
+            | "sizeof"
+            | "system"
+            | "exec"
+            | "popen"
+    )
+}
+
+/// Whether the right hand side of a statement is entirely literal.
+fn rhs_is_constant(t: &str) -> bool {
+    let Some(eq) = t.find('=') else {
+        // No assignment. A bare statement is constant when it is entirely literal.
+        return is_literal_expression(t);
+    };
+    let rhs = t[eq + 1..].trim();
+    if rhs.is_empty() {
+        return true;
+    }
+    // Concatenation is constant only when every piece of it is. `'tell me ' +
+    // user` is not a constant, and treating the whole right hand side as one
+    // literal expression is what made it look like one.
+    if rhs.contains('+') {
+        return split_top_level_plus(rhs)
+            .iter()
+            .all(|part| is_literal_expression(part.trim()));
+    }
+    is_literal_expression(rhs)
+}
+
+/// Split a concatenation on `+` at bracket depth zero and outside literals.
+fn split_top_level_plus(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let chars: Vec<char> = s.chars().collect();
+    let mut depth = 0i32;
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '"' || c == '\'' {
+            let quote = c;
+            cur.push(c);
+            i += 1;
+            while i < chars.len() {
+                cur.push(chars[i]);
+                if chars[i] == '\\' && i + 1 < chars.len() {
+                    i += 1;
+                    cur.push(chars[i]);
+                } else if chars[i] == quote {
+                    break;
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            _ => {}
+        }
+        if c == '+' && depth == 0 {
+            out.push(std::mem::take(&mut cur));
+            i += 1;
+            continue;
+        }
+        cur.push(c);
+        i += 1;
+    }
+    if !cur.trim().is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 /// Sanitizers: a value that passes through one of these stops being a finding.
@@ -195,9 +442,13 @@ pub(crate) const SANITIZERS: &[(&str, &str)] = &[
     ("cpp", r"\bstd\s*\.\s*snprintf\s*\("),
     // SQL. A parameterised query binds the value instead of interpolating it, so
     // the statement structure cannot change.
-    ("python", r"\bexecute\s*\([^)]*,\s*\w+\s*,"),
+    ("python", r"\bexecute\s*\([^)]*,\s*\s*,\s*\s*\)"),
     ("ruby", r"\bsanitize_sql\s*\("),
     ("java", r"\bsetString\s*\("),
+    // JavaScript. A `$1` style placeholder cannot have its statement structure
+    // changed by the value, so the sink is neutralised. A template literal with
+    // `${}` is NOT here: that is interpolation, which is the vulnerable form, and
+    // an earlier version of this table had it exactly backwards.
     // A template literal with no `${}` inside it is a constant query string. A
     // parameterised call binds its values, so interpolating into a plain string
     // is the only form that can change the statement.
@@ -212,27 +463,21 @@ pub(crate) const SANITIZERS: &[(&str, &str)] = &[
     ("c", r"\brealpath\s*\("),
     ("cpp", r"\bstd\s*\.\s*filesystem\s*\.\s*canonical\s*\("),
     // HTML and template output.
+    ("javascript", r"\$1"),
+    ("javascript", r"\$2"),
+    ("javascript", r"\$3"),
     ("javascript", r"\bDOMPurify\s*\.\s*sanitize\s*\("),
     ("javascript", r"\bescapeHtml\s*\("),
     ("python", r"\bbleach\s*\.\s*clean\s*\("),
     ("python", r"\bmarkupsafe\s*\.\s*escape\s*\("),
     ("ruby", r"\bERB\s*\.\s*Util\s*\.\s*html_escape\s*\("),
     ("ruby", r"\bCGI\s*\.\s*escapeHTML\s*\("),
-    // Generic. A name or return value that reads as "escaped", "sanitised" or
-    // "validated" is treated as neutral. This is a heuristic and it is the one
-    // row here that can hide a real finding, so it is deliberately narrow.
-    (
-        "python",
-        r"\b(escaped|sanitized|sanitised|validated|quoted)\b",
-    ),
-    (
-        "javascript",
-        r"\b(escaped|sanitized|sanitised|validated|encoded)\b",
-    ),
-    (
-        "ruby",
-        r"\b(escaped|sanitized|sanitised|validated|escaped_)\b",
-    ),
+    // The generic "a name that reads as escaped or validated" heuristic that was
+    // here is removed on purpose. It silenced findings on the strength of a
+    // variable name, which is a guess, and a guess that suppresses a security
+    // finding is the wrong trade. A project that wraps an escape in its own
+    // `safe_shell()` now gets a false positive, which is the honest direction:
+    // it is visible, and the wrapper can be added as a named row.
 ];
 
 pub(crate) const SINKS: &[(&str, &str, &str)] = &[
@@ -2020,6 +2265,138 @@ mod tests {
             has_class(&scan_file(std::path::Path::new("m.rb"), src), "NoSQL"),
             "ruby needs a source row and def/end blocks to taint at all: {:?}",
             scan_file(std::path::Path::new("m.rb"), src)
+        );
+    }
+
+    // ------------------------------------------- constants, argued positionally
+    //
+    // The first version of this decided a line was constant by checking that no
+    // unrecognised identifier appeared on it, against a hand written list of type
+    // and keyword names. That list was a trap: add a type it did not know and the
+    // line stopped being recognised as constant, so precision decayed silently
+    // rather than failing. The tests below pin the replacement, which looks at the
+    // argument positions that actually matter.
+
+    /// The general shape, so the rule is not special cased for C: whatever the
+    /// sink is called, if the value handed to it is a literal the line is constant.
+    /// A type name the tool has never seen does not change the answer.
+    #[test]
+    fn an_unseen_type_name_does_not_break_the_constant_case() {
+        // `wchar_t` appears nowhere in any keyword list and `strcpy` is not
+        // special. Both are ordinary and neither carries input.
+        let src = "void f(void){\n    wchar_t b[16];\n    strcpy(b, L\"hi\");\n}\n";
+        let r = scan_file(std::path::Path::new("a.c"), src);
+        assert!(
+            r.is_empty(),
+            "an unknown type must not defeat a literal: {r:?}"
+        );
+    }
+
+    /// The negative for the same shape, and the reason argument position matters:
+    /// an unknown *function* on the line does carry input, whatever the sink is
+    /// called. `mystery_reader()` is not a source on its own, so the source has to
+    /// be the environment read it wraps, which is the shape that actually occurs.
+    #[test]
+    fn an_unseen_function_still_taints() {
+        let src = "#include <string.h>\nvoid f(void){\n    char b[8];\n    char *p = mystery_reader(getenv(\"X\"));\n    strcpy(b, p);\n}\n";
+        let r = scan_file(std::path::Path::new("a.c"), src);
+        assert!(
+            has_class(&r, "unbounded copy"),
+            "an unknown call must not defeat the flow: {r:?}"
+        );
+    }
+
+    /// Buffer size is not a source of input. A line naming a large constant must
+    /// not be treated as tainted by the mere presence of a number.
+    #[test]
+    fn a_buffer_size_is_not_tainted() {
+        let src = "void f(void){\n    char b[4096];\n    memset(b, 0, sizeof b);\n}\n";
+        let r = scan_file(std::path::Path::new("a.c"), src);
+        assert!(!has_class(&r, "unbounded copy"), "{r:?}");
+    }
+
+    /// The shape that actually matters for the JS gap: a template literal
+    /// carrying an interpolation is not a constant and still flows, while the
+    /// `$1` placeholder form binds its value and cannot.
+    ///
+    /// The sanitizer row is written as a literal, not a regex. `prepare` expands
+    /// `\b`, `\s`, `.`, `(`, `)` and `$` into substring candidates and matches by
+    /// `str::contains`; it is not a regex engine, so a pattern using `\w+` or a
+    /// character class silently produces nothing that can ever match. Two earlier
+    /// attempts to express "a bound parameter list" that way were dead rows.
+    #[test]
+    fn js_interpolation_flows_and_a_placeholder_does_not() {
+        let bad = "function f(req){ return db.query(`SELECT * FROM t WHERE id=${req.query.id}`); }";
+        assert!(
+            has_class(&scan_file(std::path::Path::new("a.js"), bad), "SQL"),
+            "an interpolated query is still injectable"
+        );
+        let good =
+            "function f(req){ return db.query('SELECT * FROM t WHERE id=$1', [req.query.id]); }";
+        assert!(
+            !has_class(&scan_file(std::path::Path::new("b.js"), good), "SQL"),
+            "a placeholder cannot change the statement: {:?}",
+            scan_file(std::path::Path::new("b.js"), good)
+        );
+    }
+
+    /// Every sanitizer row has to be expressible in the little language the
+    /// matcher actually speaks. It is not a regex engine: `prepare` rewrites
+    /// `\b`, `\s`, `.`, `(`, `)` and `$`, expands `\s*` into spacing variants, and
+    /// splits `(a|b|c)` alternation into separate candidates. Everything else in a
+    /// row is literal text.
+    ///
+    /// So `\w+`, `[abc]` and a bare `|` produce candidates that can never match
+    /// anything, which is how two earlier rows in this table ended up dead while
+    /// compiling perfectly. A dead row is worse than no row, because the table
+    /// looks covered.
+    #[test]
+    fn every_sanitizer_row_is_expressible_by_the_matcher() {
+        // Character classes and quantifiers the matcher has no notion of. A class
+        // like `[^)]` is fine because the matcher reads the bracket as ordinary
+        // text, so only the two shorthand classes are genuinely dead.
+        const DEAD: &[&str] = &[r"\w", r"\d", r"\S", r"\W", r"\D"];
+        for (lang, pat) in SANITIZERS {
+            for bad in DEAD {
+                assert!(
+                    !pat.contains(bad),
+                    "sanitizer row for {lang} contains `{bad}`, which the literal matcher reads as plain text rather than as a pattern, so the row cannot do what it claims: {pat}"
+                );
+            }
+            // Every row must produce at least one candidate, otherwise it is dead.
+            let (_sb, _eb, candidates, _nd) = prepare(pat);
+            assert!(
+                !candidates.is_empty(),
+                "sanitizer row for {lang} produces no candidate and can never match: {pat}"
+            );
+        }
+    }
+
+    /// The generic identifier heuristic is gone, and this pins why. It treated a
+    /// variable named `validated` or `escaped` as neutral, which is a guess about
+    /// a name, and a guess that silences a security finding is the wrong trade: it
+    /// can only ever lose a true positive and never gain one. A project that wraps
+    /// an escape in `safe_shell()` now gets a false positive, which is the honest
+    /// direction because it is visible and fixable by adding a named row.
+    #[test]
+    fn an_identifier_called_validated_is_not_treated_as_sanitised() {
+        let src = "def run\n  system(\"rsync #{params[:dir]}\" + validated)\nend\n";
+        let r = scan_file(std::path::Path::new("a.rb"), src);
+        assert!(
+            has_class(&r, "shell"),
+            "a variable name is not proof of escaping: {r:?}"
+        );
+    }
+
+    /// A real sanitizer still works, which is what keeps the removal from being a
+    /// blanket loss of precision.
+    #[test]
+    fn a_named_sanitizer_still_neutralises() {
+        let src = "def run\n  system(\"rsync #{params[:dir]}\" + Shellwords.escape(x))\nend\n";
+        let r = scan_file(std::path::Path::new("a.rb"), src);
+        assert!(
+            !has_class(&r, "shell"),
+            "a named escape must still work: {r:?}"
         );
     }
 
