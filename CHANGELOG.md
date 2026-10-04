@@ -2,6 +2,17 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.24.3
+
+Two ways to get the test-code scope wrong, both found by probing rather than reading, and one of them was hiding real findings on this repository.
+
+* **A one line `mod tests` was never recognised.** The question "is this line in a test module" was asked after the braces on that line had been applied and the stack popped, so a module that opened and closed on the line being asked about was gone before it was seen. Dense, ordinary formatting, and the same shape as the one line C function fixed in 0.24.1.
+* **The name test was a substring match,** so any module whose name merely contained `tests` was test code and everything inside it was silenced. A production `mod tests_support` is ordinary code. The name is now matched as a whole word.
+* **The two fixes are not independent, which is the interesting part.** Tightening the name is only safe because the `cfg` attribute is now read from the line above, where rustfmt puts it. `#[cfg(test)] mod liveness` in `src/harmony.rs` was classified as *production*, because the attribute sits on line 966, the declaration on 967, and the old code only ever looked at the declaration's own line. It holds 14 `unwrap`s and not one of them says anything about the shipped binary. Fixing the name test without reading the attribute above would have traded a false positive for a false positive; with both, they are correctly silent.
+* **`#[cfg(not(test))]` compiles an item when tests are *not* running,** so it is production code wearing a test attribute and is now treated as such. An ambiguous `cfg` expression resolves to production, because silencing a real finding is the worse error to make.
+* **Verified differentially rather than by inspection.** A standalone harness ran the old and new algorithms side by side over every file in `src`: 23 lines differ, all in `harmony.rs`, all in one direction, none newly reported. One direction only is the point, because it means no new false negatives.
+* Heides on Heides: 66 warnings to 52. The 14 that went quiet were the false positives described above.
+
 ## 0.24.2
 
 Heides scanned Heides and did not like what it saw.
