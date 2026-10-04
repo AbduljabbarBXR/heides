@@ -1,0 +1,4 @@
+corpus=llama.cpp C/C++ subset, 401 real files
+ratio=0.00
+recorded=2026-10-04
+note=0.00 criticals per kloc on 255.7 kloc. a zero baseline cannot catch a false negative, so this floor catches a flood, not a miss

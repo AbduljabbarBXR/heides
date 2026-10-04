@@ -82,8 +82,11 @@ because both meant whole languages were invisible rather than a rule being weak:
 
 - `query search sql` returns `no symbol matches` — search matches symbol names
   only, not string literals or content.
-- `plan` prints `feasible true / grounding received the plan` without the
-  grounded symbol and file evidence it used.
+- **Resolved in 0.15.0:** `plan` returns the evidence it was grounded on, symbol,
+  file and line, capped at twelve. When no identifier in the plan exists in the
+  spine it says the plan introduces new definitions, names existing functions to
+  build on, and reports what the spine holds, instead of printing `feasible true`
+  and implying it had checked something.
 - **Resolved in 0.20.0:** route handlers, exported symbols, trait members, test
   code, decorated functions, callback registrations, override siblings and
   python naming conventions are all kept out of the dead list, each with a
