@@ -485,9 +485,8 @@ fn python_body(spec: &ScaffoldSpec) -> String {
             b
         }
         Shape::Cli => {
-            let mut b = format!(
-                "\"\"\"Generated from your request. A command.\"\"\"\nimport sys\nimport json\n\n\ndef main(argv):\n    \"\"\"Entry point. Runs the named task and prints its result.\"\"\"\n"
-            );
+            let mut b = "\"\"\"Generated from your request. A command.\"\"\"\nimport sys\nimport json\n\n\ndef main(argv):\n    \"\"\"Entry point. Runs the named task and prints its result.\"\"\"\n"
+                .to_string();
             for i in 0..spec.count.max(1) {
                 b.push_str(&format!(
                     "\n    def task{i}(arg):\n        \"\"\"Runs task {i}.\"\"\"\n        return {{\"task\": \"{i}\", \"input\": arg}}\n"
