@@ -879,6 +879,116 @@ fn doc_above(content: &str, line: u64, lang: &str) -> String {
     out
 }
 
+/// The docstring of a python function, if it opens on the line after the `def`.
+///
+/// `doc_above` reads comments that sit *above* a declaration, which is where
+/// every other language puts its documentation. Python puts it inside the body,
+/// so a `def` with a docstring indexed as an undocumented function. That is not
+/// a cosmetic gap: `doc` is what `query definition` shows and what the scaffold
+/// test asserts on, so every python function looked undocumented no matter what
+/// the author wrote.
+///
+/// Only a string that is the first statement in the body counts, which is what
+/// makes it a docstring rather than an ordinary string.
+fn docstring_below(content: &str, line: u64, lang: &str) -> String {
+    if lang != "python" {
+        return String::new();
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    // `line` is 1 based and points at the `def`. The body opens on the next
+    // line, or one later still when the signature continues.
+    let mut i = line as usize;
+    let limit = (i + 4).min(lines.len());
+    while i < limit {
+        let t = lines[i].trim();
+        if t.is_empty() || t.ends_with('\\') || t.starts_with('@') {
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    if i >= lines.len() {
+        return String::new();
+    }
+    let t = lines[i].trim();
+    let quote = if t.starts_with("\"\"\"") {
+        "\"\"\""
+    } else if t.starts_with("'''") {
+        "'''"
+    } else if t.starts_with('"') {
+        "\""
+    } else if t.starts_with('\'') {
+        "'"
+    } else {
+        return String::new();
+    };
+    // Single line docstring: the closing quote ends the line. Testing whether the
+    // text after the opening quote *starts* with a quote, as this first did, is
+    // never true, so every single line docstring fell through to the branch below
+    // and swallowed the rest of the file looking for a closer.
+    let after_open = &t[quote.len()..];
+    if after_open.ends_with(quote) && after_open.len() >= quote.len() {
+        let body = after_open[..after_open.len() - quote.len()].trim();
+        return capped_doc(body);
+    }
+    // Otherwise it runs to a closing quote on a later line. A dedent ends the
+    // body, so a missing closing quote cannot absorb real code into the doc: the
+    // previous version walked to end of file and reported source lines as prose.
+    let def_indent = lines
+        .get(i - 1)
+        .map_or(0, |l| l.len() - l.trim_start().len());
+    let mut parts: Vec<&str> = Vec::new();
+    let first = after_open.trim();
+    if !first.is_empty() {
+        parts.push(first);
+    }
+    let mut j = i + 1;
+    while j < lines.len() && j - i <= 24 {
+        let raw = lines[j];
+        let l = raw.trim();
+        let indent = raw.len() - raw.trim_start().len();
+        if !l.is_empty() && indent <= def_indent {
+            break;
+        }
+        match l.find(quote) {
+            Some(end) => {
+                if !l[..end].trim().is_empty() {
+                    parts.push(l[..end].trim());
+                }
+                break;
+            }
+            None => {
+                if !l.is_empty() {
+                    parts.push(l);
+                }
+                j += 1;
+            }
+        }
+    }
+    capped_doc(&parts.join(" "))
+}
+
+/// Collapse a docstring to one line and cap its length.
+fn capped_doc(body: &str) -> String {
+    let joined: Vec<&str> = body.split_whitespace().collect();
+    let flat = joined.join(" ");
+    let mut out: String = flat.chars().take(1200).collect();
+    if out.len() < flat.len() {
+        out.push('…');
+    }
+    out
+}
+
+/// The documentation attached to a declaration: a comment block above it, or a
+/// docstring inside the body where python puts one.
+fn doc_for(content: &str, line: u64, lang: &str) -> String {
+    let above = doc_above(content, line, lang);
+    if !above.is_empty() {
+        return above;
+    }
+    docstring_below(content, line, lang)
+}
+
 /// True when the trimmed line is an attribute or decorator, per language.
 /// Rust and PHP 8 attributes open with #[, python and java decorators
 /// open with @, C# attributes open with a bracket.
@@ -950,7 +1060,7 @@ fn walk(
                 lang: out.lang.clone(),
                 signature: sig,
                 params: params_of(node, content),
-                doc: doc_above(content, line, &out.lang),
+                doc: doc_for(content, line, &out.lang),
             });
         }
     }
@@ -970,7 +1080,7 @@ fn walk(
             lang: out.lang.clone(),
             signature: signature_of(node, content),
             params: params_of(node, content),
-            doc: doc_above(content, line, &out.lang),
+            doc: doc_for(content, line, &out.lang),
         });
     }
 
@@ -1231,6 +1341,106 @@ fn walk(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A python docstring is the documentation, so it has to be indexed. It sits
+    /// inside the body, not above the `def`, which is why this needed its own
+    /// reader rather than the comment scan.
+    #[test]
+    fn a_single_line_docstring_is_the_documentation() {
+        let src = "def documented():\n    \"\"\"Entry point. Does the thing.\"\"\"\n    return 1\n";
+        let lines: Vec<&str> = src.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.contains("def documented"))
+            .unwrap();
+        let doc = doc_for(src, at as u64 + 1, "python");
+        assert_eq!(doc, "Entry point. Does the thing.");
+    }
+
+    /// Multi line, which is the common shape. Joined to one line.
+    #[test]
+    fn a_multi_line_docstring_is_joined() {
+        let src = "def multi():\n    \"\"\"First line.\n    Second line of the same docstring.\n    \"\"\"\n    return 3\n";
+        let lines: Vec<&str> = src.lines().collect();
+        let at = lines.iter().position(|l| l.contains("def multi")).unwrap();
+        let doc = doc_for(src, at as u64 + 1, "python");
+        assert_eq!(doc, "First line. Second line of the same docstring.");
+    }
+
+    /// Single quotes are the same construct.
+    #[test]
+    fn a_single_quoted_docstring_is_the_documentation() {
+        let src = "def one():\n    'Uses single quotes.'\n    return 1\n";
+        let lines: Vec<&str> = src.lines().collect();
+        let at = lines.iter().position(|l| l.contains("def one")).unwrap();
+        assert_eq!(doc_for(src, at as u64 + 1, "python"), "Uses single quotes.");
+    }
+
+    /// A decorator sits between the previous statement and the `def`.
+    #[test]
+    fn a_docstring_below_a_decorator_is_found() {
+        let src = "@property\ndef decorated(self):\n    \"\"\"A decorated property.\"\"\"\n    return 2\n";
+        let lines: Vec<&str> = src.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.contains("def decorated"))
+            .unwrap();
+        assert_eq!(
+            doc_for(src, at as u64 + 1, "python"),
+            "A decorated property."
+        );
+    }
+
+    /// The bug this pins: the single line check asked whether the text after the
+    /// opening quote *starts* with a closing quote, which is never true, so every
+    /// single line docstring fell through to the multi line branch and reported
+    /// the rest of the file as its documentation.
+    #[test]
+    fn a_docstring_does_not_swallow_the_code_after_it() {
+        let src = "def a():\n    \"\"\"First.\"\"\"\n    return 1\n\n\ndef b():\n    return 2\n";
+        let lines: Vec<&str> = src.lines().collect();
+        let at = lines.iter().position(|l| l.contains("def a")).unwrap();
+        let doc = doc_for(src, at as u64 + 1, "python");
+        assert_eq!(doc, "First.");
+        assert!(
+            !doc.contains("return") && !doc.contains("def b"),
+            "a docstring must not absorb source lines: {doc}"
+        );
+    }
+
+    /// An unterminated docstring is malformed, and the honest answer is the text
+    /// so far rather than the remainder of the file.
+    #[test]
+    fn an_unterminated_docstring_stops_at_the_dedent() {
+        let src = "def bad():\n    \"\"\"Never closed.\n\ndef after():\n    return 1\n";
+        let lines: Vec<&str> = src.lines().collect();
+        let at = lines.iter().position(|l| l.contains("def bad")).unwrap();
+        let doc = doc_for(src, at as u64 + 1, "python");
+        assert!(
+            !doc.contains("def after"),
+            "a missing closing quote must not absorb the next function: {doc}"
+        );
+    }
+
+    /// Other languages put documentation in a comment above the declaration, and
+    /// this reader is python only, so nothing else may change.
+    #[test]
+    fn other_languages_still_read_the_comment_above() {
+        let src = "// Entry point for main.\nfn main() {\n    let v = vec![1];\n}\n";
+        assert_eq!(
+            doc_for(src, 2, "rust"),
+            "Entry point for main.",
+            "rust must be unaffected by the docstring reader"
+        );
+    }
+
+    /// Python with no docstring and no comment stays empty rather than picking up
+    /// the body.
+    #[test]
+    fn an_undocumented_python_function_has_no_doc() {
+        let src = "def bare():\n    return 1\n";
+        assert_eq!(doc_for(src, 1, "python"), "");
+    }
 
     #[test]
     fn rust_symbols_and_calls() {

@@ -246,6 +246,10 @@ fn main() -> ExitCode {
                 );
                 return ExitCode::SUCCESS;
             }
+            "changed-since" => {
+                println!("usage. heides changed-since [unix-seconds] [dir]");
+                return ExitCode::SUCCESS;
+            }
             _ => {}
         }
     }
@@ -1071,6 +1075,59 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        "changed-since" => {
+            let since = match args.get(2).map(|s| s.as_str()) {
+                Some(v) => match v.parse::<u64>() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        eprintln!("`{v}` is not a unix timestamp in seconds");
+                        return ExitCode::FAILURE;
+                    }
+                },
+                None => {
+                    println!("usage. heides changed-since [unix-seconds] [dir]");
+                    return ExitCode::FAILURE;
+                }
+            };
+            // `arg2` is the timestamp for this command, so the workspace is the
+            // third argument. Reading `arg2` looks for an index inside a
+            // directory named after the number, which reports no index on a
+            // perfectly good workspace.
+            let root = match args.get(3) {
+                Some(d) => PathBuf::from(d),
+                None => PathBuf::from("."),
+            };
+            if !spine::exists(&root) {
+                println!("no spine index found. run heides scan");
+                return ExitCode::FAILURE;
+            }
+            // Deliberately the same rule as the `spine.changed_since` MCP tool, so
+            // the CLI and the server cannot answer the same question differently.
+            // An indexed file whose mtime is after the point. The point is a unix
+            // timestamp rather than a ref because the index stores mtimes and
+            // nothing else; taking a ref would mean resolving it here and then
+            // still comparing against a time.
+            match spine::load(&root) {
+                Ok(code) => {
+                    let mut changed: Vec<&spine::FileEntry> =
+                        code.files.iter().filter(|f| f.mtime > since).collect();
+                    changed.sort_by(|a, b| a.path.cmp(&b.path));
+                    if changed.is_empty() {
+                        println!("no indexed file changed after {since}. nothing to reindex");
+                        return ExitCode::SUCCESS;
+                    }
+                    println!("{} file(s) changed after {since}", changed.len());
+                    for f in changed {
+                        println!("{} ({})", f.path, f.lang);
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("{}", e);
+                    ExitCode::FAILURE
+                }
+            }
+        }
         "describe" => {
             let root = PathBuf::from(arg2);
             match indexer::load_or_build(&root) {
@@ -1260,6 +1317,28 @@ fn main() -> ExitCode {
 /// Workspace manifest, read only and deterministic. The output is a plain
 /// text map an agent can read instead of walking the code: languages,
 /// entrypoints, hubs, call cycles and which files talk to which.
+/// What each guard has actually been measured against.
+///
+/// A rule that has never seen a real corpus is a belief, and this project's whole
+/// argument is that the difference has to be visible rather than remembered. So
+/// it is printed by `describe` instead of living in a comment, and a guard that
+/// is not listed here is reported as unmeasured. Adding a row is a claim and has
+/// to be earned by running the corpus.
+const MEASURED_RULES: &[(&str, &str)] = &[
+    (
+        "security.taint",
+        "401 real C/C++ files for the inline source gate, 0 false criticals; 536 ruby files across rack, sinatra, redis-rb and faraday for the ruby gate",
+    ),
+    (
+        "security.taint.truncated",
+        "the interprocedural budget, verified by counting the first sweep and every requeue",
+    ),
+    (
+        "best.practice",
+        "the heides workspace itself, every finding reviewed by hand",
+    ),
+];
+
 fn describe_workspace(graph: &spine::CodeGraph, root: &std::path::Path) {
     println!(
         "{} files, {} symbols, {} call(s), {} import(s)",
@@ -1272,6 +1351,14 @@ fn describe_workspace(graph: &spine::CodeGraph, root: &std::path::Path) {
     langs.sort_unstable();
     langs.dedup();
     println!("languages {}", langs.join(", "));
+
+    // Which guards have a real corpus behind them. Printed so that "measured"
+    // is a claim the tool makes about itself and not a note in a commit message.
+    println!("rule measurement:");
+    for (guard, corpus) in MEASURED_RULES {
+        println!("  {guard} {}", corpus);
+    }
+    println!("  any other guard has no recorded corpus and is unmeasured");
 
     // Doc coverage per language. How many symbols in each language carry a
     // captured comment, so gaps in the eyes are visible and measurable.
