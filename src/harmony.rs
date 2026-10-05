@@ -794,14 +794,45 @@ fn severity_rank(s: &str) -> u8 {
 /// style opinion the same way it acts on a proven sink. Mixing them in one
 /// ranked list is how the important finding hides inside the wall.
 ///
-/// One honest caveat: `edge.cases` holds the `unwrap` rule, which is still a
-/// syntactic substring match rather than a proof. It is being made provable in
-/// its own change, and until then it is classed as evidence with that
-/// limitation stated rather than quietly demoted.
+/// The guard name alone does not decide this. `best.practice` also owns the
+/// credential rules, and a committed `AKIA...` key or PEM block is a fact about
+/// the code, reproducible from the line, not a style opinion. Those rules used
+/// to be classed as advice purely because of where they lived, which meant
+/// `--no-advice` silently deleted a proven hardcoded secret from the output
+/// of a security gate. `bucket` therefore looks at what the rule claims, not
+/// which file emitted it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bucket {
     Proof,
     Advice,
+}
+
+/// The credential shapes that `practice` can prove from a literal.
+///
+/// Each of these is a vendor prefix or a PEM header that does not appear in
+/// prose by accident, so a match is a fact about the value rather than an
+/// opinion about the code.
+const PROVEN_SECRETS: [&str; 15] = [
+    "AWS access key id",
+    "AWS temporary access key id",
+    "GitHub personal access token",
+    "GitHub OAuth token",
+    "GitHub fine grained token",
+    "Slack bot token",
+    "Slack user token",
+    "Slack app token",
+    "Slack refresh token",
+    "OpenAI project key",
+    "Anthropic API key",
+    "private key block",
+    "Slack webhook URL",
+    "a secret looking name holds a literal value",
+    "token is committed here",
+];
+
+/// A credential the rule can prove, so `--no-advice` must not drop it.
+fn is_proven_secret(message: &str) -> bool {
+    PROVEN_SECRETS.iter().any(|s| message.contains(s))
 }
 
 pub fn bucket(guard: &str) -> Bucket {
@@ -809,6 +840,17 @@ pub fn bucket(guard: &str) -> Bucket {
         "best.practice" => Bucket::Advice,
         _ => Bucket::Proof,
     }
+}
+
+/// Bucket a specific finding rather than its whole guard family.
+///
+/// This is what the callers use. `bucket` stays as the guard level answer for
+/// anything that has no message to inspect.
+pub fn bucket_report(r: &GuardReport) -> Bucket {
+    if r.guard == "best.practice" && is_proven_secret(&r.message) {
+        return Bucket::Proof;
+    }
+    bucket(&r.guard)
 }
 
 /// One line of output: either a finding, or several identical ones folded.
@@ -921,10 +963,15 @@ pub fn folded_location(first: &GuardReport, files: &[&str], file_count: usize) -
 }
 
 /// Drop the advisory findings, for a gate that only wants evidence.
+///
+/// Judged per finding, not per guard. A committed credential is emitted by
+/// `best.practice` but is not advice, and `--no-advice` used to filter on the
+/// guard name and so removed it along with the "function spans N lines"
+/// opinions the flag exists to remove.
 pub fn without_advice(reports: &[GuardReport]) -> Vec<&GuardReport> {
     reports
         .iter()
-        .filter(|r| bucket(&r.guard) == Bucket::Proof)
+        .filter(|r| bucket_report(r) == Bucket::Proof)
         .collect()
 }
 
