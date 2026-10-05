@@ -51,6 +51,38 @@ still a slow default, and a cache that is correct is still a cache.
   and `tests/dbargs.rs` walks each one with and without a directory so a partial
   fix cannot pass again.
 
+## 0.25.0
+
+Heides stops talking to the network. This removes `deps`, the OSV cache, the
+lock-file graph and transitive dependency resolution: 5,448 lines out, 1,104 in.
+
+**Why.** Those features needed two long-lived registry tokens, and both expired
+on the day we tried to publish. A scanner that stops working because a credential
+rotated is a scanner with a credential-shaped failure mode, and it cannot run on
+an airgapped machine or in a pipeline that forbids egress. Dependency advisories
+belong to a tool that owns dependencies.
+
+**What you lose.** `heides deps`, the advisory half of `heides verify`,
+`--require-advisories`, and the transitive dependency graph. If you want known
+CVEs in your lockfile, that is a different tool's job and it should be a
+different tool.
+
+**What stays.** Every guard, all twelve languages, the spine, the taint engine,
+the database graph, the sanitizers, and the local file index. Nothing that
+analysed your source code was removed.
+
+* **`db` root offsets.** Every `db` subcommand takes the workspace root at a
+  different argument position, and one fixed offset meant `db routes <dir>`
+  stepped over the directory and walked the current one instead, printing "no
+  routes recognised" for a project full of routes.
+* **The Stripe guard was correct the whole time.** The guard matches `sk_live_`;
+  the failing fixture built its prefix with `["sk","live",""].join("")`, which
+  consumes the underscore and yields `sklive`. The fixture was wrong. Worth
+  recording, because the natural reaction to a red test is to relax the rule,
+  and that would have weakened a working check to accommodate a broken string.
+* Verified: 430 tests, 25 suites, 0 failures. fmt, clippy and npm clean.
+  36 of 36 end-to-end checks across 8 areas.
+
 ## 0.24.4
 
 Six fixes and one command. Everything from 0.24.2 through 0.24.3 was committed but never published, so this is the first release that carries any of it.
