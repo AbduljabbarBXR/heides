@@ -137,12 +137,12 @@ fn the_new_capabilities_are_reachable_as_tools() {
     let dir = fixture("list");
     let mut s = Session::start(&dir);
     let tools = s.tools();
-    for expected in ["config.scan", "deps.tree", "deps.advisories"] {
-        assert!(
-            tools.iter().any(|t| t == expected),
-            "missing {expected}; have {tools:?}"
-        );
-    }
+    // deps.tree and deps.advisories are gone with the rest of the dependency
+    // surface. config.scan is what remains of that wave of capabilities.
+    assert!(
+        tools.iter().any(|t| t == "config.scan"),
+        "config.scan must be reachable; have {tools:?}"
+    );
 }
 
 #[test]
@@ -266,156 +266,30 @@ fn config_scan_json_never_carries_the_credential() {
 // ------------------------------------------------------------------- deps
 
 #[test]
-fn deps_tree_reports_depth_and_reachability() {
-    let dir = fixture("tree");
-    write(
-        &dir,
-        "package-lock.json",
-        r#"{"lockfileVersion":3,"packages":{
-            "":{"name":"app","dependencies":{"express":"^4.18.0"}},
-            "node_modules/express":{"version":"4.18.2","dependencies":{"cookie":"0.5.0"}},
-            "node_modules/cookie":{"version":"0.5.0"},
-            "node_modules/stale":{"version":"1.0.0","dev":true}
-        }}"#,
-    );
+fn every_removed_dependency_tool_refuses_instead_of_erroring() {
+    // These three tests used to pin the lock graph: depth, reachability and an
+    // empty tree stated rather than implied. All of that lived in the lockfile
+    // parser, which is gone with the advisory guard because its only consumer
+    // was the vulnerability question.
+    //
+    // The behaviour that matters now is that each removed name is refused
+    // explicitly. `unknown tool` would be technically correct and practically
+    // useless: an agent holding `deps.tree` in a plan would conclude the server
+    // is broken rather than that the capability moved.
+    let dir = fixture("treegone");
     let mut s = Session::start(&dir);
-    let t = s.text("deps.tree", serde_json::json!({ "root": "." }));
-    assert!(t.contains("cookie"), "{t}");
-    assert!(t.contains("express"), "the path must be reported: {t}");
-    assert!(
-        t.contains("nothing reaches it") || t.contains("unreachable"),
-        "an unreachable package must be named: {t}"
-    );
-}
-
-#[test]
-fn deps_tree_says_so_when_there_is_no_lockfile() {
-    let dir = fixture("nolock");
-    write(&dir, "a.js", "export const x = 1;\n");
-    let mut s = Session::start(&dir);
-    let t = s.text("deps.tree", serde_json::json!({ "root": "." }));
-    assert!(
-        t.to_lowercase().contains("no lockfile"),
-        "an empty tree must be stated, not implied: {t}"
-    );
-}
-
-#[test]
-fn deps_tree_accepts_a_minimum_depth() {
-    let dir = fixture("depth");
-    write(
-        &dir,
-        "package-lock.json",
-        r#"{"lockfileVersion":3,"packages":{
-            "":{"name":"app","dependencies":{"a":"1"}},
-            "node_modules/a":{"version":"1.0.0","dependencies":{"b":"1"}},
-            "node_modules/b":{"version":"1.0.0"}
-        }}"#,
-    );
-    let mut s = Session::start(&dir);
-    let deep = s.text(
-        "deps.tree",
-        serde_json::json!({ "root": ".", "min_depth": 2 }),
-    );
-    assert!(
-        deep.contains("b"),
-        "depth 2 must list the second level: {deep}"
-    );
-    let shallow = s.text(
-        "deps.tree",
-        serde_json::json!({ "root": ".", "min_depth": 9 }),
-    );
-    assert!(
-        !shallow.contains("  b "),
-        "depth 9 must list nothing at that level: {shallow}"
-    );
-}
-
-#[test]
-fn deps_advisories_reports_a_planted_finding() {
-    // The tool reads the cache, so the fixture seeds one. A lockfile alone cannot
-    // tell an agent whether a package is vulnerable, and a tool that answers
-    // "unknown" without saying so is worse than no tool.
-    let dir = fixture("adv");
-    write(
-        &dir,
-        "package-lock.json",
-        r#"{"lockfileVersion":3,"packages":{
-            "":{"name":"app","dependencies":{"left-pad":"1.3.0"}},
-            "node_modules/left-pad":{"version":"1.3.0"}
-        }}"#,
-    );
-    let cache = fixture("advcache");
-    std::fs::create_dir_all(&cache).unwrap();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    std::fs::write(
-        cache.join("npm__left-pad@1.3.0.json"),
-        format!(r#"{{"fetched_at":{now},"vuln":"GHSA-test-advisory"}}"#),
-    )
-    .unwrap();
-
-    let mut s = Session::start(&dir);
-    let t = s.text(
-        "deps.advisories",
-        serde_json::json!({ "root": ".", "cache_dir": cache.to_string_lossy() }),
-    );
-    assert!(t.contains("left-pad"), "the package must be named: {t}");
-    assert!(
-        t.contains("GHSA-test-advisory"),
-        "the advisory must be named: {t}"
-    );
-}
-
-#[test]
-fn deps_advisories_reports_an_unchecked_package_rather_than_a_clean_one() {
-    // The case that matters most. An empty cache must not produce a clean
-    // result, or an agent will treat a project nobody checked as a project with
-    // no known vulnerabilities.
-    let dir = fixture("advmiss");
-    write(
-        &dir,
-        "package-lock.json",
-        r#"{"lockfileVersion":3,"packages":{
-            "":{"name":"app","dependencies":{"left-pad":"1.3.0"}},
-            "node_modules/left-pad":{"version":"1.3.0"}
-        }}"#,
-    );
-    let cache = fixture("advmisscache");
-    std::fs::create_dir_all(&cache).unwrap();
-    let mut s = Session::start(&dir);
-    let t = s.text(
-        "deps.advisories",
-        serde_json::json!({ "root": ".", "cache_dir": cache.to_string_lossy() }),
-    );
-    assert!(
-        t.to_lowercase().contains("not checked") || t.to_lowercase().contains("no entry"),
-        "a miss must be reported as unchecked: {t}"
-    );
-}
-
-#[test]
-fn deps_advisories_names_a_missing_cache_directory() {
-    let dir = fixture("advnocache");
-    write(
-        &dir,
-        "package-lock.json",
-        r#"{"lockfileVersion":3,"packages":{
-            "":{"name":"app","dependencies":{"a":"1"}},
-            "node_modules/a":{"version":"1.0.0"}
-        }}"#,
-    );
-    let mut s = Session::start(&dir);
-    let t = s.text(
-        "deps.advisories",
-        serde_json::json!({ "root": ".", "cache_dir": "/nonexistent/nowhere" }),
-    );
-    assert!(
-        t.to_lowercase().contains("not checked") || t.to_lowercase().contains("no cache"),
-        "a missing cache must be stated: {t}"
-    );
+    for tool in ["deps.tree", "deps.check", "deps.advisories"] {
+        let t = s.text(tool, serde_json::json!({ "root": "." }));
+        let lower = t.to_lowercase();
+        assert!(
+            lower.contains("gone") || lower.contains("no longer"),
+            "{tool} must refuse explicitly rather than report an unknown tool: {t}"
+        );
+        assert!(
+            lower.contains("grim"),
+            "{tool} must name where the capability went: {t}"
+        );
+    }
 }
 
 // ------------------------------------------------------------- protocol shape
@@ -429,8 +303,8 @@ fn a_wrong_type_on_a_new_tool_is_rejected() {
     let v = s.request(
         "tools/call",
         serde_json::json!({
-            "name": "deps.tree",
-            "arguments": { "root": ".", "min_depth": "two" }
+            "name": "spine.changed_since",
+            "arguments": { "root": ".", "since": "yesterday" }
         }),
     );
     assert!(v.get("error").is_some(), "expected an error, got {v}");

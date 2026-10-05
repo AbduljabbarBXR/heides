@@ -8,11 +8,11 @@
 //
 // Two rules shape everything here:
 //
-// 1. Silence is never success. An unknown test command, an unrunnable suite, an
-//    empty workspace and an unreachable advisory service all report a non-zero
-//    exit or an explicit "not verified" state. The 0.15.2 defect class, where a
-//    guard reported a clean workspace it had analysed nothing in, is the exact
-//    failure this command exists to make impossible.
+// 1. Silence is never success. An unknown test command, an unrunnable suite and
+//    an empty workspace all report a non-zero exit or an explicit "not verified"
+//    state. The 0.15.2 defect class, where a guard reported a clean workspace it
+//    had analysed nothing in, is the exact failure this command exists to make
+//    impossible.
 // 2. The receipt says what ran. Every run prints which suites ran, which were
 //    skipped, and why, on success and on failure alike, so a human reading a
 //    green build knows the scope of the claim.
@@ -20,7 +20,6 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::deps::DepsPolicy;
 use crate::harmony;
 use crate::indexer;
 
@@ -71,7 +70,6 @@ pub struct Verdict {
     pub criticals: usize,
     pub warnings: usize,
     pub coverage: String,
-    pub advisories_ran: bool,
     pub reasons: Vec<String>,
     /// The findings that made this a failure, as (severity, message,
     /// file:line). `reasons` says how many; this says which. An agent handed
@@ -193,9 +191,14 @@ fn run_one(name: &'static str, cmd: &'static str, root: &Path) -> Suite {
 
 /// Run every guard over `root` and the test suites, and decide.
 ///
-/// An empty workspace is not verified. Neither is one whose advisory service
-/// could not be reached when the caller asked for advisories.
-pub fn verify(root: &Path, skip_tests: bool, require_advisories: bool) -> Verdict {
+/// An empty workspace is not verified. A workspace with no taint rules for the
+/// languages it holds is not verified either, and says which.
+///
+/// The advisories reason is gone with the advisory guard. Nothing here consults
+/// the network, so there is no longer a way for this check to pass hollow on
+/// work it did not do: every guard it runs is local and every finding it reports
+/// names a file and a line.
+pub fn verify(root: &Path, skip_tests: bool) -> Verdict {
     let mut reasons = Vec::new();
 
     let graph = match indexer::load_or_build(root) {
@@ -213,22 +216,16 @@ pub fn verify(root: &Path, skip_tests: bool, require_advisories: bool) -> Verdic
                 criticals: 0,
                 warnings: 0,
                 coverage: String::new(),
-                advisories_ran: false,
                 reasons: vec![format!("could not index the workspace: {}", e)],
                 findings: Vec::new(),
             };
         }
     };
 
-    let policy = DepsPolicy {
-        require_advisories,
-        ..DepsPolicy::default()
-    };
-
     // The database guards are part of the definition of done: a cyclic cascade
     // or a sensitive column on a read path is exactly the kind of thing a loop
     // must not finish on top of.
-    let (mut reports, cov) = harmony::check_workspace_with_coverage(root, &graph, policy);
+    let (mut reports, cov) = harmony::check_workspace_with_coverage(root, &graph);
     // Both extra guard families. The filter previously admitted only
     // `database.` guards, so a committed credential was invisible to the
     // definition of done, which is the one place it must never be.
@@ -252,17 +249,6 @@ pub fn verify(root: &Path, skip_tests: bool, require_advisories: bool) -> Verdic
             "warning" => warnings += 1,
             _ => {}
         }
-    }
-
-    // The same honesty rule `check` applies, promoted to a reason. An advisory
-    // service that did not answer means the workspace was not fully checked,
-    // so it cannot be reported as verified.
-    let advisories_ran = cov.deps == harmony::DepsState::RanOnline;
-    if require_advisories && !advisories_ran {
-        reasons.push(
-            "advisories were required but the advisory service did not run; this is not a full verification"
-                .into(),
-        );
     }
 
     if cov.files_read == 0 {
@@ -295,7 +281,7 @@ pub fn verify(root: &Path, skip_tests: bool, require_advisories: bool) -> Verdic
     if blockers > 0 {
         reasons.push(format!("{} blocking finding(s)", blockers));
     }
-    if criticals > 0 && !require_advisories {
+    if criticals > 0 {
         // Criticals fail verify by default. A security gate that ignores them
         // is the heides staged no-op all over again.
         reasons.push(format!("{} critical finding(s)", criticals));
@@ -323,7 +309,6 @@ pub fn verify(root: &Path, skip_tests: bool, require_advisories: bool) -> Verdic
         criticals,
         warnings,
         coverage: cov.render(),
-        advisories_ran,
         reasons,
         findings,
     }
@@ -351,11 +336,6 @@ pub fn render(v: &Verdict) -> String {
         v.blockers, v.criticals, v.warnings
     ));
     out.push_str(&coverage_line(&v.coverage));
-    out.push_str(if v.advisories_ran {
-        "advisories ran\n"
-    } else {
-        "advisories did not run\n"
-    });
     if v.ok {
         out.push_str("VERIFIED. definition of done met.");
     } else {
@@ -416,12 +396,11 @@ pub fn to_json(v: &Verdict) -> String {
         .collect();
     format!(
         "{{\"ok\":{},\"blockers\":{},\"criticals\":{},\"warnings\":{},\
-\"advisories_ran\":{},\"suites\":[{}],\"reasons\":[{}],\"findings\":[{}],\"coverage\":{:?}}}",
+\"suites\":[{}],\"reasons\":[{}],\"findings\":[{}],\"coverage\":{:?}}}",
         v.ok,
         v.blockers,
         v.criticals,
         v.warnings,
-        v.advisories_ran,
         suites.join(","),
         reasons.join(","),
         findings.join(","),

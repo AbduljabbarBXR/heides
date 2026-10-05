@@ -16,77 +16,69 @@ heides mcp                  # expose it to any MCP client
 ```
 
 `check` is a gate, not a report. It exits non-zero when it finds a blocker or a
-critical, so CI fails on a real SQL injection or a known CVE without anyone
-parsing the output. A clean workspace exits 0, and advisory findings never fail
-a pipeline. `--exit-zero` restores the old always zero behaviour, and
-`--exit-threshold=warning` makes it stricter.
+critical, so CI fails on a real SQL injection without anyone parsing the output.
+A clean workspace exits 0. `--exit-zero` restores the old always zero behaviour,
+and `--exit-threshold=warning` makes it stricter.
 
-Every guard except one is local analysis. The dependency guard is the only one
-that queries a registry, and it says so instead of doing it behind your back:
+### Every guard is local, and that is the whole design
 
-```sh
-heides check --no-deps       # or HEIDES_OFFLINE=1
-```
+heides reports only what it can prove from the files it read. Each finding names
+a file and a line, and the same tree produces the same verdict on a laptop, in a
+container, and on a phone with the network off. There is no cache to go stale and
+no registry that can fail.
 
-On this repository that is the difference between 217 seconds and 2. Manifest
-parsing and pinned version extraction are local, so an offline check still reads
-all 94 pinned versions and reports them.
+That used to not be true. heides carried a dependency guard that asked whether a
+pinned version was a known CVE, and every way of answering it inside the tool
+was a way of being wrong:
 
-**`--no-deps` is a speed flag. It is not a security gate.** A skipped advisory
-lookup means a known vulnerability in a pinned version is not reported, and
-there is no cache to fall back on yet. Two things stop that from being a quiet
-trap. The summary line carries the posture, so it cannot be skimmed past:
+- Over the network, a gate verdict depended on network conditions rather than on
+  the tree. `check` took 3242 ms with the guard and 117 ms without, on the same
+  five file fixture.
+- From a cache, worse. The offline cache expired a clean answer after 24 hours,
+  so a CVE published that morning read as "no known vulnerability" until the
+  entry was re-fetched. Nothing in the output distinguished the two.
 
-```text
-0 blocker(s), 0 critical, 0 warning(s), 1 info. ADVISORIES NOT CHECKED
-```
+A guard that cannot tell *no vulnerability* from *has not heard of it yet*
+reports false confidence, and false confidence is indistinguishable from a pass.
+So the guard was removed rather than made opt-in: an opt-in default that is safe
+is still a slow default, and a cache that is correct is still a cache.
 
-And `--require-advisories` makes the wrong configuration fail rather than pass
-hollow. Use both shapes, and make them visibly different jobs:
+**Dependencies, secrets and exposure live in
+[GRIM](https://pypi.org/project/grim-mcp/)**, which is public, published, and
+backed by a continuously updated feed rather than by this repository's cache.
+`heides deps` and the `deps.*` tools still exist and say exactly that, so an
+agent holding one of those names learns where the answer went instead of
+concluding the tool is broken.
 
-```yaml
-# fast gate, every push, seconds. Not a security gate.
-- run: heides check --no-deps .
+What heides still proves locally is the part that matters for a change you are
+about to make:
 
-# security gate, scheduled. Fails if the advisory lookup did not run.
-- run: heides check --require-advisories .
-```
+| | |
+|---|---|
+| Taint | user input reaching a SQL string, a shell, or a prompt |
+| Secrets | committed credentials by value shape, in source and in config |
+| Edge cases | the unwrap and index patterns that panic on the wrong input |
+| Schema | foreign key cycles, missing primary keys, PII on a read path |
+| Config | credentials in `.env`, Dockerfile, Terraform and manifests |
 
-### Over MCP, the default is the safe one
+Every one of those is a fact about your repository rather than about the world,
+which is why they belong in the same tool and the CVE question does not.
 
-`harmony.check` and `harmony.report` take both `offline` and
-`require_advisories`. When `require_advisories` holds and the advisory lookup
-did not run, the tool returns a JSON-RPC error rather than a result, and
-`harmony.report` carries `security_gate` and `security_posture` in its JSON so an
-agent can gate on the verdict without parsing prose.
+### Over MCP
 
-`require_advisories` **defaults to true over MCP and is unset on the CLI.** That
-difference is deliberate. A human running `heides check` in a terminal sees the
-posture on the summary line and chooses; an agent may only read the result, so
-the safe path is the default and speed is opt-in. A per-call argument applies to
-that call only and is restored afterwards, including when it panics, so one
-caller cannot change the security posture for the next.
+`harmony.check` and `harmony.report` return findings with the guard, severity,
+message, file and line. `harmony.report` carries `security_gate` and
+`security_posture` so an agent can gate on the verdict without parsing prose,
+and the coverage receipt travels inside the JSON, because an agent that receives
+a clean result must be able to see how much was actually inspected without a
+second call.
 
-Do not put `--no-deps` in a required status check and read a green build as
-"no known vulnerabilities". The default, with no flags, is the security gate:
-it consults OSV, and if the registry is unreachable the summary says
-`ADVISORIES INCOMPLETE` so a silent network failure cannot read as a pass
-either. The offline advisory cache that removes the tradeoff is Tier 4.
-
-An unreachable advisory service never reports a dependency as clean. It says so
-explicitly, because the two are not the same answer and the old behaviour
-collapsed them:
-
-```text
-[info] could not reach the advisory service for serde 1.0.0. it is NOT known to be clean.
-```
-
-The two halves of this guard are also tracked separately, deliberately. Advisory
-coverage is the security half and it alone drives the posture. The "a newer
-version exists" reminder is a convenience, and a reminder that did not answer
-produces its own note rather than failing a security gate. Collapsing the two
-once made `--require-advisories` unusable on ordinary repositories, which is how
-people end up dropping the flag.
+One lesson outlived the guard it was written for. An MCP server handles every
+client in one process, so a setting that changes behaviour must be scoped to the
+call that asked for it and never set on the process. An earlier version of
+`harmony.check` set a process global and never restored it, so one client
+passing an argument silently changed the security posture of every later request
+from every client.
 
 ## Why it exists
 
@@ -252,9 +244,9 @@ any of them.
 | `query` | `callers`, `imports`, `definition`, `calls`, `neighbors`, `search`. Who calls a symbol, where a definition lives, what it calls, free text search over names, signatures, docs, literals and comments. |
 | `check` | Run every guard. The gate. Non-zero exit when a finding is a blocker or critical. |
 | `staged` | Check a unified diff before applying it. |
-| `verify` | Assertions a project can state about itself: tests, advisories. `--require-advisories` makes the wrong configuration fail rather than pass. |
+| `verify` | Assertions a project can state about itself: its own tests plus every local guard, with a boolean to branch on. |
 | `db` | `tables`, `columns`, `reads`, `writes`, `orphans`, `missingindex`, `policies`, `cycles`, `schema`, `routes`, `touch`. The database graph, read from the code. |
-| `deps` | Known vulnerabilities and outdated versions from the manifests. `--no-deps` and `HEIDES_OFFLINE` skip the advisory lookup and say so. |
+| `deps` | Removed. It used to ask whether a pinned version was a known CVE. It now refuses and points at [GRIM](https://pypi.org/project/grim-mcp/). |
 | `config` | Scan manifests and config files for credentials and settings that matter. |
 | `export` | Write the code map to a markdown file. The one command with no MCP twin, because it is a file export and the server has nothing to export to. |
 | `confirm` | Ask crates.io and npm what a package name actually is, before you depend on it. The only command here that uses the network by choice. |
@@ -278,12 +270,12 @@ a command line twin except where noted.
 * `harmony.check`. Run every guard, findings with evidence. (`check`)
 * `harmony.report`. The same verdict as structured JSON with severity counts and a clean flag.
 * `harmony.staged`. Check a unified diff before applying it. (`staged`)
-* `harmony.verify`. Tests and advisories as assertions. (`verify`)
+* `harmony.verify`. The project's own tests plus every guard, as one boolean. (`verify`)
 * `grounding.plan`. Evaluate a plan against the codebase, with the evidence it used. (`plan`)
 * `grounding.scaffold`. Scaffold a new project from a plan and index it immediately. (`scaffold`)
-* `deps.check`. Known vulnerabilities and outdated versions from the manifests. (`deps check`)
-* `deps.advisories`. The advisory lookup on its own. (`deps`)
-* `deps.tree`. The dependency graph. (`deps`)
+The three `deps.*` tools were removed with the guard. Calling one returns an
+error explaining that the capability moved to GRIM, rather than an unknown tool
+error that would read as a broken server.
 * `db.tables`, `db.columns`, `db.reads`, `db.writes`, `db.routes`, `db.schema`, `db.touch`. The database graph, read from the code. (`db <subcommand>`)
 * `config.scan`. Credentials and settings in manifests and config files. (`config`)
 * `web.confirm`. Confirm a fact against the package registries. (`confirm`)
@@ -318,7 +310,7 @@ Stated plainly, and tracked with citations and a resolution column in `ROADMAP.m
 * No open redirect, XXE, unsafe deserialization or crypto misuse rules.
 * A handful of ecosystems are not read for dependencies: Ruby, .NET, Swift, Gradle, Dart, and no transitive resolution from lockfiles.
 * Languages not indexed: C, C++, SQL, shell, Kotlin, Swift, Scala, Dart, Dockerfile. Ruby is taint scanned but has no grammar, so it contributes no symbols to the graph. Rust is indexed but not taint scanned.
-* `deps` queries OSV for advisories and the registries for latest versions. It is skippable with `--no-deps` or `HEIDES_OFFLINE=1`, and the receipt states when it was skipped. There is still no cached advisory database, so an offline check cannot know about a CVE it has never seen, which is Tier 4.
+* **There is no network in any guard.** Every finding is provable from the files. The one command that reaches the network is web confirmation inside `grounding.plan`, which is a deliberate lookup a caller asks for by name, not a guard that runs as part of `check`.
 * `staged` validates conflicts only; it does not run taint over the post-patch tree, so a patch that introduces a flow is not yet caught by the gate.
 
 

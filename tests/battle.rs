@@ -551,8 +551,17 @@ fn battle_serial() {
             && mcp_out.contains("harmony.staged")
             && mcp_out.contains("grounding.plan")
             && mcp_out.contains("grounding.scaffold")
-            && mcp_out.contains("deps.check")
             && mcp_out.contains("web.confirm"),
+    );
+    // The three deps tools are gone, and their absence is the contract rather
+    // than an oversight: a tool that cannot tell "no vulnerability" from "has
+    // not heard of it yet" reports false confidence. Pin the removal so it
+    // cannot creep back in unnoticed.
+    b.check(
+        "mcp no longer offers a dependency CVE check",
+        !mcp_out.contains("\"deps.check\"")
+            && !mcp_out.contains("\"deps.advisories\"")
+            && !mcp_out.contains("\"deps.tree\""),
     );
     b.check(
         "mcp answers a spine.query call",
@@ -605,36 +614,27 @@ fn battle_serial() {
     let mcp_list = String::from_utf8_lossy(&output.stdout).to_string();
     b.check("mcp tools/list is dash free", has_no_dash(&mcp_list));
 
-    // 19. Dependency guard talks to the registries
-    let (out, _, _) = b.cli(&["deps"]);
+    // 19. The dependency CVE check is gone, and saying where it went is part of
+    // the contract. A bare usage error would leave an agent that was trained on
+    // `heides deps` concluding the tool is broken rather than that the answer
+    // moved to a tool that keeps an updated feed.
+    let (out, _, ok) = b.cli(&["deps"]);
     b.check(
-        "deps reports serde from the manifest",
-        out.contains("serde"),
+        "deps refuses and points at grim",
+        ok && out.contains("GRIM") && out.contains("grim-mcp"),
     );
-
-    // 20. Anti cosmetic: a caret range must never be called outdated
-    let cosmetic_dir = b.fixture.join("caret_ok");
-    std::fs::create_dir_all(&cosmetic_dir).unwrap();
-    std::fs::write(
-        cosmetic_dir.join("Cargo.toml"),
-        "[package]\nname = \"caret_ok\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1\"\n",
-    )
-    .unwrap();
-    let (out, _, _) = Command::new(BIN)
-        .args(["deps", "caret_ok"])
-        .current_dir(&b.fixture)
-        .output()
-        .map(|o| {
-            (
-                String::from_utf8_lossy(&o.stdout).to_string(),
-                String::from_utf8_lossy(&o.stderr).to_string(),
-                o.status.success(),
-            )
-        })
-        .unwrap();
+    // The refusal explains why the check went away, so it necessarily contains
+    // the words it is refusing to assert. What must not appear is a claim about
+    // any actual package.
     b.check(
-        "caret range serde 1 is not reported outdated",
-        !out.contains("outdated") && !out.contains("falls outside"),
+        "deps makes no claim about any package",
+        !out.contains("no known vulnerability")
+            && !out.contains("GHSA-")
+            && !out.contains("vulnerable"),
+    );
+    b.check(
+        "deps still names what heides does prove locally",
+        out.contains("taint") && out.contains("secrets"),
     );
 
     // 21. Scale phase. A synthetic workspace of about a hundred thousand

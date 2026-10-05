@@ -157,7 +157,6 @@ fn every_capability_is_reachable_as_a_tool() {
         "harmony.staged",
         "grounding.plan",
         "grounding.scaffold",
-        "deps.check",
         "web.confirm",
         // Tier 4 additions. Each one is a capability that exists in the binary
         // and was invisible to an agent before this.

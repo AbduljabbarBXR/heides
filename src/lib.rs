@@ -7,16 +7,12 @@
 pub mod config;
 pub mod db;
 pub mod deadcode;
-pub mod deps;
 pub mod edge;
 pub mod frameworks;
 pub mod grounding;
 pub mod harmony;
 pub mod indexer;
 pub mod interproc;
-pub mod lockgraph;
-pub mod lockparse;
-pub mod osv_cache;
 pub mod parser;
 pub mod practice;
 pub mod server;

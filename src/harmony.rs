@@ -27,40 +27,6 @@ pub struct GuardReport {
 /// content. Zero findings and analysed nothing printed the same words. A
 /// receipt always prints, clean runs included, because a receipt you only see
 /// when something is wrong is a warning and not a receipt.
-/// What happened to the dependency guard. Three states, not two, because
-/// "skipped on request" and "could not reach the registry" are different facts
-/// and a receipt that collapsed them would be the very problem it exists to
-/// fix.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub enum DepsState {
-    #[default]
-    RanOnline,
-    RanPartial,
-    Skipped,
-}
-
-impl DepsState {
-    /// A stable machine-readable name. Agents gate on this, so it must not be
-    /// a Debug format that could change with a variant rename.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            DepsState::RanOnline => "ran_online",
-            DepsState::RanPartial => "ran_partial",
-            DepsState::Skipped => "skipped",
-        }
-    }
-
-    fn note(self) -> Option<&'static str> {
-        match self {
-            DepsState::RanOnline => None,
-            DepsState::RanPartial => Some("dependency check was partial: registries unreachable"),
-            DepsState::Skipped => Some(
-                "dependency check skipped: --no-deps or HEIDES_OFFLINE=1, so no advisory lookup ran",
-            ),
-        }
-    }
-}
-
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Coverage {
     /// Files in the index, and how many of them could actually be read back.
@@ -76,8 +42,6 @@ pub struct Coverage {
     /// Files indexed but contributing no symbols, which is what a language
     /// without a grammar looks like.
     pub no_grammar: Vec<String>,
-    /// What the dependency guard did, stated in the receipt.
-    pub deps: DepsState,
 }
 
 impl Coverage {
@@ -111,9 +75,6 @@ impl Coverage {
                 self.unreadable.join(", ")
             ));
         }
-        if let Some(note) = self.deps.note() {
-            out.push_str(&format!("\n{note}"));
-        }
         out
     }
 }
@@ -121,7 +82,7 @@ impl Coverage {
 /// Build the receipt for a graph. Counts languages from the index and the
 /// taint rules from the rule tables, so neither can drift from what the
 /// guards actually do.
-pub fn coverage_of(graph: &CodeGraph, deps: DepsState) -> Coverage {
+pub fn coverage_of(graph: &CodeGraph) -> Coverage {
     use std::collections::BTreeSet;
     let mut langs: BTreeSet<String> = BTreeSet::new();
     let mut untested: BTreeSet<String> = BTreeSet::new();
@@ -162,138 +123,40 @@ pub fn coverage_of(graph: &CodeGraph, deps: DepsState) -> Coverage {
         languages: langs.into_iter().collect(),
         taint_untested: untested.into_iter().collect(),
         no_grammar: no_grammar.into_iter().collect(),
-        deps,
     }
 }
 
-/// Run the full workspace check and report the dependency guard's network
-/// state, which the coverage receipt needs. Kept separate from
-/// `check_workspace` so the receipt can be built from the same call rather than
-/// re-querying the registries.
-/// The policy is a value passed in, not a process global, so one caller's
-/// choice cannot appear in another caller's result.
+/// Run the full workspace check and build the coverage receipt from the same
+/// pass, so the receipt cannot describe a run other than the one reported.
 pub fn check_workspace_with_coverage(
-    root: &Path,
+    _root: &Path,
     graph: &CodeGraph,
-    policy: crate::deps::DepsPolicy,
 ) -> (Vec<GuardReport>, Coverage) {
-    let (reports, state) = check_workspace_and_state(root, graph, policy);
-    (reports, coverage_of(graph, state))
+    let reports = check_workspace_without_deps(graph);
+    (reports, coverage_of(graph))
 }
 
-/// Run the full workspace check: taint, edge cases, practices, dependencies.
-pub fn check_workspace(root: &Path, graph: &CodeGraph) -> Vec<GuardReport> {
-    check_workspace_and_state(root, graph, crate::deps::DepsPolicy::default()).0
-}
-
-fn check_workspace_and_state(
-    root: &Path,
-    graph: &CodeGraph,
-    policy: crate::deps::DepsPolicy,
-) -> (Vec<GuardReport>, DepsState) {
-    let mut reports = check_workspace_without_deps(graph);
-
-    // The one guard that is allowed to want the network, and only when asked.
-    if !policy.enabled {
-        // Manifest parsing is local and still runs, so the pinned versions are
-        // known even offline. The advisory answers come from the cache where one
-        // is usable, which is what turns `--no-deps` from an honest refusal into
-        // a real gate.
-        //
-        // The state is still Skipped when the cache could not answer for every
-        // pinned version. A cache miss is not a clean bill of health, and
-        // reporting Skipped over a partial cache is the honest reading.
-        let cache_policy = crate::osv_cache::CachePolicy {
-            enabled: true,
-            allow_offline: true,
-            ..Default::default()
-        };
-        let (dep_reports, offline_health) = crate::deps::check_offline_cached(root, cache_policy);
-        let cache_health = offline_health.cache;
-        for r in dep_reports {
-            reports.push(GuardReport {
-                guard: "dependency".to_string(),
-                severity: r.severity,
-                message: r.message,
-                file: r.file,
-                line: r.line,
-            });
-        }
-        // The cache line is always printed, including when it is empty, so a
-        // reader can tell "the cache answered" from "the cache was never asked".
-        if cache_health.hits > 0 || cache_health.misses > 0 || cache_health.stale > 0 {
-            reports.push(GuardReport {
-                guard: "dependency".to_string(),
-                severity: "info".to_string(),
-                message: format!(
-                    "advisory cache: {} answered, {} with no entry, {} expired{}",
-                    cache_health.hits,
-                    cache_health.misses,
-                    cache_health.stale,
-                    if cache_health.oldest_used_secs > 0 {
-                        format!(
-                            ". oldest answer relied on was {}",
-                            crate::osv_cache::human_age(cache_health.oldest_used_secs)
-                        )
-                    } else {
-                        String::new()
-                    }
-                ),
-                file: String::new(),
-                line: 0,
-            });
-        }
-        // Two states, not one. A cache that answered for every pinned version is
-        // a real check even though it was offline, so calling it Skipped would
-        // understate it. A cache that answered for some of them is RanPartial,
-        // which already means "looked at some of it and could not look at the
-        // rest", so the state is reused rather than invented.
-        let complete = cache_health.misses == 0 && cache_health.stale == 0;
-        return (
-            reports,
-            if complete && cache_health.hits > 0 {
-                DepsState::RanOnline
-            } else if complete {
-                // Nothing pinned, so nothing needed answering. Skipped is the
-                // honest word: there was no advisory work to do.
-                DepsState::Skipped
-            } else {
-                DepsState::RanPartial
-            },
-        );
-    }
-
-    let (dep_reports, health) = crate::deps::check(root);
-    for r in dep_reports {
-        reports.push(GuardReport {
-            guard: "dependency".to_string(),
-            severity: r.severity,
-            message: r.message,
-            file: r.file,
-            line: r.line,
-        });
-    }
-    // Only the advisory half drives the security posture. A missing
-    // "latest version" answer is the convenience half failing and must not be
-    // allowed to fail --require-advisories, or the flag becomes unusable on
-    // any repository holding a package whose latest release is unresolvable.
-    if !health.versions_ok && health.advisories_ok {
-        reports.push(GuardReport {
-            guard: "dependency".to_string(),
-            severity: "info".to_string(),
-            message: "some latest version lookups did not answer, so upgrade reminders are partial. advisory results are complete."
-                .to_string(),
-            file: String::new(),
-            line: 0,
-        });
-    }
-
-    let state = if health.advisories_ok {
-        DepsState::RanOnline
-    } else {
-        DepsState::RanPartial
-    };
-    (reports, state)
+/// Run the full workspace check: taint, edge cases and practices.
+///
+/// The dependency guard that used to run here is gone, and nothing replaced
+/// it. That is deliberate.
+///
+/// The guard answered one question, is this pinned version a known CVE, and
+/// that is a fact about the world rather than about the repository. Answering
+/// it meant either a network call, which made a gate verdict depend on
+/// network conditions rather than on the tree, or a cache, and a cache is
+/// worse. `osv_cache` expired a clean answer after 24 hours, so a CVE
+/// published this morning read as no known vulnerability until the entry was
+/// re-fetched. A security guard that cannot distinguish no vulnerability from
+/// has not heard of it yet reports false confidence, and false confidence is
+/// worse than an absent check because it is indistinguishable from a pass.
+///
+/// Dependency and exposure analysis lives in GRIM, which is public, published,
+/// and backed by a continuously updated feed rather than by this repository's
+/// cache. Splitting on that line keeps heides offline and deterministic by
+/// construction: every finding it reports is provable from the files it read.
+pub fn check_workspace(_root: &Path, graph: &CodeGraph) -> Vec<GuardReport> {
+    check_workspace_without_deps(graph)
 }
 
 /// The shared local guard body behind check_workspace and the report tool.
@@ -986,34 +849,29 @@ pub fn folded_count(lines: &[Line<'_>]) -> usize {
         .sum()
 }
 
-/// The headline. Counts alone, and counts alone are a lie when a guard did not
-/// run: "0 critical" reads identically whether the advisory lookup found
-/// nothing or was skipped. The posture travels with the numbers, on the same
-/// line, so the summary cannot be skimmed past.
+/// The headline: severity counts, one line.
+///
+/// This used to carry a security posture suffix, because the advisory guard
+/// could fail without producing a finding and a bare count would read as a
+/// pass. With that guard gone there is nothing to qualify, so the counts are
+/// what they always claimed to be. Every remaining guard runs locally and every
+/// finding it reports is provable from a file and a line, which is the property
+/// the posture text existed to protect.
 pub fn summarize(reports: &[GuardReport]) -> String {
-    summarize_with(reports, DepsState::RanOnline)
-}
-
-pub fn summarize_with(reports: &[GuardReport], deps: DepsState) -> String {
     let blockers = reports.iter().filter(|r| r.severity == "blocker").count();
     let critical = reports.iter().filter(|r| r.severity == "critical").count();
     let warnings = reports.iter().filter(|r| r.severity == "warning").count();
     let infos = reports.iter().filter(|r| r.severity == "info").count();
-    let posture = match deps {
-        DepsState::RanOnline => String::new(),
-        DepsState::RanPartial => ". ADVISORIES INCOMPLETE, registry unreachable".to_string(),
-        DepsState::Skipped => ". ADVISORIES NOT CHECKED".to_string(),
-    };
     format!(
-        "{} blocker(s), {} critical, {} warning(s), {} info{}",
-        blockers, critical, warnings, infos, posture
+        "{} blocker(s), {} critical, {} warning(s), {} info",
+        blockers, critical, warnings, infos
     )
 }
 
 #[cfg(test)]
 mod liveness {
     use super::*;
-    use crate::{deps, indexer};
+    use crate::indexer;
     use std::path::{Path, PathBuf};
 
     /// Every module that has a guard has a unit test for it, and every one of
@@ -1225,7 +1083,7 @@ mod liveness {
         std::fs::write(dir.join("a.js"), "export const x = 1;\n").unwrap();
         std::fs::write(dir.join("b.py"), "y = 1\n").unwrap();
         let (graph, _) = indexer::build_graph(&dir);
-        let cov = coverage_of(&graph, DepsState::RanOnline);
+        let cov = coverage_of(&graph);
         let text = cov.render();
         assert_eq!(cov.files, 2, "{text}");
         assert_eq!(cov.files_read, 2, "both files must be readable: {text}");
@@ -1247,7 +1105,7 @@ mod liveness {
         let dir = scratch("rustonly");
         std::fs::write(dir.join("a.rs"), "fn f() -> i32 { 1 }\n").unwrap();
         let (graph, _) = indexer::build_graph(&dir);
-        let cov = coverage_of(&graph, DepsState::RanOnline);
+        let cov = coverage_of(&graph);
         let text = cov.render();
         assert!(
             cov.taint_untested.iter().any(|l| l == "rust"),
@@ -1273,7 +1131,7 @@ mod liveness {
         let dir = scratch("rubycovered");
         std::fs::write(dir.join("a.rb"), "def f\n  1\nend\n").unwrap();
         let (graph, _) = indexer::build_graph(&dir);
-        let cov = coverage_of(&graph, DepsState::RanOnline);
+        let cov = coverage_of(&graph);
         let text = cov.render();
         assert!(
             cov.taint_untested.is_empty(),
@@ -1302,10 +1160,10 @@ mod liveness {
         let file = dir.join("a.js");
         std::fs::write(&file, "export const x = 1;\n").unwrap();
         let (graph, _) = indexer::build_graph(&dir);
-        let cov = coverage_of(&graph, DepsState::RanOnline);
+        let cov = coverage_of(&graph);
         assert_eq!(cov.files_read, cov.files, "everything readable for now");
         std::fs::remove_file(&file).unwrap();
-        let cov2 = coverage_of(&graph, DepsState::RanOnline);
+        let cov2 = coverage_of(&graph);
         let text = cov2.render();
         assert!(
             cov2.files_read < cov2.files,
@@ -1452,97 +1310,79 @@ mod liveness {
     }
 
     #[test]
-    fn the_summary_line_itself_carries_the_posture() {
-        // The defect this fixes: "0 blocker(s), 0 critical, 0 warning(s), 0
-        // info" is the same string whether advisories were checked and clean,
-        // or never checked. The posture has to be on the headline.
+    fn the_summary_line_is_counts_and_nothing_else() {
+        // The posture suffix is gone with the advisory guard, so the headline
+        // is exactly the counts it claims to be. This pins that, because a
+        // future guard that can fail silently must reintroduce a qualifier here
+        // rather than let a bare 0 critical read as a pass.
         let clean: Vec<GuardReport> = Vec::new();
-        let skipped = summarize_with(&clean, DepsState::Skipped);
-        let online = summarize_with(&clean, DepsState::RanOnline);
-        assert!(skipped.contains("ADVISORIES NOT CHECKED"), "{skipped}");
-        assert!(skipped.contains("0 critical"), "{skipped}");
+        let text = summarize(&clean);
+        assert_eq!(text, "0 blocker(s), 0 critical, 0 warning(s), 0 info",);
         assert!(
-            online.contains("0 critical") && !online.contains("ADVISORIES"),
-            "an online run must not carry the warning: {online}"
+            !text.contains("ADVISORIES") && !text.contains("NOT CHECKED"),
+            "the advisory posture text must be gone, not merely unused: {text}"
         );
-        assert_ne!(
-            skipped, online,
-            "the two postures must not be indistinguishable"
-        );
-        let partial = summarize_with(&clean, DepsState::RanPartial);
-        assert!(partial.contains("ADVISORIES INCOMPLETE"), "{partial}");
     }
 
     #[test]
-    fn a_skipped_run_reports_skipped_not_online() {
-        // Guards a real bug in the first draft: the offline branch returned
-        // network_ok = true, which mapped to RanOnline and would have let
-        // --require-advisories pass on a check that never asked OSV anything.
-        crate::deps::set_deps_enabled(false);
-        let dir = scratch("skipstate");
+    fn a_clean_run_reports_no_posture_caveat_at_all() {
+        // The strongest form of the old honesty contract, inverted: there is
+        // nothing left to qualify, because every guard that runs is local and
+        // every finding it reports names a file and a line.
+        let dir = scratch("noposture");
         std::fs::write(dir.join("a.js"), "export const x = 1;\n").unwrap();
         let (graph, _) = indexer::build_graph(&dir);
-        // An explicit policy, not the process default, so this test cannot race
-        // any other test that reads or writes a global.
-        let (_, cov) = check_workspace_with_coverage(
-            &dir,
-            &graph,
-            crate::deps::resolve_policy(Some(false), None, None),
-        );
-        assert_eq!(
-            cov.deps,
-            DepsState::Skipped,
-            "a skipped dependency check must not report itself as online"
+        let (reports, cov) = check_workspace_with_coverage(&dir, &graph);
+        let text = summarize(&reports);
+        assert!(!text.contains("ADVISORIES"), "{text}");
+        let receipt = cov.render();
+        assert!(
+            !receipt.contains("ADVISORIES") && !receipt.contains("skipped"),
+            "the receipt must not carry a dependency caveat any more: {receipt}"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn a_skipped_dependency_check_is_stated_not_hidden() {
-        // The whole point of the receipt. An offline run must say the advisory
-        // lookup did not happen, or "no findings" reads as a clean bill of
-        // health for a check that never ran.
-        let text = coverage_of(&CodeGraph::new(), DepsState::Skipped).render();
-        assert!(text.contains("skipped"), "{text}");
-        assert!(text.contains("--no-deps"), "{text}");
+    fn the_coverage_receipt_still_states_what_it_did_not_scan() {
+        // Removing the advisory caveat must not remove the other honesty the
+        // receipt exists for. A language with no taint rule is still named, so
+        // "analysed N files" never implies every file was scanned by every
+        // guard.
+        let mut graph = CodeGraph::new();
+        graph.files.push(crate::spine::FileEntry {
+            path: "main.rs".into(),
+            lang: "rust".into(),
+            mtime: 0,
+            size: 0,
+        });
+        let receipt = coverage_of(&graph).render();
+        assert!(
+            receipt.contains("rust") && receipt.contains("taint not scanned"),
+            "a language with no taint rules must still be named: {receipt}"
+        );
     }
 
     #[test]
-    fn offline_dependency_check_still_reads_pinned_versions() {
-        // The offline path must not be the empty path. Manifest parsing and
-        // pinned version extraction are local, so they still happen.
-        let dir = scratch("offlinereads");
+    fn a_manifest_on_disk_produces_no_dependency_finding_any_more() {
+        // The removal has to be real rather than a rename. A project with a
+        // pinned dependency used to produce a dependency finding; now the guard
+        // does not exist, so it must produce none, and the remaining guards must
+        // still run.
+        let dir = scratch("noguards");
         std::fs::write(
             dir.join("package.json"),
-            "{\"name\":\"x\",\"version\":\"1.0.0\",\"dependencies\":{\"left-pad\":\"1.3.0\"}}",
+            "{\"name\":\"x\",\"version\":\"1.0.0\",\"dependencies\":{\"lodash\":\"4.17.15\"}}",
         )
         .unwrap();
-        let (reports, _) = deps::check_offline(&dir);
-        let text: Vec<String> = reports.iter().map(|r| r.message.clone()).collect();
-        assert!(
-            text.iter().any(|m| m.contains("1 pinned version")),
-            "an offline check must report the pinned versions it read, got {text:?}"
-        );
-        assert!(
-            text.iter().any(|m| m.contains("advisory lookup skipped")),
-            "{text:?}"
-        );
-        assert!(
-            !text.iter().any(|m| m.contains("falls outside")),
-            "no registry comparison offline: {text:?}"
-        );
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn the_receipt_says_when_the_dependency_check_was_partial() {
-        let dir = scratch("offline");
-        std::fs::write(dir.join("a.js"), "export const x = 1;\n").unwrap();
+        std::fs::write(dir.join("app.js"), "export const x = 1;\n").unwrap();
         let (graph, _) = indexer::build_graph(&dir);
-        let text = coverage_of(&graph, DepsState::RanPartial).render();
-        assert!(text.contains("registries unreachable"), "{text}");
-        let online = coverage_of(&graph, DepsState::RanOnline).render();
-        assert!(!online.contains("registries unreachable"), "{online}");
+        let reports = check_workspace(&dir, &graph);
+        assert!(
+            reports.iter().all(|r| r.guard != "dependency"),
+            "the dependency guard is removed, so it must emit nothing: {:?}",
+            reports
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1598,18 +1438,25 @@ mod liveness {
     }
 
     #[test]
-    fn the_dependency_guard_reports_when_it_cannot_see_a_manifest() {
-        // The dependency guard is the one guard that does not read source, so
-        // its liveness shape is different. A directory with no manifest must
-        // still produce a report, the one that says so, rather than nothing.
-        let dir = scratch("deps");
+    fn every_remaining_guard_has_a_liveness_test() {
+        // The liveness shape the deleted dependency guard used to cover: a
+        // directory with nothing in it must still be reported rather than read
+        // as silently clean. With the advisory guard gone, `check` on an empty
+        // workspace produces no findings at all, so the honesty now rests on the
+        // coverage receipt stating how much was actually analysed.
+        let dir = scratch("empty_liveness");
         std::fs::write(dir.join("a.js"), "export const x = 1;\n").unwrap();
-        let (reports, _) = deps::check(&dir);
+        let (graph, _) = indexer::build_graph(&dir);
+        let (reports, cov) = check_workspace_with_coverage(&dir, &graph);
         assert!(
+            reports.iter().all(|r| r.guard != "dependency"),
+            "the removed guard must not appear: {:?}",
             reports
-                .iter()
-                .any(|r| r.message.contains("no dependency manifests")),
-            "a manifest-less directory must be reported, not silently clean, got {reports:?}"
+        );
+        let receipt = cov.render();
+        assert!(
+            receipt.contains("analysed") && receipt.contains("indexed file"),
+            "the receipt must always state how much was inspected: {receipt}"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
