@@ -2,6 +2,55 @@
 
 All notable changes to HEIDES are recorded here.
 
+## Unreleased
+
+**The advisory guard is gone. heides is now local-only.**
+
+The dependency guard asked one question, is this pinned version a known CVE.
+That is a fact about the world rather than about the repository, and every way
+of answering it inside this tool was a way of being wrong. Over the network, a
+gate verdict depended on network conditions rather than on the tree: `check`
+took 3242 ms with the guard and 117 ms without, on the same five file fixture.
+From a cache, worse: the offline cache expired a clean answer after 24 hours,
+so a CVE published that morning read as *no known vulnerability* until the entry
+was re-fetched, and nothing in the output distinguished the two. A guard that
+cannot tell *no vulnerability* from *has not heard of it yet* reports false
+confidence, and false confidence is indistinguishable from a pass.
+
+So it was removed rather than made opt-in. An opt-in default that is safe is
+still a slow default, and a cache that is correct is still a cache.
+
+* **Removed:** `deps.rs`, `osv_cache.rs`, `lockgraph.rs`, `lockparse.rs`, 4207
+  lines. 26656 to 22449, 25 modules to 21, 21 MCP tools to 18.
+* **Removed with them:** the `DepsState` enum, the security posture suffix on the
+  summary line, `advisories_ran` in the verify verdict, `--no-deps`,
+  `--require-advisories`, the `offline` and `require_advisories` arguments on
+  `harmony.check` and `harmony.report`, and the `deps.check`, `deps.tree` and
+  `deps.advisories` tools.
+* **The removals refuse rather than vanish.** `heides deps` and the three tools
+  explain that the capability moved and name
+  [GRIM](https://pypi.org/project/grim-mcp/), which is public, published, and
+  backed by a continuously updated feed. Neither refusal makes a vulnerability
+  claim of its own. An agent holding one of these names in a plan learns where
+  the answer went instead of concluding the tool is broken.
+* **Unchanged and still the point:** taint flows, hardcoded credentials, edge
+  cases, schema defects and config credentials. Each names a file and a line
+  and reproduces from the tree alone, so the same commit produces the same
+  verdict with the network off.
+* **An indirect foreign key cycle is not a self reference.** The walk compared
+  each edge's target against the table the walk began from rather than the table
+  the edge is declared on, so `a.b_id -> b` plus `b.a_id -> a` was reported as
+  two *self references* at `critical` severity in a schema that has none. It now
+  distinguishes them, and 8 tests pin the distinction in both directions: a real
+  self reference and a cascading one keep their own findings, a three table loop
+  is indirect, and a diamond is still not a cycle.
+* **Every `db` subcommand honours its directory.** The earlier fix covered
+  `routes` and `schema` only, so `db tables`, `db orphans` and the rest still
+  walked the current directory and printed tables belonging to unrelated
+  projects. `root_offset` now covers all eleven subcommands by their own shape,
+  and `tests/dbargs.rs` walks each one with and without a directory so a partial
+  fix cannot pass again.
+
 ## 0.24.4
 
 Six fixes and one command. Everything from 0.24.2 through 0.24.3 was committed but never published, so this is the first release that carries any of it.

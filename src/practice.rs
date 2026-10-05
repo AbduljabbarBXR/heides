@@ -46,7 +46,7 @@ const SECRET_PATTERN: [&str; 6] = [
 /// characters after a prefix, which is what keeps prose quiet.
 const MIN_TOKEN_TAIL: usize = 16;
 
-const VALUE_SHAPED_CREDENTIALS: [(&str, &str); 13] = [
+const VALUE_SHAPED_CREDENTIALS: [(&str, &str); 15] = [
     ("AKIA", "AWS access key id"),
     ("ASIA", "AWS temporary access key id"),
     ("ghp_", "GitHub personal access token"),
@@ -58,6 +58,15 @@ const VALUE_SHAPED_CREDENTIALS: [(&str, &str); 13] = [
     ("xoxr-", "Slack refresh token"),
     ("sk-proj-", "OpenAI project key"),
     ("sk-ant-", "Anthropic API key"),
+    // Stripe splits its keys by mode: `sk_live_` is the one that moves money and
+    // `sk_test_` is a sandbox key from the public dashboard. Both are real
+    // credentials and both were missed, because `sk_live_` shares a prefix with
+    // nothing else in this table and the name rule needs "key" to appear in the
+    // variable. A file can carry a live Stripe key under a name like `STRIPE`
+    // with no keyword at all, which is exactly the case the value shaped table
+    // exists to catch.
+    ("sk_live_", "Stripe live secret key"),
+    ("sk_test_", "Stripe test secret key"),
     ("-----BEGIN", "private key block"),
     // A Slack incoming webhook carries three secret path segments after the
     // host. Matched on the host alone it would fire on any mention of
@@ -129,14 +138,26 @@ fn value_shaped_credential(line: &str) -> Option<&'static str> {
             // bare mention of the host in prose is not enough.
             inner.contains(needle)
         } else {
-            inner
-                .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
-                .any(|w| {
-                    let Some(pos) = w.find(needle) else {
-                        return false;
-                    };
-                    w[pos + needle.len()..].len() >= MIN_TOKEN_TAIL
-                })
+            // The token run is measured from the end of the needle, and a run is
+            // the unbroken alphanumeric stretch after it. The split keeps `_` and
+            // `-` inside a run, which is right for `ghp_` and `xoxb-` where the
+            // needle is a prefix and the whole remainder is the key.
+            //
+            // It is wrong for a needle that ends in a separator. `sk_live_` is one:
+            // the run continues straight through the needle into the key, so
+            // measuring `w[pos + needle.len()..]` from inside the run gave a tail
+            // of zero and every Stripe key came back clean. The tail is counted
+            // from the first alphanumeric character after the needle instead,
+            // which is the same number for every row in the table.
+            let Some(pos) = inner.find(needle) else {
+                continue;
+            };
+            let after = &inner[pos + needle.len()..];
+            after
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                .count()
+                >= MIN_TOKEN_TAIL
         };
         if ok && !is_placeholder_value(inner) {
             return Some(reason);
@@ -1299,6 +1320,55 @@ mod tests {
                 "a real {} must be reported: {:?}",
                 want,
                 reports
+            );
+        }
+    }
+
+    /// A needle that ends in a separator must still measure a token tail.
+    ///
+    /// The run of token characters is measured from the end of the needle. For
+    /// `ghp_` and `xoxb-` the needle is a prefix and the remainder is the key, so
+    /// the original measurement was right. `sk_live_` is different: the run
+    /// continues straight through the needle, so measuring from inside the run
+    /// produced a tail of zero and every Stripe key came back clean. The tail is
+    /// now counted from the first alphanumeric character after the needle.
+    ///
+    /// The literals are assembled from parts because GitHub push protection reads
+    /// a long prefix-plus-tail as a live credential and blocks the push, which is
+    /// the same false positive one layer up.
+    #[test]
+    fn a_needle_ending_in_a_separator_measures_its_tail() {
+        // `sk_{}_` rather than a literal: GitHub push protection reads a long
+        // prefix plus tail as a live credential and blocks the push. The
+        // underscore belongs to the part, not to the join, which is why this is
+        // not `["sk", "live", "_"].join("")` and that mistake made the rule
+        // look broken when it was the fixture that was wrong.
+        let live = "sk_live_";
+        let test = "sk_test_";
+        let tail = "0123456789abcdefghij";
+        let src = format!("STRIPE = \"{live}{tail}\"\nGATEWAY = \"{test}{tail}\"\n");
+        let reports = scan_file(std::path::Path::new("billing.py"), &src, "python");
+        for want in ["Stripe live secret key", "Stripe test secret key"] {
+            assert!(
+                reports.iter().any(|r| r.message.contains(want)),
+                "a real {} must be reported, got {:?}",
+                want,
+                reports
+            );
+        }
+    }
+
+    /// A separator ending needle must not fire on a bare mention. The tail
+    /// requirement is the whole reason the entry is safe to add.
+    #[test]
+    fn a_bare_stripe_mention_is_not_a_key() {
+        let src = "docs = \"see sk_live_ docs\"\ncomment = \"sk_test_ placeholder\"\n";
+        let reports = scan_file(std::path::Path::new("billing.py"), src, "python");
+        for r in &reports {
+            assert!(
+                !r.message.contains("Stripe"),
+                "a bare mention must stay quiet, got {:?}",
+                r
             );
         }
     }

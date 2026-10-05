@@ -2,8 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use heides::{
-    deadcode, deps, frameworks, grounding, harmony, indexer, server, spine, ui::Stopwatch, ui::Ui,
-    watch,
+    deadcode, frameworks, grounding, harmony, indexer, server, spine, ui::Stopwatch, ui::Ui, watch,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -33,16 +32,13 @@ fn cmd_takes_positional(cmd: &str) -> bool {
 fn cmd_accepts_flag(cmd: &str, flag: &str) -> bool {
     // Every command honours the presentation and gate flags, because they are
     // consumed before the command is even dispatched.
-    const COMMON: [&str; 9] = [
-        "--no-deps",
+    const COMMON: [&str; 6] = [
         "--all",
         "--no-advice",
         "--exit-zero",
         "--no-color",
         "--color=always",
         "--group",
-        "--require-advisories",
-        "--offline",
     ];
     if COMMON.contains(&flag) || flag.starts_with("--exit-threshold=") {
         return true;
@@ -74,8 +70,6 @@ fn print_usage() {
     println!("  plan [text] [dir]     ground an objective against the codebase");
     println!("  scaffold [text] [dir]");
     println!("                  scaffold a new project from a plan and index it");
-    println!("  deps [dir]      check dependencies for vulnerabilities and updates");
-    println!("  deps tree [dir] resolve the lockfile graph, with depth and path");
     println!("  config [dir]    find credentials in .env, Dockerfile, terraform, manifests");
     println!("  db [sub] [dir]  tables, reads, writes, orphans, schema defects,");
     println!("                  and the route to table surface");
@@ -200,17 +194,6 @@ fn main() -> ExitCode {
             heides::harmony::set_hide_advice(true);
             continue;
         }
-        if a == "--no-deps" {
-            heides::deps::set_deps_enabled(false);
-            continue;
-        }
-        // The security gate. Fails rather than passing hollow when the
-        // advisory lookup did not run, whether it was skipped or the registry
-        // was unreachable.
-        if a == "--require-advisories" {
-            heides::deps::set_require_advisories(true);
-            continue;
-        }
         if !Ui::consume_flag(a) {
             cleaned.push(a.clone());
         }
@@ -302,9 +285,7 @@ fn main() -> ExitCode {
                 return ExitCode::SUCCESS;
             }
             "verify" => {
-                println!(
-                    "usage. heides verify [--skip-tests] [--require-advisories] [--json] [dir]"
-                );
+                println!("usage. heides verify [--skip-tests] [--json] [dir]");
                 return ExitCode::SUCCESS;
             }
             "db" => {
@@ -550,8 +531,7 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let policy = heides::deps::DepsPolicy::default();
-            let (mut reports, cov) = harmony::check_workspace_with_coverage(&root, &graph, policy);
+            let (mut reports, cov) = harmony::check_workspace_with_coverage(&root, &graph);
             // The database guards join the code guards here, so a schema problem
             // is visible without a second command. A workspace with no database
             // contributes nothing and the receipt is unchanged.
@@ -574,13 +554,11 @@ fn main() -> ExitCode {
             // analysed nothing in, and the two cases printed the same words.
             if reports.is_empty() {
                 // "clean" is a claim about advisories too, so it never prints
-                // alone when the advisory guard did not run.
-                if cov.deps == harmony::DepsState::RanOnline {
-                    println!("no findings. the workspace is clean.");
-                } else {
-                    println!("no findings, but the advisory lookup did not run.");
-                }
-                println!("{}", harmony::summarize_with(&reports, cov.deps));
+                // alone when the advisory guard did not run. That guard is gone,
+                // so every guard that ran here is local and every finding names a
+                // file and a line.
+                println!("no findings. the workspace is clean.");
+                println!("{}", harmony::summarize(&reports));
                 println!("{}", cov.render());
             } else if ui.grouped {
                 let mut groups: std::collections::BTreeMap<&str, Vec<&harmony::GuardReport>> =
@@ -588,7 +566,7 @@ fn main() -> ExitCode {
                 for r in &reports {
                     groups.entry(r.guard.as_str()).or_default().push(r);
                 }
-                println!("{}", harmony::summarize_with(&reports, cov.deps));
+                println!("{}", harmony::summarize(&reports));
                 for (guard, items) in &groups {
                     let b = items.iter().filter(|r| r.severity == "blocker").count();
                     let c = items.iter().filter(|r| r.severity == "critical").count();
@@ -619,17 +597,6 @@ fn main() -> ExitCode {
                 print_flat(&ui, &reports);
                 println!("{}", cov.render());
             }
-            // A security gate that did not consult the advisories must not
-            // report success. This is the whole point of --require-advisories:
-            // the failure is mechanical, not a note someone has to read.
-            if policy.require_advisories && cov.deps != harmony::DepsState::RanOnline {
-                eprintln!(
-                    "heides: --require-advisories was set but the advisory lookup did not run. this run is not a security gate."
-                );
-                return ExitCode::FAILURE;
-            }
-            // The advisory half failing is a failure in its own right, and it is
-            // reported through the posture line above.
             if !heides::harmony::exit_zero()
                 && harmony::exceeds(&reports, heides::harmony::exit_threshold())
             {
@@ -645,11 +612,10 @@ fn main() -> ExitCode {
             // plus every guard, in one pass, with a boolean the caller can
             // branch on. Silence is never success here.
             let skip_tests = args.iter().any(|a| a == "--skip-tests");
-            let require_adv = args.iter().any(|a| a == "--require-advisories");
             let as_json = args.iter().any(|a| a == "--json");
             let root = heides::verify::root_from(&args, 2);
             let pulse = Stopwatch::start(&ui, "verify");
-            let verdict = heides::verify::verify(&root, skip_tests, require_adv);
+            let verdict = heides::verify::verify(&root, skip_tests);
             if let Some(p) = pulse {
                 p.finish();
             }
@@ -1093,59 +1059,23 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         "deps" => {
-            // `heides deps tree` is transitive resolution; bare `heides deps` is
-            // the advisory check, now annotated with depth so a finding four
-            // levels down reads differently from one on a direct dependency.
-            if arg2 == "tree" {
-                let root = PathBuf::from(arg3.unwrap_or("."));
-                let graphs = deps::read_lock_graphs(&root);
-                if graphs.is_empty() {
-                    println!("no lockfile found under {}", root.display());
-                    println!(
-                        "looked for package-lock.json, yarn.lock, pnpm-lock.yaml, poetry.lock, go.sum, Gemfile.lock, Cargo.lock"
-                    );
-                    return ExitCode::SUCCESS;
-                }
-                for g in &graphs {
-                    let (reachable, orphan) = g.reachability();
-                    println!(
-                        "{}: {} package(s), {} reachable, {} unreachable",
-                        g.source,
-                        g.nodes.len(),
-                        reachable,
-                        orphan
-                    );
-                    for n in g.deepest(2) {
-                        println!(
-                            "  {} {} ({} levels, {})",
-                            n.name,
-                            n.version,
-                            n.depth.unwrap_or(0),
-                            n.path.join(" -> ")
-                        );
-                    }
-                    for n in g.nodes.iter().filter(|n| n.depth.is_none()) {
-                        println!(
-                            "  {} {} is in the lockfile but nothing reaches it",
-                            n.name, n.version
-                        );
-                    }
-                }
-                return ExitCode::SUCCESS;
-            }
-            let root = PathBuf::from(arg2);
-            let pulse = Stopwatch::start(&ui, "deps check");
-            let (reports, _network) = deps::check(&root);
-            if let Some(p) = pulse {
-                p.finish();
-            }
-            if reports.is_empty() {
-                println!("no dependency findings");
-            } else {
-                for r in &reports {
-                    println!("{} {}", ui.severity(&r.severity), r.message);
-                }
-            }
+            // The command is gone, and the refusal says where the work went.
+            // An agent that was trained on `heides deps` must not get a bare
+            // usage error: the answer it needs exists, under a different
+            // tool.
+            println!("heides no longer checks dependencies for known CVEs.");
+            println!();
+            println!("that question is a fact about the world, not about your code.");
+            println!("answering it here meant the network, or a cache that went");
+            println!("stale and reported a fresh CVE as clean. heides now reports");
+            println!("only what it can prove from the files it read.");
+            println!();
+            println!("use GRIM for dependencies, secrets and exposure: grim-mcp");
+            println!("https://pypi.org/project/grim-mcp/");
+            println!();
+            println!("what heides still proves locally:");
+            println!("  heides check    taint, secrets, edge cases, schema, config");
+            println!("  heides config   credentials in .env, Dockerfile, terraform");
             ExitCode::SUCCESS
         }
         "changed-since" => {

@@ -2455,7 +2455,7 @@ pub fn fk_cycles(g: &DbGraph) -> Vec<Cycle> {
     for start in &g.tables {
         let mut path: Vec<String> = vec![start.name.clone()];
         let mut visited: Vec<String> = vec![start.name.clone()];
-        walk_for_cycles(g, start, start, &mut path, &mut visited, &mut out, 0);
+        walk_for_cycles(g, start, &mut path, &mut visited, &mut out, 0);
     }
 
     // Deduplicate: a two table cycle is discovered once per starting table and
@@ -2474,7 +2474,6 @@ const MAX_CYCLE_DEPTH: usize = 12;
 
 fn walk_for_cycles(
     g: &DbGraph,
-    start: &Table,
     at: &Table,
     path: &mut Vec<String>,
     visited: &mut Vec<String>,
@@ -2493,7 +2492,18 @@ fn walk_for_cycles(
             continue;
         };
 
-        let self_ref = table_names_match(&next.name, &start.name);
+        // A self reference is an edge whose target is the table it starts from,
+        // compared against `at`, the table the edge is declared on.
+        //
+        // This compared the target against `start`, the table the walk began
+        // from, which is a different question. For `a.b_id -> b` and
+        // `b.a_id -> a` the walk from `a` reached `b`, then `a` again, so every
+        // edge on the loop matched `start` and all of them were reported as self
+        // references. Both findings were wrong: the schema has no self reference
+        // anywhere, it has an indirect two table cycle. The message also
+        // escalated it to `critical`, so a false claim shipped at the highest
+        // severity.
+        let self_ref = table_names_match(&next.name, &at.name);
         if self_ref && col.fk_table.is_some() {
             // Only a self reference, not every edge pointing at the start.
             out.push(Cycle {
@@ -2558,7 +2568,7 @@ fn walk_for_cycles(
 
         path.push(next.name.clone());
         visited.push(next.name.clone());
-        walk_for_cycles(g, start, next, path, visited, out, depth + 1);
+        walk_for_cycles(g, next, path, visited, out, depth + 1);
         path.pop();
         visited.pop();
     }

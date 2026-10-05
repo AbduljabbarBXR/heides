@@ -93,34 +93,14 @@ fn report_lines(reports: &[harmony::GuardReport], expand: bool) -> String {
 /// The structured shape behind harmony.report. One object per finding with
 /// the guard, severity, message, file and line, plus severity counts and a
 /// clean flag so an agent can gate on the verdict without parsing prose.
-/// Run a check with the per-call dependency arguments applied, then restore.
 ///
-/// The previous version called `set_deps_enabled(false)`, which writes a
-/// process global and never restores it. In a single-shot CLI that is fine. In
-/// an MCP server, which handles many requests in one process, it meant one
-/// client passing `offline: true` silently disabled the advisory lookup for
-/// every later request from every client. An unrelated argument changing a
-/// security setting is exactly the failure class this release exists to close,
-/// so the override is now scoped to the call.
-///
-/// `require_advisories` is the per-call equivalent of the CLI flag of the same
-/// name, and it defaults to true here: a human running `heides check` in a
-/// terminal can see the posture line, while an agent may only read the result.
-/// The safe default is the one that fails loudly.
-fn check_policy(args: &serde_json::Value) -> crate::deps::DepsPolicy {
-    let offline = args.get("offline").and_then(|v| v.as_bool());
-    // Fail closed, and the floor is not the caller's to lower. A human at a
-    // terminal can see the posture line and choose; an agent may only read the
-    // result, so an agent must not be able to switch the gate off. An explicit
-    // `require_advisories: false` is therefore refused rather than honoured,
-    // because a default the caller can remove is not a guarantee.
-    let require = match args.get("require_advisories").and_then(|v| v.as_bool()) {
-        Some(false) => Some(true),
-        other => other.or(Some(true)),
-    };
-    crate::deps::resolve_policy(offline.map(|o| !o), require, None)
-}
-
+/// This used to run the check with per-call dependency arguments applied and
+/// then restore them. The policy helper it called set a process global, which
+/// in a single-shot CLI is fine and in an MCP server is not: one client
+/// passing an argument changed the behaviour of every later request from every
+/// client. The lesson outlives the helper, because the next setting an agent
+/// can pass will have the same shape. A setting that changes behaviour is
+/// scoped to the call that asked for it, never to the process.
 fn report_json(reports: &[harmony::GuardReport], cov: &harmony::Coverage) -> String {
     let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     for r in reports {
@@ -446,23 +426,24 @@ fn handle(id: &Value, method: &str, params: &Value) {
                             return;
                         }
                     };
-                    let policy = check_policy(&args);
                     let (reports, cov) = harmony::check_workspace_with_coverage(
                         &std::path::PathBuf::from(&root),
                         &graph,
-                        policy,
                     );
                     let expand = args.get("all").and_then(|v| v.as_bool()) == Some(true);
-                    let mut out = format!("{}\n\n{}", report_lines(&reports, expand), cov.render());
-                    // The MCP equivalent of a non-zero exit. An agent cannot see
-                    // an exit code, so a gate that would fail on the CLI has to
-                    // fail here too, or the MCP surface is the hollow one.
-                    if policy.require_advisories && cov.deps != harmony::DepsState::RanOnline {
-                        out.push_str(
-                            "\nheides: require_advisories was set but the advisory lookup did not run. this run is not a security gate.",
-                        );
-                    }
-                    if out.contains("not a security gate") {
+                    let out = format!("{}\n\n{}", report_lines(&reports, expand), cov.render());
+                    // The MCP equivalent of a non-zero exit, and the property that
+                    // matters most on this surface: an agent cannot see an exit
+                    // code, so a gate that would fail on the command line has to
+                    // fail here too. Returning the findings as a normal result
+                    // would hand an agent a successful tool call whose text
+                    // contains criticals, which is the hollow outcome the whole
+                    // design exists to prevent.
+                    //
+                    // This used to key off the advisory gate. That guard is gone,
+                    // but the fail-closed behaviour is not: it belongs to the
+                    // tool, not to the one guard that needed it.
+                    if harmony::exceeds(&reports, harmony::exit_threshold()) {
                         err(id, 1, &out);
                     } else {
                         ok(id, text_result(out));
@@ -476,28 +457,25 @@ fn handle(id: &Value, method: &str, params: &Value) {
                             return;
                         }
                     };
-                    let policy = check_policy(&args);
                     let (reports, cov) = harmony::check_workspace_with_coverage(
                         &std::path::PathBuf::from(&root),
                         &graph,
-                        policy,
                     );
+                    // The receipt travels inside the JSON, because an agent that
+                    // receives a clean result must be able to see how much was
+                    // actually inspected without a second call.
+                    //
+                    // `security_gate` reports the real verdict rather than a
+                    // constant true. It used to be the advisory gate, and it is
+                    // now the exit threshold, which is the property an agent
+                    // actually branches on.
+                    let gate_failed = harmony::exceeds(&reports, harmony::exit_threshold());
                     let mut j = report_json(&reports, &cov);
-                    // The receipt travels inside the JSON, because an agent
-                    // that receives a clean result must be able to see what was
-                    // skipped without a second call. So does the gate verdict,
-                    // for the same reason.
-                    let gate_failed =
-                        policy.require_advisories && cov.deps != harmony::DepsState::RanOnline;
-                    let inject = format!(
-                        "{{\"require_advisories\":{},\"security_gate\":{},\"security_posture\":\"{}\"}}",
-                        policy.require_advisories,
-                        !gate_failed,
-                        cov.deps.as_str()
-                    );
                     j.pop();
-                    let tail: String = inject.chars().skip(1).collect();
-                    j.push_str(&format!(",{}", tail));
+                    j.push_str(&format!(
+                        ",\"security_gate\":{},\"security_posture\":\"local_only\"}}",
+                        !gate_failed
+                    ));
                     if gate_failed {
                         err(id, 1, &j);
                     } else {
@@ -543,18 +521,6 @@ fn handle(id: &Value, method: &str, params: &Value) {
                         Err(e) => err(id, 3, &format!("scaffold failed. {}", e)),
                     }
                 }
-                "deps.check" => {
-                    let (reports, _network) = crate::deps::check(&std::path::PathBuf::from(&root));
-                    if reports.is_empty() {
-                        ok(id, text_result("no dependency findings".to_string()));
-                    } else {
-                        let lines: Vec<String> = reports
-                            .iter()
-                            .map(|r| format!("[{}] {}", r.severity, r.message))
-                            .collect();
-                        ok(id, text_result(lines.join("\n")));
-                    }
-                }
                 "web.confirm" => {
                     let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
                     ok(id, text_result(grounding::web_confirm(query)));
@@ -562,7 +528,7 @@ fn handle(id: &Value, method: &str, params: &Value) {
                 "harmony.verify" => {
                     let want_json = args.get("json").and_then(|v| v.as_bool()).unwrap_or(false);
                     let p = std::path::PathBuf::from(&root);
-                    let v = crate::verify::verify(&p, false, crate::deps::require_advisories());
+                    let v = crate::verify::verify(&p, false);
                     let body = if want_json {
                         crate::verify::to_json(&v)
                     } else {
@@ -850,179 +816,24 @@ fn handle(id: &Value, method: &str, params: &Value) {
                         ok(id, text_result(out));
                     }
                 }
-                "deps.tree" => {
-                    let min_depth = args.get("min_depth").and_then(|v| v.as_u64()).unwrap_or(1);
-                    let p = std::path::PathBuf::from(&root);
-                    let graphs = crate::deps::read_lock_graphs(&p);
-                    if graphs.is_empty() {
-                        ok(
-                            id,
-                            text_result(format!(
-                                "no lockfile found under {}. looked for package-lock.json, \
-                                 yarn.lock, pnpm-lock.yaml, poetry.lock, go.sum, Gemfile.lock, \
-                                 Cargo.lock",
-                                p.display()
-                            )),
-                        );
-                        return;
-                    }
-                    let mut out = String::new();
-                    for g in &graphs {
-                        let (reachable, orphan) = g.reachability();
-                        out.push_str(&format!(
-                            "{}: {} package(s), {} reachable, {} unreachable\n",
-                            g.source,
-                            g.nodes.len(),
-                            reachable,
-                            orphan
-                        ));
-                        for n in g.deepest(min_depth) {
-                            out.push_str(&format!(
-                                "  {} {} ({} levels, {})\n",
-                                n.name,
-                                n.version,
-                                n.depth.unwrap_or(0),
-                                n.path.join(" -> ")
-                            ));
-                        }
-                        for n in g.nodes.iter().filter(|n| n.depth.is_none()) {
-                            out.push_str(&format!(
-                                "  {} {} is in the lockfile but nothing reaches it\n",
-                                n.name, n.version
-                            ));
-                        }
-                    }
-                    ok(id, text_result(out));
-                }
-                "deps.advisories" => {
-                    let p = std::path::PathBuf::from(&root);
-                    let graphs = crate::deps::read_lock_graphs(&p);
-                    if graphs.is_empty() {
-                        ok(
-                            id,
-                            text_result(format!(
-                                "no lockfile found under {}, so no pinned version could be \
-                                 checked",
-                                p.display()
-                            )),
-                        );
-                        return;
-                    }
-                    // An explicit cache_dir wins over the environment, so a test or
-                    // a CI job can point at a seeded cache without mutating the
-                    // caller's environment.
-                    let dir = args
-                        .get("cache_dir")
-                        .and_then(|v| v.as_str())
-                        .map(std::path::PathBuf::from);
-                    let dir = dir.or_else(crate::osv_cache::cache_dir);
-                    if dir.is_none() {
-                        ok(
-                            id,
-                            text_result(
-                                "no cache directory could be resolved, so nothing was checked. \
-                                 set HEIDES_CACHE_DIR or pass cache_dir"
-                                    .to_string(),
-                            ),
-                        );
-                        return;
-                    }
-                    let policy = crate::osv_cache::CachePolicy {
-                        enabled: true,
-                        allow_offline: true,
-                        ..Default::default()
-                    };
-                    let mut out = String::new();
-                    let mut health = crate::osv_cache::CacheHealth::default();
-                    for g in &graphs {
-                        for n in &g.nodes {
-                            let answer = crate::osv_cache::consult(
-                                policy,
-                                dir.as_deref(),
-                                n.ecosystem,
-                                &n.name,
-                                &n.version,
-                            );
-                            match answer {
-                                Some(crate::osv_cache::Answer::Found {
-                                    detail,
-                                    cached,
-                                    age_secs,
-                                }) => {
-                                    let age = age_secs
-                                        .map(crate::osv_cache::human_age)
-                                        .unwrap_or_default();
-                                    out.push_str(&format!(
-                                        "[critical] {} {} is vulnerable, {detail}{}\n",
-                                        n.name,
-                                        n.version,
-                                        if cached {
-                                            format!(
-                                                " (from cache{})",
-                                                if age.is_empty() {
-                                                    String::new()
-                                                } else {
-                                                    format!(" {age} old")
-                                                }
-                                            )
-                                        } else {
-                                            String::new()
-                                        }
-                                    ));
-                                    health.note_hit(age_secs);
-                                }
-                                Some(crate::osv_cache::Answer::Clean { cached, age_secs }) => {
-                                    let age = age_secs
-                                        .map(crate::osv_cache::human_age)
-                                        .unwrap_or_default();
-                                    out.push_str(&format!(
-                                        "[info] {} {} has no known advisory{}\n",
-                                        n.name,
-                                        n.version,
-                                        if cached {
-                                            format!(
-                                                " (from cache{})",
-                                                if age.is_empty() {
-                                                    String::new()
-                                                } else {
-                                                    format!(" {age} old")
-                                                }
-                                            )
-                                        } else {
-                                            String::new()
-                                        }
-                                    ));
-                                    health.note_hit(age_secs);
-                                }
-                                Some(crate::osv_cache::Answer::NotChecked { .. }) => {
-                                    health.note_stale();
-                                    out.push_str(&format!(
-                                        "[warning] {} {} was not checked, the cached answer expired\n",
-                                        n.name, n.version
-                                    ));
-                                }
-                                None => {
-                                    health.note_miss();
-                                    out.push_str(&format!(
-                                        "[warning] {} {} was not checked, no cached advisory\n",
-                                        n.name, n.version
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                    out.push_str(&format!(
-                        "\nadvisory cache: {} answered, {} with no entry, {} expired\n",
-                        health.hits, health.misses, health.stale
-                    ));
-                    // A vulnerability is an error; an incomplete check is not,
-                    // because the warnings above already say what was not looked
-                    // at and a caller that wanted a hard gate has one in `verify`.
-                    if out.contains("[critical]") {
-                        err(id, 5, &out);
-                    } else {
-                        ok(id, text_result(out));
-                    }
+                "deps.tree" | "deps.check" | "deps.advisories" => {
+                    // Every deps tool is gone, and so is the capability behind them.
+                    // They answered one question, whether a pinned version is a known
+                    // CVE. Answering it meant either the network, which made a gate's
+                    // verdict depend on network conditions rather than on the tree, or a
+                    // cache that expired a clean answer after 24 hours. A guard that
+                    // cannot tell no vulnerability from has not heard of it yet reports
+                    // false confidence, and false confidence is indistinguishable from a
+                    // pass.
+                    //
+                    // The refusal is explicit rather than an unknown-tool error, so an
+                    // agent trained on these names learns where the capability went
+                    // instead of concluding the server is broken.
+                    err(
+                        id,
+                        4,
+                        "this tool is gone. heides no longer checks dependencies for known CVEs, because that is a fact about the world rather than about the code, and answering it here meant either the network or a cache that reported a CVE published this morning as clean. use GRIM for dependencies, secrets and exposure: grim-mcp. heides still reports taint, hardcoded secrets, edge cases, schema defects and config credentials, all provable from the files it read.",
+                    );
                 }
                 "spine.changed_since" => {
                     let since = args.get("since").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -1143,13 +954,13 @@ fn tool_list() -> Value {
                         },
                         {
                             "name": "harmony.check",
-                            "description": "Run every guard on the workspace and return findings with evidence. Pass offline true to skip the dependency guard registry lookups. Returns an error, not a clean result, when require_advisories is true and the advisory lookup did not run, so a misconfigured gate fails instead of passing hollow.",
-                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "offline": { "type": "boolean", "description": "skip the dependency guard registry lookups" }, "require_advisories": { "type": "boolean", "description": "fail rather than return a clean result when advisories were not checked. Defaults to true, and a caller cannot lower it: an agent may only read the result, so the gate is fail closed on this surface." }, "all": { "type": "boolean", "description": "print every finding instead of folding identical ones. Folded by default, because a wall of identical lines is how an agent misses the one finding that mattered" } } }
+                            "description": "Run every guard on the workspace and return findings with evidence. Every guard is local and offline, so each finding names a file and a line and reproduces from the tree alone. Dependency and exposure analysis is not here: use GRIM for that.",
+                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "offline": { "type": "boolean", "description": "skip the dependency guard registry lookups" }, "all": { "type": "boolean", "description": "print every finding instead of folding identical ones. Folded by default, because a wall of identical lines is how an agent misses the one finding that mattered" } } }
                         },
                         {
                             "name": "harmony.report",
-                            "description": "Run every guard on the workspace and return findings as structured JSON with severity counts, plus security_gate and security_posture so an agent can gate on the verdict without parsing prose. Pass offline true to skip the registry lookups.",
-                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "offline": { "type": "boolean", "description": "skip the dependency guard registry lookups" }, "require_advisories": { "type": "boolean", "description": "fail rather than return a clean result when advisories were not checked. Defaults to true, and a caller cannot lower it: an agent may only read the result, so the gate is fail closed on this surface." }, "all": { "type": "boolean", "description": "print every finding instead of folding identical ones. Folded by default, because a wall of identical lines is how an agent misses the one finding that mattered" } } }
+                            "description": "Run every guard on the workspace and return findings as structured JSON with severity counts, plus security_gate and security_posture so an agent can gate on the verdict without parsing prose. Every guard is local and offline.",
+                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "offline": { "type": "boolean", "description": "skip the dependency guard registry lookups" }, "all": { "type": "boolean", "description": "print every finding instead of folding identical ones. Folded by default, because a wall of identical lines is how an agent misses the one finding that mattered" } } }
                         },
                         {
                             "name": "harmony.staged",
@@ -1168,11 +979,6 @@ fn tool_list() -> Value {
                             "name": "grounding.scaffold",
                             "description": "Scaffold a new project from a plan and index it immediately.",
                             "inputSchema": { "type": "object", "properties": { "plan": { "type": "string" }, "dir": { "type": "string" } }, "required": ["plan"] }
-                        },
-                        {
-                            "name": "deps.check",
-                            "description": "Check dependencies for known vulnerabilities and outdated versions.",
-                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" } } }
                         },
                         {
                             "name": "web.confirm",
@@ -1213,16 +1019,6 @@ fn tool_list() -> Value {
                             "name": "config.scan",
                             "description": "Find credentials committed in configuration files: .env, Dockerfile, Compose, Terraform, Kubernetes and Helm manifests, and ini files. The credential value is never returned, only the key, the file, the line and a description of the value's shape, because a report that echoes a secret has copied it into every log that reads the output. Reports a clean scan as clean and a workspace with no configuration files as such, because those are different facts. Pass json true for structured findings.",
                             "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "json": { "type": "boolean", "description": "return findings as json" } } }
-                        },
-                        {
-                            "name": "deps.tree",
-                            "description": "Resolve the lockfile graph and report each package's depth and the path taken to reach it, plus any package nothing reaches. Answers which packages exist only because of something pulled in, which is what decides whether an advisory matters.",
-                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "min_depth": { "type": "integer", "description": "only list packages at or beyond this depth. Defaults to 1" } } }
-                        },
-                        {
-                            "name": "deps.advisories",
-                            "description": "Report the advisory status of every pinned package from the OSV cache. A package with no cache entry is reported as not checked, never as clean: an unchecked project and a project with no known vulnerabilities are different facts and an agent acting on the second would be wrong.",
-                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "cache_dir": { "type": "string", "description": "override the cache directory, otherwise HEIDES_CACHE_DIR or the XDG default" } } }
                         },
                         {
                             "name": "spine.changed_since",
