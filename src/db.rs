@@ -2925,14 +2925,25 @@ pub fn root_from_args(args: &[String], skip: usize) -> PathBuf {
 /// Derived from the shape of each subcommand's own arguments rather than
 /// assumed, because a wrong offset does not fail loudly: it walks the wrong
 /// directory and reports that the code under inspection has no database.
+///
+/// The shape is per subcommand, and the fix has to cover every one of them.
+/// An earlier version handled only `routes` and `schema`, which left
+/// `db tables <dir>`, `db orphans <dir>`, `db cycles <dir>` and the rest
+/// resolving the root from index 4 and therefore walking the *current working
+/// directory* instead. From a home directory that meant `db orphans` reporting
+/// tables out of unrelated projects that have nothing to do with the one being
+/// inspected, with no indication anything was wrong.
 pub fn root_offset(sub: &str) -> usize {
     match sub {
-        // method and path before the root
+        // `db touch <METHOD> <path> [dir]`: method and path before the root
         "touch" => 5,
-        // no table or column name to step over
-        "schema" | "routes" => 3,
-        // subcommand, then name, then root
-        _ => 4,
+        // Subcommands that take no table or column name, so the root is the
+        // very next argument.
+        "tables" | "orphans" | "missingindex" | "cycles" | "policies" | "routes" | "schema" => 3,
+        // `db <sub> <name> [dir]`: subcommand, then name, then root.
+        "columns" | "reads" | "writes" | "sensitive" => 4,
+        // An unknown subcommand has no name slot to step over.
+        _ => 3,
     }
 }
 
