@@ -317,6 +317,10 @@ fn main() -> ExitCode {
                 println!("usage. heides changed-since [unix-seconds] [dir]");
                 return ExitCode::SUCCESS;
             }
+            "confirm" => {
+                println!("usage. heides confirm [package or search text]");
+                return ExitCode::SUCCESS;
+            }
             _ => {}
         }
     }
@@ -1196,6 +1200,27 @@ fn main() -> ExitCode {
                     ExitCode::FAILURE
                 }
             }
+        }
+        "confirm" => {
+            let q = args.get(2).map(|s| s.as_str()).unwrap_or("");
+            if is_help(q) {
+                println!("usage. heides confirm [package or search text]");
+                return ExitCode::SUCCESS;
+            }
+            if q.is_empty() {
+                println!("usage. heides confirm [package or search text]");
+                return ExitCode::FAILURE;
+            }
+            // The CLI twin of the `web.confirm` MCP tool. It asks the registries
+            // what a name actually is, which is the question worth asking before
+            // adding a dependency: a name that looks like a library can be
+            // something else entirely, and a typo can be somebody else's package.
+            //
+            // Network, unlike every other command here, and it says so rather than
+            // printing an empty result that reads as "no such package".
+            println!("looking up {:?} on crates.io and npm", q);
+            println!("{}", grounding::web_confirm(q));
+            ExitCode::SUCCESS
         }
         "describe" => {
             let root = PathBuf::from(arg2);

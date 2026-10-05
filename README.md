@@ -239,21 +239,58 @@ feasible true
   spine holds 4 file(s) and 5 symbol(s). index version 8.
 ```
 
+## Command reference
+
+Every command, in one place. `heides <command> --help` prints the usage line for
+any of them.
+
+| Command | What it does |
+|---|---|
+| `scan` | Map the current codebase into the persistent index. The other commands read what this builds. |
+| `status` | One line: files, symbols, call edges and imports held by the index. |
+| `describe` | The workspace manifest: languages, counts, entrypoints, hubs, doc coverage, and which guards have a real corpus behind them. |
+| `query` | `callers`, `imports`, `definition`, `calls`, `neighbors`, `search`. Who calls a symbol, where a definition lives, what it calls, free text search over names, signatures, docs, literals and comments. |
+| `check` | Run every guard. The gate. Non-zero exit when a finding is a blocker or critical. |
+| `staged` | Check a unified diff before applying it. |
+| `verify` | Assertions a project can state about itself: tests, advisories. `--require-advisories` makes the wrong configuration fail rather than pass. |
+| `db` | `tables`, `columns`, `reads`, `writes`, `orphans`, `missingindex`, `policies`, `cycles`, `schema`, `routes`, `touch`. The database graph, read from the code. |
+| `deps` | Known vulnerabilities and outdated versions from the manifests. `--no-deps` and `HEIDES_OFFLINE` skip the advisory lookup and say so. |
+| `config` | Scan manifests and config files for credentials and settings that matter. |
+| `export` | Write the code map to a markdown file. The one command with no MCP twin, because it is a file export and the server has nothing to export to. |
+| `confirm` | Ask crates.io and npm what a package name actually is, before you depend on it. The only command here that uses the network by choice. |
+| `plan` | Evaluate a plan against the codebase and show the evidence it used. Takes free text. |
+| `scaffold` | Generate a project from a plan and index it. Takes free text. |
+| `changed-since` | Indexed files whose mtime is after a unix timestamp. The same answer as the `spine.changed_since` tool. |
+| `watch` | Re-index and re-check on change. |
+| `version` | Print the version. |
+| `mcp` | Run the MCP server over stdio. |
+
 ## MCP tool reference
 
-The server exposes eleven tools over stdio, for any MCP client.
+The server exposes twenty one tools over stdio, for any MCP client. Every one has
+a command line twin except where noted.
 
-* `spine.scan`. Map the current codebase into the persistent index.
-* `spine.query`. Who calls a symbol, who imports a module, where a definition lives, what a function calls, or free text search over names, signatures, docs, literals and comments.
-* `spine.describe`. The workspace manifest in one call: languages, counts, entrypoints, hubs, doc coverage.
-* `spine.neighbors`. Every side of a symbol: definition with its captured doc, its callers, its calls.
-* `harmony.check`. Run every guard, findings with evidence.
+* `spine.scan`. Map the current codebase into the persistent index. (`scan`)
+* `spine.query`. Who calls a symbol, who imports a module, where a definition lives, what a function calls, or free text search over names, signatures, docs, literals and comments. (`query`)
+* `spine.describe`. The workspace manifest in one call: languages, counts, entrypoints, hubs, doc coverage. (`describe`)
+* `spine.neighbors`. Every side of a symbol: definition with its captured doc, its callers, its calls. (`query neighbors`)
+* `spine.changed_since`. Indexed files touched after a unix timestamp. (`changed-since`)
+* `harmony.check`. Run every guard, findings with evidence. (`check`)
 * `harmony.report`. The same verdict as structured JSON with severity counts and a clean flag.
-* `harmony.staged`. Check a unified diff before applying it.
-* `grounding.plan`. Evaluate a plan against the codebase, with the evidence it used.
-* `grounding.scaffold`. Scaffold a new project from a plan and index it immediately.
-* `deps.check`. Known vulnerabilities and outdated versions from the manifests.
-* `web.confirm`. Confirm a fact against the package registries.
+* `harmony.staged`. Check a unified diff before applying it. (`staged`)
+* `harmony.verify`. Tests and advisories as assertions. (`verify`)
+* `grounding.plan`. Evaluate a plan against the codebase, with the evidence it used. (`plan`)
+* `grounding.scaffold`. Scaffold a new project from a plan and index it immediately. (`scaffold`)
+* `deps.check`. Known vulnerabilities and outdated versions from the manifests. (`deps check`)
+* `deps.advisories`. The advisory lookup on its own. (`deps`)
+* `deps.tree`. The dependency graph. (`deps`)
+* `db.tables`, `db.columns`, `db.reads`, `db.writes`, `db.routes`, `db.schema`, `db.touch`. The database graph, read from the code. (`db <subcommand>`)
+* `config.scan`. Credentials and settings in manifests and config files. (`config`)
+* `web.confirm`. Confirm a fact against the package registries. (`confirm`)
+
+`harmony.report` has no separate command because `check` prints the same verdict and
+`export` writes the map out; splitting it again would be a second spelling of one
+answer.
 
 ## Security model
 
