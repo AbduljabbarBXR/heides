@@ -2,6 +2,20 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.24.4
+
+Six fixes and one command. Everything from 0.24.2 through 0.24.3 was committed but never published, so this is the first release that carries any of it.
+
+* **Python docstrings are documentation again.** `doc_above` only collected comments *above* a declaration, and Python puts documentation inside the body, so every Python function in every codebase indexed as undocumented and `query definition` showed no docs for Python at all.
+* **Single line docstrings do not swallow the rest of the file.** The check asked whether the text after the opening quote *starts* with a closing quote, which is never true, so every single line docstring scanned forward for a closing triple quote that was already behind it and reported the following source lines as prose. It read as correct because the test asserted `contains("Entry point")` and the corrupted string still contained it. The check now asks whether the remainder *ends* with the quote, and the multi line branch stops at a dedent so an unterminated docstring cannot absorb real code either.
+* **`--no-advice` no longer deletes proven secrets.** It filtered on the guard name, so a committed `AKIA...` key went out with the "function spans N lines" opinions the flag exists to remove. A hardcoded credential is a fact about the value and is now judged from the message rather than from the family it happens to be emitted by.
+* **A workspace root that does not exist is an error.** The walk over a missing directory yields zero files, so `check` printed a clean summary and exited 0 for a path that was never inspected, and `save` created the directory in order to put an empty index inside it. "There is nothing here" and "there is nothing at that path" are different answers and only the first is a pass.
+* **`db routes <dir>` walked the wrong directory.** One fixed offset for the root meant the subcommand stepped over the directory and walked the current one instead, printing "no routes recognised" for a project full of routes. `routes` was also unreachable as a positional for the same reason.
+* **An unrecognised flag is no longer a path.** `deps tree --help` walked a directory called `--help`. Commands whose arguments are free text are exempt, because `plan` and `scaffold` take an English objective that legitimately contains hyphenated words.
+* **`heides confirm <package>`** is the CLI twin of the `web.confirm` MCP tool, which had none. It says it is reaching the network rather than printing an empty result that reads as "no such package".
+* **A sanitizer table.** A value that has been escaped, quoted, bounded or parameterised stops being a finding, instead of every rule being written timid to stay precise.
+* **Every command is documented,** and `tests/readme_commands.rs` fails if a command exists that the README does not document. The README claimed the server exposed eleven tools while it declares twenty one, and documented 7 of 16 commands.
+
 ## 0.24.3
 
 Two ways to get the test-code scope wrong, both found by probing rather than reading, and one of them was hiding real findings on this repository.
