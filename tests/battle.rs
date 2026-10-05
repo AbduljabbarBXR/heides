@@ -578,6 +578,10 @@ fn battle_serial() {
         ("status", vec!["status"]),
         ("query", vec!["query", "callers", "add"]),
         ("plan", vec!["plan", "change the signature of add"]),
+        // The banner cannot name this one: the dash free contract below means
+        // help output may not contain a hyphen at all, and the command name has
+        // one in it. It is covered here so it is still tested.
+        ("changed since", vec!["changed-since", "0"]),
     ] {
         let (out, _, _) = b.cli(&args);
         b.check(&format!("{} output is dash free", name), has_no_dash(&out));

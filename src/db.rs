@@ -2885,6 +2885,15 @@ pub fn verify_schema(g: &DbGraph) -> SchemaVerdict {
 /// A positional argument that is not a flag and not a known subcommand is the
 /// root, which is what makes `heides db tables .` and `heides db tables` both
 /// work.
+///
+/// `skip` is the index of the first argument that could be the root, and it is
+/// not the same for every subcommand: `db tables <name> [dir]` puts the root at
+/// 4, `db routes [dir]` and `db schema [dir]` take no name so it sits at 3, and
+/// `db touch <METHOD> <path> [dir]` takes two so it sits at 5. One fixed offset
+/// meant `heides db routes /some/dir` skipped past the directory and walked `.`
+/// instead, printing "no routes recognised" for a project full of routes.
+/// `routes` was also missing from the subcommand list below for the same
+/// reason: it was never reachable as a positional at this offset.
 pub fn root_from_args(args: &[String], skip: usize) -> PathBuf {
     for a in args.iter().skip(skip) {
         if a.starts_with('-') {
@@ -2902,12 +2911,29 @@ pub fn root_from_args(args: &[String], skip: usize) -> PathBuf {
                 | "cycles"
                 | "sensitive"
                 | "schema"
+                | "routes"
         ) {
             continue;
         }
         return PathBuf::from(a);
     }
     PathBuf::from(".")
+}
+
+/// Where the workspace root sits in `args` for a given `db` subcommand.
+///
+/// Derived from the shape of each subcommand's own arguments rather than
+/// assumed, because a wrong offset does not fail loudly: it walks the wrong
+/// directory and reports that the code under inspection has no database.
+pub fn root_offset(sub: &str) -> usize {
+    match sub {
+        // method and path before the root
+        "touch" => 5,
+        // no table or column name to step over
+        "schema" | "routes" => 3,
+        // subcommand, then name, then root
+        _ => 4,
+    }
 }
 
 // ------------------------------------------------------------ N+1 candidates

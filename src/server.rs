@@ -49,7 +49,7 @@ fn report_lines(reports: &[harmony::GuardReport], expand: bool) -> String {
     let mut lines = vec![harmony::summarize(reports)];
     let (proof, advice): (Vec<&harmony::GuardReport>, Vec<&harmony::GuardReport>) = reports
         .iter()
-        .partition(|r| harmony::bucket(&r.guard) == harmony::Bucket::Proof);
+        .partition(|r| harmony::bucket_report(r) == harmony::Bucket::Proof);
     for (label, group) in [("evidence", &proof), ("advice", &advice)] {
         if group.is_empty() {
             continue;

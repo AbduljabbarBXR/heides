@@ -250,7 +250,20 @@ pub fn peak_rss_mb() -> Option<u64> {
 }
 
 /// Load the workspace index, building it first if missing.
+///
+/// A root that does not exist is refused before anything is built. The walk
+/// over a missing directory yields zero files, so `check` printed a clean
+/// summary and exited 0 for a path that was never inspected, and `save` then
+/// created the directory just to put an empty `.heides/index.db` inside it.
+/// "There is nothing here" and "there is nothing at that path" are different
+/// answers, and only the first one is a pass.
 pub fn load_or_build(root: &Path) -> Result<CodeGraph, String> {
+    if !root.is_dir() {
+        return Err(format!(
+            "{} is not a directory. point the command at an existing workspace.",
+            root.display()
+        ));
+    }
     if crate::spine::exists(&PathBuf::from(root)) {
         crate::spine::load(&PathBuf::from(root))
     } else {

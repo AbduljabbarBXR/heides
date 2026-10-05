@@ -12,6 +12,47 @@ fn is_help(s: &str) -> bool {
     s == "--help" || s == "-h" || s == "help"
 }
 
+/// Commands whose arguments are paths, symbols or free text.
+///
+/// `plan` and `scaffold` take an English objective, which routinely contains
+/// words beginning with a hyphen, so an unknown-flag check there would reject
+/// legitimate input. `mcp` speaks JSON-RPC on stdin and reads no flags at all.
+/// Everything else resolves its root from a fixed positional slot, which is
+/// exactly where an unrecognised flag silently became a path.
+fn cmd_takes_positional(cmd: &str) -> bool {
+    !matches!(cmd, "" | "help" | "plan" | "scaffold" | "mcp" | "version")
+}
+
+/// Flags each command actually reads.
+///
+/// A flag that exists somewhere in the tool is not a flag this command accepts.
+/// `--json` is the case that matters: `verify` parses its own arguments by
+/// name and honours it, while `check` reads its root from a positional slot.
+/// Treating `--json` as globally known left `heides check --json .` falling
+/// through to the directory-name bug it was supposed to prevent.
+fn cmd_accepts_flag(cmd: &str, flag: &str) -> bool {
+    // Every command honours the presentation and gate flags, because they are
+    // consumed before the command is even dispatched.
+    const COMMON: [&str; 9] = [
+        "--no-deps",
+        "--all",
+        "--no-advice",
+        "--exit-zero",
+        "--no-color",
+        "--color=always",
+        "--group",
+        "--require-advisories",
+        "--offline",
+    ];
+    if COMMON.contains(&flag) || flag.starts_with("--exit-threshold=") {
+        return true;
+    }
+    match cmd {
+        "verify" => matches!(flag, "--json" | "--skip-tests"),
+        _ => false,
+    }
+}
+
 fn print_usage() {
     println!("HEIDES {}  the code nervous system", VERSION);
     println!();
@@ -36,6 +77,9 @@ fn print_usage() {
     println!("  deps [dir]      check dependencies for vulnerabilities and updates");
     println!("  deps tree [dir] resolve the lockfile graph, with depth and path");
     println!("  config [dir]    find credentials in .env, Dockerfile, terraform, manifests");
+    println!("  db [sub] [dir]  tables, reads, writes, orphans, schema defects,");
+    println!("                  and the route to table surface");
+    println!("  verify [dir]    run the tests plus every guard, the definition of done");
     println!("  describe [dir]  read the whole workspace manifest in one shot");
     println!("  export [dir] [out]");
     println!("                  write one self contained code map file");
@@ -63,7 +107,7 @@ fn print_flat(ui: &Ui, reports: &[harmony::GuardReport]) {
     };
     let (proof, advice): (Vec<&harmony::GuardReport>, Vec<&harmony::GuardReport>) = keep
         .iter()
-        .partition(|r| harmony::bucket(&r.guard) == harmony::Bucket::Proof);
+        .partition(|r| harmony::bucket_report(r) == harmony::Bucket::Proof);
 
     if reports
         .iter()
@@ -174,6 +218,29 @@ fn main() -> ExitCode {
     args = cleaned;
     let ui = Ui::resolve();
     let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("");
+
+    // A flag this build does not know is an error, never a path.
+    //
+    // `check` reads its root from args[2], so `heides check --json .` used to
+    // scan a directory literally named `--json`: it found nothing, printed
+    // "no dependency manifests found", and exited 0. A misspelled flag on a
+    // security gate therefore produced a silent clean pass and a junk
+    // `--json/.heides/index.db` written to disk. `verify` parses its own
+    // flags by scanning for known names, which is why `--json` works there and
+    // nowhere else. Reject the unknown flag instead.
+    if cmd_takes_positional(cmd)
+        && let Some(bad) = args
+            .iter()
+            .skip(2)
+            .find(|a| a.starts_with("--") && !cmd_accepts_flag(cmd, a))
+    {
+        eprintln!(
+            "heides: unknown flag `{}` for `{}`. run `heides {} help` for usage.",
+            bad, cmd, cmd
+        );
+        return ExitCode::FAILURE;
+    }
+
     let arg2 = args.get(2).map(|s| s.as_str()).unwrap_or(".");
     let arg3 = args.get(3).map(|s| s.as_str());
     let arg4 = args.get(4).map(|s| s.as_str());
@@ -598,11 +665,13 @@ fn main() -> ExitCode {
             // about a codebase with a database: what tables exist, what reads or
             // writes them, what nothing touches, and what the schema gets wrong.
             let sub = args.get(2).map(|s| s.as_str()).unwrap_or("schema");
-            // `heides db touch <METHOD> <path> [dir]` has one more positional
-            // argument than the other subcommands, so its root sits at index 5
-            // rather than 4. Resolving the root at the wrong offset is what
-            // made the walk run against `/users` and report no database.
-            let root_at = if sub == "touch" { 5 } else { 4 };
+            // Each subcommand has its own argument shape, so the root sits at a
+            // different index for each of them. `db touch <METHOD> <path> [dir]`
+            // has two positionals before it, `db routes [dir]` has none, and the
+            // rest take a table or column name. One fixed offset meant
+            // `heides db routes /some/dir` walked `.` instead and reported no
+            // routes for a project that has them.
+            let root_at = heides::db::root_offset(sub);
             let name = args.get(3).map(|s| s.as_str()).unwrap_or("");
             let root = heides::db::root_from_args(&args, root_at);
             let pulse = Stopwatch::start(&ui, "db");
