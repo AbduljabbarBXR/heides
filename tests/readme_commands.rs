@@ -36,12 +36,12 @@ fn every_command_is_documented_in_the_readme() {
     // The dispatch arms, at the indentation the real match block uses.
     let mut commands: Vec<String> = Vec::new();
     for line in main.lines() {
-        if let Some(rest) = line.strip_prefix("        \"") {
-            if let Some((name, _tail)) = rest.split_once("\" => {") {
-                let name = name.trim_end_matches('-');
-                if !name.contains(' ') && !NOT_COMMANDS.contains(&name) {
-                    commands.push(name.to_string());
-                }
+        if let Some(rest) = line.strip_prefix("        \"")
+            && let Some((name, _tail)) = rest.split_once("\" => {")
+        {
+            let name = name.trim_end_matches('-');
+            if !name.contains(' ') && !NOT_COMMANDS.contains(&name) {
+                commands.push(name.to_string());
             }
         }
     }
