@@ -4,6 +4,40 @@ All notable changes to HEIDES are recorded here.
 
 ## Unreleased
 
+**A line comment was swallowing the rest of the file.**
+
+`body_range` tracked a line comment with a flag that was set on `//` and never
+cleared. From the first line comment inside a function body onward, every brace
+in the file was read as being inside a comment, the braces never balanced, the
+scan ran to end of file, and the function was reported as the rest of the file
+long. On this repository `parse_sql` is 190 lines and was being reported as
+3601. Everything downstream inherited it: the interprocedural taint summaries,
+the API surface, the dead root check, and the long function guard, which is how
+this surfaced at all. Thirty findings had grown into functions of 2578, 1969 and
+1676 lines that no one had written.
+
+The flag is now cleared at the start of every line, because a line comment ends
+with the line.
+
+**A Rust lifetime is not a character literal.**
+
+The same reader treated every `'` as the start of a string. In Rust `&'a str` is
+a lifetime, so the apostrophe opened a string that closed at the next apostrophe
+somewhere in the file and hid every brace in between. An apostrophe is now read
+as a quote only when the closing one is on the same line and near enough to be
+one character or an escape.
+
+**Rust routes are read now.**
+
+`route_handlers` and `endpoints` dispatched to JavaScript, Python and Go, so a
+Rust service had no route inventory at all: no route to table surface, no auth
+risk, and no taint path from a request to a query. axum, actix-web and Rocket are
+read now, and a Rust route reaches the dead root check.
+
+**One body span rule, not two.** `practice.rs` counted braces a second time, on
+its own and without string or comment awareness. It is gone; both callers read
+the same span.
+
 **The advisory guard is gone. heides is now local-only.**
 
 The dependency guard asked one question, is this pinned version a known CVE.

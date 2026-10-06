@@ -58,6 +58,7 @@ pub fn route_handlers(root: &Path, files: &[&str]) -> HashSet<String> {
             "javascript" | "typescript" => scan_js(&body, &mut out),
             "python" => scan_python(&body, &mut out),
             "go" => scan_go(&body, &mut out),
+            "rust" => scan_rust(&body, &mut out),
             _ => {}
         }
     }
@@ -268,6 +269,89 @@ mod tests {
         scan_go("http.HandleFunc(\"/health\", healthHandler)\n", &mut out);
         assert_eq!(names(&out), vec!["healthHandler"]);
     }
+
+    fn routes(src: &str) -> Vec<(String, String, String)> {
+        let mut out = Vec::new();
+        scan_rust_endpoints(src, "m.rs", &mut out);
+        out.iter()
+            .map(|e| (e.method.clone(), e.path.clone(), e.handler.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn axum_routes_carry_method_path_and_handler() {
+        let src = concat!(
+            "let app = Router::new()\n",
+            "    .route(\"/users\", get(list_users).post(create_user))\n",
+            "    .route(\"/health\", get(health));\n",
+        );
+        assert_eq!(
+            routes(src),
+            vec![
+                ("GET".into(), "/users".into(), "list_users".into()),
+                ("POST".into(), "/users".into(), "create_user".into()),
+                ("GET".into(), "/health".into(), "health".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn actix_resource_then_route_finds_path_and_handler() {
+        let src =
+            "App::new().service(web::resource(\"/users\").route(web::get().to(list_users)));\n";
+        assert_eq!(
+            routes(src),
+            vec![("GET".into(), "/users".into(), "list_users".into())]
+        );
+    }
+
+    #[test]
+    fn rocket_attribute_binds_to_the_function_below() {
+        let src = concat!(
+            "#[get(\"/users/{id}\")]\n",
+            "async fn get_user(id: Path<u64>) -> Json<User> { todo!() }\n",
+            "#[post(\"/users\")]\n",
+            "pub async fn create_user() -> &'static str { \"\" }\n",
+        );
+        assert_eq!(
+            routes(src),
+            vec![
+                ("GET".into(), "/users/{id}".into(), "get_user".into()),
+                ("POST".into(), "/users".into(), "create_user".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn combinators_are_not_mistaken_for_handlers() {
+        let src = concat!(
+            "let app = Router::new()\n",
+            "    .route(\"/x\", get(handler).layer(TraceLayer::new_for_http()))\n",
+            "    .route(\"/y\", any(fallback));\n",
+        );
+        assert_eq!(
+            routes(src),
+            vec![
+                ("GET".into(), "/x".into(), "handler".into()),
+                ("ANY".into(), "/y".into(), "fallback".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn rust_route_handlers_reach_the_dead_root_check() {
+        let mut out = HashSet::new();
+        scan_rust(
+            "Router::new().route(\"/users\", get(list_users));\n#[get(\"/ping\")]\nasync fn ping() {}\n",
+            &mut out,
+        );
+        assert_eq!(names(&out), vec!["list_users", "ping"]);
+    }
+
+    #[test]
+    fn a_rust_string_literal_is_not_a_route() {
+        assert!(routes("let sql = \"SELECT * FROM users WHERE id = 1\";\n").is_empty());
+    }
 }
 
 // ------------------------------------------------- the API surface graph
@@ -309,6 +393,7 @@ pub fn endpoints(files: &[String], root: &Path) -> Vec<Endpoint> {
             "javascript" | "typescript" => scan_js_endpoints(&body, f, &mut here),
             "python" => scan_python_endpoints(&body, f, &mut here),
             "go" => scan_go_endpoints(&body, f, &mut here),
+            "rust" => scan_rust_endpoints(&body, f, &mut here),
             _ => {}
         }
         for e in here {
@@ -698,6 +783,280 @@ fn scan_go_endpoints(body: &str, file: &str, out: &mut Vec<Endpoint>) {
                 line: (i + 1) as u64,
             });
         }
+    }
+}
+
+/// Rust routing verbs, in the shape each framework writes them.
+const RUST_VERBS: &[(&str, &str)] = &[
+    ("get", "GET"),
+    ("post", "POST"),
+    ("put", "PUT"),
+    ("delete", "DELETE"),
+    ("patch", "PATCH"),
+    ("head", "HEAD"),
+    ("options", "OPTIONS"),
+    ("trace", "TRACE"),
+];
+
+/// Combinators that take a closure or another value but never name the handler,
+/// so the identifier before the paren is not a route handler.
+const RUST_NOT_HANDLERS: &[&str] = &[
+    "to",
+    "and",
+    "and_then",
+    "or",
+    "from_fn",
+    "from_fn_with_state",
+    "with_state",
+    "route",
+    "service",
+    "nest",
+    "merge",
+    "layer",
+    "route_layer",
+    "map",
+    "map_to",
+    "wrap",
+    "default",
+    "resource",
+    "scope",
+    "guard",
+    "wrap_fn",
+    "any",
+    "all",
+];
+
+/// The balanced argument text of the first `marker` call on this line. The
+/// marker carries its own opening paren, so the run after it is the arguments.
+fn rust_call_args(text: &str, marker: &str) -> Option<String> {
+    let at = text.find(marker)?;
+    let rest = &text[at + marker.len()..];
+    let (inner, _) = balanced_slice(rest);
+    Some(inner.to_string())
+}
+
+/// The string literal at the start of `text`, unquoted.
+fn rust_path_literal(text: &str) -> Option<String> {
+    let t = text.trim_start();
+    let q = t.chars().next()?;
+    if q != '"' && q != '\'' {
+        return None;
+    }
+    let body = &t[1..];
+    let end = body.find(q)?;
+    let p = &body[..end];
+    if p.is_empty() {
+        None
+    } else {
+        Some(p.to_string())
+    }
+}
+
+/// Every verb named by a method chain segment, in source order.
+fn rust_verbs(segment: &str) -> Vec<String> {
+    let segment = segment.trim();
+    let tail = segment.rsplit("::").next().unwrap_or(segment);
+    let name: String = tail
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    RUST_VERBS
+        .iter()
+        .find(|(lowercased, _)| *lowercased == name)
+        .map(|(_, upper)| vec![upper.to_string()])
+        .unwrap_or_default()
+}
+
+/// The handler a method chain names: the last argument that is not a verb and
+/// not a combinator.
+///
+/// The argument is read by position rather than by what follows it, because in
+/// every Rust router the handler is the last argument and so is followed by a
+/// close paren, never an open one. `get(list_users)` and `web::get().to(
+/// list_users)` both yield `list_users`, and a module path segment such as the
+/// `web` of `web::get()` is not a handler because a path continues after it.
+fn rust_handler(part: &str) -> Option<String> {
+    let part = part.trim();
+    let bytes = part.as_bytes();
+    let mut found: Option<String> = None;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if !(c.is_alphanumeric() || c == '_') {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && ((bytes[i] as char).is_alphanumeric() || bytes[i] == b'_') {
+            i += 1;
+        }
+        let ident = &part[start..i];
+        let boundary_ok =
+            start == 0 || !(bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
+        let prev = part[..start].trim_end();
+        let in_argument = prev.is_empty() || prev.ends_with('(') || prev.ends_with(',');
+        let next = part[i..].trim_start();
+        let is_path_prefix = next.starts_with("::");
+        if boundary_ok && in_argument && !is_path_prefix {
+            let bare = ident.rsplit("::").next().unwrap_or(ident);
+            let is_verb = RUST_VERBS.iter().any(|(v, _)| *v == bare);
+            if !is_verb && !RUST_NOT_HANDLERS.contains(&bare) {
+                found = Some(bare.to_string());
+            }
+        }
+    }
+    found
+}
+
+/// The verb and handler pairs a method chain declares.
+///
+/// Each verb is paired with the handler of its own segment, or with the next
+/// segment's when the verb is a bare filter such as `web::get()`. Stopping at
+/// `.layer(...)` and `.with_state(...)` is what keeps a middleware constructor
+/// from being reported as the route handler.
+fn rust_route_pairs(part: &str) -> Vec<(String, String)> {
+    let segments: Vec<&str> = part.split('.').collect();
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for (idx, segment) in segments.iter().enumerate() {
+        let verbs = rust_verbs(segment);
+        if verbs.is_empty() {
+            continue;
+        }
+        let handler =
+            rust_handler(segment).or_else(|| segments.get(idx + 1).and_then(|s| rust_handler(s)));
+        let Some(handler) = handler else {
+            continue;
+        };
+        for verb in verbs {
+            pairs.push((verb, handler.clone()));
+        }
+    }
+    pairs
+}
+
+/// Endpoints declared by Rust routers: axum and actix-web builders, and Rocket
+/// attributes.
+///
+/// Without this a Rust service has no route inventory, so the route to table
+/// surface and the auth risk of a route are both empty for it.
+fn scan_rust_endpoints(body: &str, file: &str, out: &mut Vec<Endpoint>) {
+    let lines: Vec<&str> = body.lines().collect();
+    let mut resource_path: Option<String> = None;
+
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        let lineno = (i + 1) as u64;
+
+        // Rocket: #[get("/path")] on the attribute, the handler on the fn below.
+        if trimmed.starts_with("#[")
+            && let Some((_, verb)) = RUST_VERBS
+                .iter()
+                .find(|(v, _)| trimmed.starts_with(&format!("#[{v}(")))
+        {
+            let after_paren = trimmed.split_once('(').map(|(_, rest)| rest).unwrap_or("");
+            if let Some(path) = rust_path_literal(after_paren)
+                && let Some(handler) = rust_fn_below(&lines, i + 1)
+            {
+                out.push(Endpoint {
+                    method: verb.to_string(),
+                    path: normalize_route_path(&path),
+                    handler,
+                    file: file.to_string(),
+                    line: lineno,
+                });
+            }
+            continue;
+        }
+
+        // actix-web: web::resource("/users").route(web::get().to(list_users))
+        if let Some(inner) = rust_call_args(trimmed, "web::resource(")
+            .or_else(|| rust_call_args(trimmed, "resource("))
+            && let Some(p) = rust_path_literal(&inner)
+        {
+            resource_path = Some(normalize_route_path(&p));
+        }
+
+        for marker in [".route(", ".service("] {
+            let Some(inner) = rust_call_args(trimmed, marker) else {
+                continue;
+            };
+            // `.service(web::resource("/x").route(web::get().to(h)))` carries the
+            // route one level down. Reading the outer call as well reports the
+            // same endpoint twice, once from the resource and once from the
+            // service that wraps it.
+            if marker == ".service("
+                && (inner.contains("web::resource(") || inner.contains(".route("))
+            {
+                continue;
+            }
+            let parts = split_top_level(&inner);
+            let mut path = resource_path.clone();
+            let mut verb_args: &[String] = &parts;
+            if let Some(first) = parts.first()
+                && let Some(p) = rust_path_literal(first)
+            {
+                path = Some(normalize_route_path(&p));
+                verb_args = &parts[1..];
+            }
+            let Some(path) = path else {
+                continue;
+            };
+            for part in verb_args {
+                let pairs = rust_route_pairs(part);
+                if !pairs.is_empty() {
+                    for (method, handler) in pairs {
+                        out.push(Endpoint {
+                            method,
+                            path: path.clone(),
+                            handler,
+                            file: file.to_string(),
+                            line: lineno,
+                        });
+                    }
+                    continue;
+                }
+                let Some(handler) = rust_handler(part) else {
+                    continue;
+                };
+                out.push(Endpoint {
+                    method: "ANY".to_string(),
+                    path: path.clone(),
+                    handler,
+                    file: file.to_string(),
+                    line: lineno,
+                });
+            }
+        }
+    }
+}
+
+/// The name of the first `fn` declared at or after `from`, within a short
+/// window so a route attribute never adopts an unrelated later function.
+fn rust_fn_below(lines: &[&str], from: usize) -> Option<String> {
+    for line in lines.iter().skip(from).take(4) {
+        let t = line.trim_start();
+        let rest = t.strip_prefix("pub ").unwrap_or(t);
+        let rest = rest.strip_prefix("async ").unwrap_or(rest);
+        if let Some(after) = rest.strip_prefix("fn ") {
+            let name: String = after
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+/// Handler names of the Rust routes in `body`, for the dead root check.
+fn scan_rust(body: &str, out: &mut HashSet<String>) {
+    let mut eps = Vec::new();
+    scan_rust_endpoints(body, "", &mut eps);
+    for e in eps {
+        out.insert(e.handler);
     }
 }
 
