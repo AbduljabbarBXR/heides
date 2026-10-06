@@ -1098,17 +1098,52 @@ mod liveness {
     }
 
     #[test]
+    #[test]
+    fn rust_is_taint_scanned_now() {
+        // The gap this repository is judged on: Rust had no source row and no
+        // sink row, so `Command::new` fed from the environment was invisible in
+        // the language this tool is written in. Both tables carry Rust now, and
+        // the receipt must stop naming it as unscanned.
+        let mut graph = CodeGraph::new();
+        graph.files.push(crate::spine::FileEntry {
+            path: "src/main.rs".into(),
+            lang: "rust".into(),
+            mtime: 0,
+            size: 0,
+        });
+        let cov = coverage_of(&graph);
+        assert!(
+            !cov.taint_untested.iter().any(|l| l == "rust"),
+            "rust has source and sink rows now and must not be reported unscanned: {}",
+            cov.render()
+        );
+        assert!(
+            crate::taint::strict_sinks("rust").next().is_some()
+                || crate::taint::SINKS.iter().any(|r| r.0 == "rust"),
+            "rust must appear in a taint table"
+        );
+        assert!(
+            crate::taint::SOURCES.iter().any(|r| r.0 == "rust"),
+            "rust must have a taint source row"
+        );
+    }
+
     fn the_receipt_names_a_language_with_no_taint_rules() {
-        // The case that matters. A Rust only workspace is indexed fully, finds
-        // nothing, and would otherwise read as clean with no hint that taint
-        // never ran on it.
-        let dir = scratch("rustonly");
-        std::fs::write(dir.join("a.rs"), "fn f() -> i32 { 1 }\n").unwrap();
+        // The case that matters. A workspace in a language with no taint rule is
+        // indexed fully, finds nothing, and would otherwise read as clean with
+        // no hint that taint never ran on it.
+        //
+        // This used to use Rust, which was true until 0.30 added Rust taint
+        // rows. The invariant is the part worth keeping, so it is now asserted
+        // against a language that still has no rows: html is indexed, so it
+        // reaches the receipt, and it has neither a sink nor a source row.
+        let dir = scratch("htmlonly");
+        std::fs::write(dir.join("a.html"), "<div>hi</div>\n").unwrap();
         let (graph, _) = indexer::build_graph(&dir);
         let cov = coverage_of(&graph);
         let text = cov.render();
         assert!(
-            cov.taint_untested.iter().any(|l| l == "rust"),
+            cov.taint_untested.iter().any(|l| l == "html"),
             "a language with no taint rule must be named: {text}"
         );
         assert!(
@@ -1351,14 +1386,14 @@ mod liveness {
         // guard.
         let mut graph = CodeGraph::new();
         graph.files.push(crate::spine::FileEntry {
-            path: "main.rs".into(),
-            lang: "rust".into(),
+            path: "page.html".into(),
+            lang: "html".into(),
             mtime: 0,
             size: 0,
         });
         let receipt = coverage_of(&graph).render();
         assert!(
-            receipt.contains("rust") && receipt.contains("taint not scanned"),
+            receipt.contains("html") && receipt.contains("taint not scanned"),
             "a language with no taint rules must still be named: {receipt}"
         );
     }

@@ -319,13 +319,25 @@ pub fn contradictions(
 ///
 /// A clean result is only clean where a rule exists. This says where it is not,
 /// which is the difference between "nothing to fix" and "nothing was looked for".
+/// Whether any taint rule can fire on a language.
+///
+/// This asked only about the strict SSRF and NoSQL tables, which is how a
+/// language with SQL and shell rules but no strict rows read as uncovered, and
+/// how Rust read as uncovered even with rows in front of it. The test is the
+/// same one the coverage receipt uses: a source row or a sink row in any table.
+pub fn lang_has_taint(lang: &str) -> bool {
+    crate::taint::SOURCES.iter().any(|(l, _)| *l == lang)
+        || crate::taint::SINKS.iter().any(|(l, _, _)| *l == lang)
+        || crate::taint::strict_sinks(lang).next().is_some()
+}
+
 pub fn coverage_gaps(graph: &CodeGraph, guards_ran: usize) -> Vec<Insight> {
     let mut out = Vec::new();
     let mut by_lang: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
     for f in &graph.files {
         let e = by_lang.entry(f.lang.as_str()).or_insert((0, 0));
         e.0 += 1;
-        if crate::taint::strict_sinks(&f.lang).next().is_some() {
+        if lang_has_taint(&f.lang) {
             e.1 += 1;
         }
     }
@@ -351,7 +363,7 @@ pub fn coverage_gaps(graph: &CodeGraph, guards_ran: usize) -> Vec<Insight> {
         .map(|f| f.lang.as_str())
         .collect();
     for lang in no_grammar {
-        if crate::taint::strict_sinks(lang).next().is_none() {
+        if !lang_has_taint(lang) {
             continue;
         }
         out.push(Insight::new(
