@@ -1034,63 +1034,22 @@ pub fn long_functions(graph: &CodeGraph) -> Vec<PracticeReport> {
 }
 
 /// Count the body lines of the function starting at the given line.
-/// Exact for brace languages, indentation based for python.
+///
+/// Delegates to the shared span reader instead of counting braces here. A
+/// local brace count sees the `}` in a string literal as a close, and the `{`
+/// in a format string as an open, so an unbalanced literal walks the count to
+/// the end of the file and reports a function as thousands of lines long.
+/// The span reader already handles strings, comments and char literals, so
+/// there is one answer for how long a function is.
 fn body_length(lines: &[&str], start: usize, lang: &str) -> usize {
     if start >= lines.len() {
         return 0;
     }
-    if lang == "python" {
-        let indent = leading_spaces(lines[start]);
-        let mut end = start;
-        for (j, &l) in lines.iter().enumerate().skip(start + 1) {
-            if l.trim().is_empty() {
-                continue;
-            }
-            if leading_spaces(l) <= indent {
-                break;
-            }
-            end = j;
-        }
-        return end.saturating_sub(start);
+    let (s, e) = crate::interproc::body_range(lines, lang, start + 1);
+    if e < s {
+        return 0;
     }
-    // Brace languages: find the opening brace on or after the signature,
-    // then count until the matching close.
-    let mut depth: isize = 0;
-    let mut counted = 0usize;
-    let mut opened = false;
-    for line in lines.iter().skip(start) {
-        if !opened {
-            let brace = line.find('{');
-            match brace {
-                Some(_) => {
-                    opened = true;
-                    depth += line.matches('{').count() as isize;
-                    depth -= line.matches('}').count() as isize;
-                    counted += 1;
-                    if depth <= 0 {
-                        return counted;
-                    }
-                }
-                None => {
-                    // signature continues
-                    counted += 1;
-                    if counted > 200 {
-                        // No body found in a reasonable span. Abstract or
-                        // interface signature. Not a long function.
-                        return 0;
-                    }
-                }
-            }
-        } else {
-            depth += line.matches('{').count() as isize;
-            depth -= line.matches('}').count() as isize;
-            counted += 1;
-            if depth <= 0 {
-                return counted;
-            }
-        }
-    }
-    counted
+    e - s + 1
 }
 
 fn rep(path: &Path, line: u64, severity: &str, message: &str) -> PracticeReport {
@@ -1145,6 +1104,26 @@ mod tests {
         let lines: Vec<&str> = src.lines().collect();
         assert_eq!(body_length(&lines, 0, "rust"), 5);
         assert_eq!(body_length(&lines, 5, "rust"), 1);
+    }
+
+    #[test]
+    fn body_length_ignores_braces_inside_literals_and_comments() {
+        let src = concat!(
+            "fn sql() {\n",
+            "    let q = \"SELECT { FROM t\";\n",
+            "    let n = format!(\"{}{}\", a, b);\n",
+            "    // a lone } in a line comment\n",
+            "    /* and a { in a block comment */\n",
+            "}\n",
+            "fn next_one() {\n",
+            "    let z = 1;\n",
+            "}\n",
+            "fn next_two() {}\n",
+        );
+        let lines: Vec<&str> = src.lines().collect();
+        assert_eq!(body_length(&lines, 0, "rust"), 6, "sql() body is 6 lines");
+        assert_eq!(body_length(&lines, 6, "rust"), 3, "next_one() body is 3 lines");
+        assert_eq!(body_length(&lines, 9, "rust"), 1, "next_two() body is 1 line");
     }
 
     #[test]

@@ -73,7 +73,11 @@ struct FnInfo {
 }
 
 /// Body span of the function whose signature sits on 1 based line sym_line.
-fn body_range(lines: &[&str], lang: &str, sym_line: usize) -> (usize, usize) {
+///
+/// String and comment aware: a brace inside a literal or a comment does not
+/// move the depth, so a function is not measured past its own closing brace.
+/// Shared with the practice guards so there is one body span rule, not two.
+pub(crate) fn body_range(lines: &[&str], lang: &str, sym_line: usize) -> (usize, usize) {
     let start = sym_line
         .saturating_sub(1)
         .min(lines.len().saturating_sub(1));
@@ -96,13 +100,18 @@ fn body_range(lines: &[&str], lang: &str, sym_line: usize) -> (usize, usize) {
     // Brace language. Scan characters from the signature line, honoring
     // strings and comments, until the braces balance back to zero.
     let mut depth: isize = 0;
-    let mut in_line_comment = false;
+    let mut in_line_comment;
     let mut in_block_comment = false;
     let mut in_str: Option<char> = None;
     let mut escaped = false;
     let mut end = start;
     let mut saw_open = false;
     'outer: for (i, line) in lines.iter().enumerate().skip(start) {
+        // A line comment ends with the line. Carrying the flag into the next
+        // line hides every brace after the first `//` in the file, so a function
+        // whose body carries a comment never balances and measures as the rest
+        // of the file.
+        in_line_comment = false;
         // A signature only declaration ends with a semicolon at depth zero.
         // Interfaces and abstract stubs have no body, do not scan the rest
         // of the file pretending they do.
@@ -140,7 +149,23 @@ fn body_range(lines: &[&str], lang: &str, sym_line: usize) -> (usize, usize) {
                     in_block_comment = true;
                     chars.next();
                 }
-                '"' | '\'' | '`' => in_str = Some(c),
+                '"' | '`' => in_str = Some(c),
+                '\'' => {
+                    // In Rust a bare apostrophe is a lifetime, not the start of
+                    // a char literal. Reading `&'a str` as an open quote hides
+                    // every brace until the next apostrophe in the file. Only
+                    // take it as a quote when the closing apostrophe is on the
+                    // same line and near enough to be one character or an escape.
+                    let literal = if lang == "rust" {
+                        let rest: String = chars.clone().collect();
+                        rest.find('\'').map(|k| k > 0 && k <= 4).unwrap_or(false)
+                    } else {
+                        true
+                    };
+                    if literal {
+                        in_str = Some(c);
+                    }
+                }
                 '{' => {
                     saw_open = true;
                     depth += 1;
@@ -1153,5 +1178,56 @@ mod budget_tests {
             workspace_of(&[("a.py", "def f():\n    cmd = input()\n    return cmd\n")]);
         let ws = run_workspace_bounded(&graph, &contents, 0);
         assert!(ws.truncated, "a zero budget truncates immediately");
+    }
+
+    #[test]
+    fn a_line_comment_does_not_swallow_the_rest_of_the_file() {
+        let src = concat!(
+            "fn parse(path: &str) -> u32 {\n",
+            "    // collect the tables\n",
+            "    let t = 1;\n",
+            "    if t > 0 {\n",
+            "        return t;\n",
+            "    }\n",
+            "    0\n",
+            "}\n",
+            "fn after(x: u32) -> u32 {\n",
+            "    x\n",
+            "}\n",
+        );
+        let lines: Vec<&str> = src.lines().collect();
+        assert_eq!(body_range(&lines, "rust", 1), (0, 7), "parse closes on line 8");
+        assert_eq!(body_range(&lines, "rust", 9), (8, 10), "after closes on line 11");
+    }
+
+    #[test]
+    fn a_rust_lifetime_is_not_a_char_literal() {
+        let src = concat!(
+            "fn pick<'a>(first: &'a str, second: &'a str) -> &'a str {\n",
+            "    if first.is_empty() { second } else { first }\n",
+            "}\n",
+            "fn later(v: u32) -> u32 {\n",
+            "    v + 1\n",
+            "}\n",
+        );
+        let lines: Vec<&str> = src.lines().collect();
+        assert_eq!(body_range(&lines, "rust", 1), (0, 2), "pick closes on line 3");
+        assert_eq!(body_range(&lines, "rust", 4), (3, 5), "later closes on line 6");
+    }
+
+    #[test]
+    fn a_rust_char_literal_is_still_a_quote() {
+        let src = concat!(
+            "fn brace() -> char {\n",
+            "    let a = '{';\n",
+            "    if a == '}' { 'x' } else { a }\n",
+            "}\n",
+            "fn later(v: u32) -> u32 {\n",
+            "    v\n",
+            "}\n",
+        );
+        let lines: Vec<&str> = src.lines().collect();
+        assert_eq!(body_range(&lines, "rust", 1), (0, 3), "brace closes on line 4");
+        assert_eq!(body_range(&lines, "rust", 5), (4, 6), "later closes on line 7");
     }
 }
