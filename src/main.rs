@@ -1436,8 +1436,12 @@ fn insight_command(args: &[String]) -> ExitCode {
         }
         "coverage" => {
             let reports = harmony::check_workspace_without_deps(&graph);
-            for i in insight::coverage_gaps(&graph, reports.len()) {
+            let gaps = insight::coverage_gaps(&graph, reports.len());
+            for i in &gaps {
                 println!("[{}] {}: {}", i.severity, i.kind, i.message);
+            }
+            if gaps.is_empty() {
+                println!("{}", insight::coverage_receipt(&graph));
             }
             ExitCode::SUCCESS
         }

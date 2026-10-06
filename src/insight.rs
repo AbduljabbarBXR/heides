@@ -154,6 +154,27 @@ fn skip_dir(name: &str) -> bool {
     )
 }
 
+/// One line saying what coverage was checked, for when nothing was wrong.
+///
+/// A command that prints nothing on success is indistinguishable from a command
+/// that is broken. Silence here reads as "no gaps", which happens to be true,
+/// but the caller cannot tell that from a scan that never ran.
+pub fn coverage_receipt(graph: &CodeGraph) -> String {
+    let mut per_lang: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    for f in &graph.files {
+        let e = per_lang.entry(f.lang.as_str()).or_insert((0, 0));
+        e.0 += 1;
+        if lang_has_taint(&f.lang) {
+            e.1 += 1;
+        }
+    }
+    let with_taint = per_lang.values().filter(|(_, c)| *c > 0).count();
+    format!(
+        "coverage: {} language(s) indexed, {with_taint} can fire taint rules, no gaps found",
+        per_lang.len()
+    )
+}
+
 /// Whether a caller count can be trusted as a count of this definition.
 ///
 /// Call edges are recorded by name. `as_str` is defined in a dozen places and
