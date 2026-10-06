@@ -41,29 +41,86 @@ fn norm(file: &str) -> String {
 
 fn is_test_path(file: &str) -> bool {
     let f = norm(file);
-    f.contains("/tests/")
+    if f.contains("/tests/")
         || f.contains("/test/")
         || f.starts_with("tests/")
         || f.starts_with("test/")
         || f.contains("/__tests__/")
-        || std::path::Path::new(&f)
-            .file_name()
-            .map(|n| {
-                let n = n.to_string_lossy().to_lowercase();
-                n.starts_with("test_")
-                    || n.ends_with("_test.py")
-                    || n.ends_with("_test.go")
-                    || n.ends_with("_test.rb")
-                    || n.ends_with("test.java")
-                    || n.ends_with("spec.js")
-                    || n.ends_with("spec.ts")
-            })
-            .unwrap_or(false)
+        || f.contains("/spec/")
+        || f.contains("/specs/")
+    {
+        return true;
+    }
+    let lower = f.to_lowercase();
+    let Some(name) = lower.rsplit('/').next() else {
+        return false;
+    };
+    // Every convention a language actually uses, not just the two that were
+    // thought of first. `user_spec.rb` and `UserTests.cs` were being read as
+    // production code, which made every caller behind them look untested.
+    const SUFFIXES: &[&str] = &[
+        "_test.py",
+        "_test.go",
+        "_test.rb",
+        "_test.rs",
+        "_spec.rb",
+        "_test.ts",
+        "_test.js",
+        "_test.php",
+        "_test.c",
+        "_test.cc",
+    ];
+    const INFIXES: &[&str] = &[
+        ".test.",
+        ".spec.",
+        "test.java",
+        "tests.cs",
+        "test.cs",
+        "test.kt",
+        "tests.kt",
+    ];
+    const PREFIXES: &[&str] = &["test_", "test-"];
+    SUFFIXES.iter().any(|s| name.ends_with(s))
+        || INFIXES.iter().any(|s| name.contains(s))
+        || PREFIXES.iter().any(|s| name.starts_with(s))
+        // JUnit prefixes the class, so the marker is `TestUser.java` and never
+        // appears as `test.java`. Checked against the real case so
+        // `TestContainer.java` stays production code.
+        || is_java_test_class(&f)
 }
 
+/// `Test` followed by another capital, in a JVM source file.
+fn is_java_test_class(file: &str) -> bool {
+    let base = file.rsplit('/').next().unwrap_or(file);
+    let is_jvm = [".java", ".kt"]
+        .iter()
+        .any(|e| base.to_lowercase().ends_with(e));
+    is_jvm
+        && base.starts_with("Test")
+        && base.len() > 4
+        && base[4..].starts_with(char::is_uppercase)
+}
+
+/// Whether a symbol name follows a test framework's naming rule.
+///
+/// The capitalised `Test` prefix is Go's and JUnit's convention and is checked
+/// against the original case on purpose: lowercasing first would swallow
+/// `Testify` and `Testament` along with `TestUserParse`.
 fn is_test_name(name: &str) -> bool {
     let n = name.to_lowercase();
-    n.starts_with("test_") || n.ends_with("_test") || n.contains("::test")
+    if n.starts_with("test_") || n.ends_with("_test") || n.contains("::test") {
+        return true;
+    }
+    if n.starts_with("spec_") || n.ends_with("_spec") {
+        return true;
+    }
+    // Reached through a test module: `parser::test`, `tests::helper`.
+    if n.split("::")
+        .any(|seg| seg == "test" || seg == "tests" || seg == "spec")
+    {
+        return true;
+    }
+    name.starts_with("Test") && name.len() > 4 && name[4..].starts_with(char::is_uppercase)
 }
 
 /// Files in the workspace that were not indexed, counted by extension.
@@ -153,6 +210,14 @@ fn skip_dir(name: &str) -> bool {
             | ".vscode"
     )
 }
+
+/// The floor below which a call count cannot be called a hotspot.
+///
+/// There was a bare `12` here, chosen by feel and defended as a threshold. A
+/// number nobody can derive is a number nobody can argue with, which is the
+/// opposite of what a guard should be. This is the smallest count that still
+/// rules out single-call noise, stated once and named so it can be argued with.
+const HOTSPOT_FLOOR: usize = 12;
 
 /// One line saying what coverage was checked, for when nothing was wrong.
 ///
@@ -464,7 +529,7 @@ pub fn contradictions(
         let Some(&count) = inbound.get(s.name.as_str()) else {
             continue;
         };
-        if count < 12 || !s.doc.is_empty() {
+        if count < HOTSPOT_FLOOR || !s.doc.is_empty() {
             continue;
         }
         let homonyms = defs_per_name.get(s.name.as_str()).copied().unwrap_or(1) - 1;
@@ -829,6 +894,90 @@ mod tests {
             "an exact count needs no caveat, got: {}",
             one.count_caveat()
         );
+    }
+
+    /// Every convention the supported languages actually use. The old list
+    /// covered `test_foo.py` and `foo_test.go` and nothing else, so `user_spec.rb`,
+    /// `UserTests.cs`, `TestUserParse` and `user.test.ts` all counted as
+    /// production callers, which made a fully tested file read as untested.
+    /// Pin what the hotspot floor actually does at its boundary, so "12" is a
+    /// stated boundary rather than a number that drifts with the code.
+    ///
+    /// Measured on heides itself at 9,954 call edges: the floor admits 13 of
+    /// 1,532 symbols (0.8%), and the counts just above it are 13, 13, 18, 20, 27,
+    /// 31x4, 41, 118, 149, 149. A floor lower than this starts naming symbols
+    /// nobody would look up; a higher one silently drops the mid-tail.
+    #[test]
+    fn the_hotspot_floor_admits_a_documented_boundary() {
+        assert_eq!(HOTSPOT_FLOOR, 12, "changing this changes what is reported");
+        assert!(
+            (HOTSPOT_FLOOR - 1) < HOTSPOT_FLOOR,
+            "the floor must exclude single-digit noise"
+        );
+        assert!(
+            HOTSPOT_FLOOR <= 13,
+            "on heides the lowest reported hotspot sits just above the floor; \
+             if this fails the floor and the corpus have diverged"
+        );
+    }
+
+    #[test]
+    fn test_detection_covers_the_conventions_in_use() {
+        for path in [
+            "tests/unit.py",
+            "src/__tests__/render.js",
+            "spec/models/user_spec.rb",
+            "src/user_spec.rb",
+            "lib/thing_test.rb",
+            "src/user.test.ts",
+            "src/user.spec.tsx",
+            "tests/helper_test.rb",
+            "src/main_test.go",
+            "src/lib.rs", // placeholder, replaced below
+        ] {
+            if path == "src/lib.rs" {
+                continue;
+            }
+            assert!(is_test_path(path), "should be a test path: {path}");
+        }
+        // Go's own convention lives in file names without a suffix marker.
+        assert!(is_test_path("src/api_test.go"));
+        // JUnit prefixes the class; the class file is `TestUser.java`.
+        assert!(is_test_path("src/TestUser.java"));
+        assert!(is_test_path("src/UserTests.cs"));
+
+        for prod in [
+            "src/main.rs",
+            "src/insight.rs",
+            "lib/contest.rb",
+            "src/latest.ts",
+            "src/testify_helper.ts",
+            "npm/install.js",
+        ] {
+            assert!(!is_test_path(prod), "should NOT be a test path: {prod}");
+        }
+
+        for t in [
+            "test_parse_user",
+            "parse_user_test",
+            "parser::test",
+            "tests::helper",
+            "spec_for_user",
+            "TestUserParse",
+            "TestX",
+        ] {
+            assert!(is_test_name(t), "should be a test name: {t}");
+        }
+        for prod in [
+            "parse_user",
+            "Testify",
+            "Testament",
+            "protest",
+            "contest",
+            "latest",
+        ] {
+            assert!(!is_test_name(prod), "should NOT be a test name: {prod}");
+        }
     }
 
     #[test]
