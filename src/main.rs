@@ -42,7 +42,10 @@ fn cmd_accepts_flag(cmd: &str, flag: &str) -> bool {
         "--color=always",
         "--group",
     ];
-    if COMMON.contains(&flag) || flag.starts_with("--exit-threshold=") {
+    if COMMON.contains(&flag)
+        || flag.starts_with("--exit-threshold=")
+        || flag.starts_with("--max-bytes")
+    {
         return true;
     }
     match cmd {
@@ -159,7 +162,64 @@ fn print_flat(ui: &Ui, reports: &[harmony::GuardReport]) {
     }
 }
 
+/// `--max-bytes`: how much stdout a command may spend before it says so.
+///
+/// A tool result lands in an agent's context in full, so an unbounded print is
+/// not a convenience, it is a bill. The MCP surface already capped with
+/// `max_bytes`; the CLI printed without any ceiling at all, so `heides check` on
+/// a large repo could bury the finding that mattered under pages of the ones
+/// that did not. Truncation lands on a line boundary and reports the shortfall,
+/// because a silently short result reads as a complete one.
+static MAX_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SPENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn say(line: &str) {
+    use std::sync::atomic::Ordering;
+    let cap = MAX_BYTES.load(Ordering::Relaxed);
+    if cap > 0 && SPENT.load(Ordering::Relaxed) >= cap {
+        return;
+    }
+    println!("{line}");
+    SPENT.fetch_add(line.len() as u64 + 1, Ordering::Relaxed);
+}
+
+/// The last thing a capped run prints, so a short answer is never mistaken for a
+/// complete one.
+fn say_truncated_footer() {
+    use std::sync::atomic::Ordering;
+    let cap = MAX_BYTES.load(Ordering::Relaxed);
+    let spent = SPENT.load(Ordering::Relaxed);
+    if cap > 0 && spent >= cap {
+        eprintln!(
+            "[output stopped at the --max-bytes ceiling of {cap} bytes; \
+             raise it or narrow the command]"
+        );
+    }
+}
+
+fn max_bytes_arg() -> Option<u64> {
+    let mut it = std::env::args().skip(1);
+    while let Some(a) = it.next() {
+        if a == "--max-bytes" {
+            return it.next().and_then(|v| v.parse().ok());
+        }
+        if let Some(v) = a.strip_prefix("--max-bytes=") {
+            return v.parse().ok();
+        }
+    }
+    None
+}
+
 fn main() -> ExitCode {
+    if let Some(n) = max_bytes_arg() {
+        MAX_BYTES.store(n, std::sync::atomic::Ordering::Relaxed);
+    }
+    let code = run();
+    say_truncated_footer();
+    code
+}
+
+fn run() -> ExitCode {
     let mut args: Vec<String> = std::env::args().collect();
     let mut cleaned: Vec<String> = Vec::with_capacity(args.len());
     cleaned.push(args[0].clone());
@@ -231,6 +291,26 @@ fn main() -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
+
+    // `--max-bytes N` takes a value, so the positional scan has to step over
+    // both tokens or the number is read as the directory to scan.
+    let args: Vec<String> = {
+        let mut v: Vec<String> = Vec::new();
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == "--max-bytes" {
+                v.push(args[i].clone());
+                if let Some(next) = args.get(i + 1) {
+                    v.push(next.clone());
+                    i += 1;
+                }
+            } else {
+                v.push(args[i].clone());
+            }
+            i += 1;
+        }
+        v
+    };
 
     let arg2 = args.get(2).map(|s| s.as_str()).unwrap_or(".");
     let arg3 = args.get(3).map(|s| s.as_str());
@@ -604,7 +684,12 @@ fn main() -> ExitCode {
                             (false, 0) => format!(" at {}", r.file),
                             _ => format!(" at {}:{}", r.file, r.line),
                         };
-                        println!("  {} {}{}", ui.severity(&r.severity), r.message, loc);
+                        say(&format!(
+                            "  {} {}{}",
+                            ui.severity(&r.severity),
+                            r.message,
+                            loc
+                        ));
                     }
                 }
                 println!("{}", cov.render());
@@ -1438,7 +1523,7 @@ fn insight_command(args: &[String]) -> ExitCode {
             let reports = harmony::check_workspace_without_deps(&graph);
             let gaps = insight::coverage_gaps(&graph, reports.len());
             for i in &gaps {
-                println!("[{}] {}: {}", i.severity, i.kind, i.message);
+                say(&format!("[{}] {}: {}", i.severity, i.kind, i.message));
             }
             if gaps.is_empty() {
                 println!("{}", insight::coverage_receipt(&graph));
@@ -1515,7 +1600,10 @@ fn insight_command(args: &[String]) -> ExitCode {
                 } else {
                     format!(" at {}:{}", i.file, i.line)
                 };
-                println!("[{}] {}{}: {}", i.severity, i.kind, where_, i.message);
+                say(&format!(
+                    "[{}] {}{}: {}",
+                    i.severity, i.kind, where_, i.message
+                ));
             }
             if found.iter().any(|i| i.severity == "critical") {
                 ExitCode::FAILURE
@@ -1829,4 +1917,21 @@ fn find_cycles<'a>(adj: &std::collections::HashMap<&'a str, Vec<&'a str>>) -> Ve
         idx += 1;
     }
     found
+}
+
+#[cfg(test)]
+mod flag_tests {
+    use super::cmd_accepts_flag;
+
+    #[test]
+    fn max_bytes_is_accepted_everywhere_and_still_rejects_typos() {
+        // The flag guards stdout for every command, so it is accepted everywhere.
+        for cmd in ["check", "insight", "describe", "scan", "export"] {
+            assert!(cmd_accepts_flag(cmd, "--max-bytes"), "{cmd}");
+            assert!(cmd_accepts_flag(cmd, "--max-bytes=2000"), "{cmd}");
+        }
+        // The existing guarantee still holds: an unknown flag is never a path.
+        assert!(!cmd_accepts_flag("check", "--max-byte"));
+        assert!(!cmd_accepts_flag("check", "--json"));
+    }
 }

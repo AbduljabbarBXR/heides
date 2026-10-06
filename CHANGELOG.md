@@ -2,6 +2,14 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.32.0
+
+### Added
+- `--max-bytes` on every command. The MCP surface capped tool results with
+  `max_bytes`; the CLI had no ceiling at all, so `heides check` on a large repo
+  could bury the one finding that mattered under pages of the ones that did not.
+  Truncation lands on a line boundary and the run says it stopped.
+
 ## 0.31.0
 
 ### Fixed
