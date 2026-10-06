@@ -59,6 +59,15 @@ pub fn route_handlers(root: &Path, files: &[&str]) -> HashSet<String> {
             "python" => scan_python(&body, &mut out),
             "go" => scan_go(&body, &mut out),
             "rust" => scan_rust(&body, &mut out),
+            "csharp" | "java" | "php" | "ruby" => {
+                let mut eps = Vec::new();
+                scan_managed_endpoints(&body, "", &mut eps);
+                for e in eps {
+                    if !e.handler.is_empty() {
+                        out.insert(e.handler);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -217,6 +226,308 @@ fn is_identifier(text: &str) -> bool {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
         && !text.chars().next().unwrap().is_ascii_digit()
+}
+
+/// The HTTP verb a route attribute names, if it names one.
+///
+/// The spellings are not the uppercase verb: Spring writes `@GetMapping`,
+/// ASP.NET writes `[HttpGet]`, Symfony writes `#[Route(..., methods: ["GET"])]`
+/// and Spring's older form writes `RequestMethod.GET`. Matching on the verb
+/// itself silently matched none of them, which is how a route table can be
+/// empty while looking complete.
+fn attr_verb(attr: &str) -> Option<&'static str> {
+    const VERBS: [(&str, &str); 8] = [
+        ("Get", "GET"),
+        ("Post", "POST"),
+        ("Put", "PUT"),
+        ("Delete", "DELETE"),
+        ("Patch", "PATCH"),
+        ("Head", "HEAD"),
+        ("Options", "OPTIONS"),
+        ("Trace", "TRACE"),
+    ];
+    let a = attr
+        .trim_start()
+        .trim_start_matches(['[', '#', '(', '@'])
+        .trim_start();
+    for (name, verb) in VERBS {
+        if let Some(rest) = a.strip_prefix(name) {
+            // `@GetMapping` and `[HttpGet]` both continue with something that is
+            // not a further lowercase letter. `Getter` must not read as GET.
+            // Only a lowercase continuation makes it a longer word. `Getter`
+            // must not read as GET; `Mapping` must, and it is uppercase.
+            let continues_word = rest.chars().next().is_some_and(|c| c.is_lowercase());
+            if !continues_word {
+                return Some(verb);
+            }
+        }
+        if a.starts_with(&format!("Http{name}")) {
+            return Some(verb);
+        }
+    }
+    // Spring: @RequestMapping(value = "/x", method = RequestMethod.GET)
+    if let Some(at) = a.find("RequestMethod.") {
+        let tail = &a[at + "RequestMethod.".len()..];
+        let name: String = tail.chars().take_while(|c| c.is_alphanumeric()).collect();
+        for (n, verb) in VERBS {
+            if name.eq_ignore_ascii_case(n) {
+                return Some(verb);
+            }
+        }
+    }
+    // Symfony: #[Route("/x", methods: ["GET"])]
+    if let Some(at) = a.find("methods") {
+        let tail = &a[at..];
+        for (_, verb) in VERBS {
+            if tail.contains(&format!("\"{verb}\"")) {
+                return Some(verb);
+            }
+        }
+    }
+    None
+}
+/// The declaration a framework attribute decorates, on this or a nearby line.
+///
+/// Attribute routes put the method on the next line far more often than the
+/// same one, and a bounded window is the difference between reading a route and
+/// reading a decorator above an unrelated helper.
+///
+/// Reading the name as the identifier before the paren matters for C# and Java.
+/// Both lead with a return type, so `public IActionResult ListUsers()` and
+/// `public List<User> list()` name `ListUsers` and `list`, and anything that
+/// took the first identifier answered `IActionResult` and `List`.
+fn declared_name(lines: &[&str], from: usize, window: usize) -> Option<String> {
+    for line in lines.iter().skip(from).take(window) {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with("//") || t.starts_with('#') {
+            continue;
+        }
+        for kw in ["fn ", "func ", "def ", "function "] {
+            if let Some(rest) = t.strip_prefix(kw) {
+                let name: String = rest
+                    .trim_start_matches("async ")
+                    .trim_start()
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if !name.is_empty() {
+                    return Some(name);
+                }
+            }
+        }
+        // The identifier that opens the parameter list, with any generic
+        // argument list on the return type discarded first.
+        let Some(open) = t.find('(') else { continue };
+        let head = t[..open].rsplit('>').next().unwrap_or(&t[..open]);
+        let name: String = head
+            .chars()
+            .rev()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        if !name.is_empty() && !name.chars().all(|c| c.is_uppercase() || c.is_numeric()) {
+            return Some(name);
+        }
+    }
+    None
+}
+/// The string literal that opens a route declaration, unquoted.
+fn quoted_path(text: &str) -> Option<String> {
+    let t = text.trim_start();
+    let q = t.chars().next()?;
+    if q != '"' && q != '\'' {
+        return None;
+    }
+    let body = &t[1..];
+    let end = body.find(q)?;
+    let p = &body[..end];
+    if p.is_empty() {
+        None
+    } else {
+        Some(p.to_string())
+    }
+}
+
+/// Attribute routed endpoints: Spring, ASP.NET and Symfony.
+///
+/// The attribute carries the method and the path; the declaration below it
+/// carries the handler. C# minimal APIs put both on one line and are read
+/// separately.
+fn scan_attr_endpoints(lines: &[&str], file: &str, out: &mut Vec<Endpoint>) {
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim();
+        if !(t.starts_with('@') || t.starts_with("#[") || t.starts_with('[')) {
+            continue;
+        }
+        let Some(verb) = attr_verb(t) else {
+            continue;
+        };
+        let Some(after_paren) = t.split_once('(').map(|(_, rest)| rest) else {
+            continue;
+        };
+        let Some(path) = quoted_path(after_paren) else {
+            continue;
+        };
+        // `@RequestMapping` with no verb is a prefix, not a route, so it is only
+        // read when it names a method outright.
+        let Some(handler) = declared_name(lines, i + 1, 3) else {
+            continue;
+        };
+        out.push(Endpoint {
+            method: verb.to_string(),
+            path: normalize_route_path(&path),
+            handler,
+            file: file.to_string(),
+            line: (i + 1) as u64,
+        });
+    }
+}
+
+/// Laravel and Sinatra.
+fn script_endpoints(lines: &[&str], file: &str, out: &mut Vec<Endpoint>) {
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim();
+        for (lowercase, upper) in RUST_VERBS {
+            // Rails writes `get '/users'` with a space. Laravel writes
+            // `Route::get('/users'` with a paren and no space, so a needle of
+            // `get ` matched Rails and silently missed every Laravel route.
+            let mut matched: Option<(usize, usize)> = None;
+            let mut skip = 0usize;
+            for needle in [
+                format!("{lowercase} "),
+                format!("::{lowercase}("),
+                format!("{lowercase}("),
+            ] {
+                let Some(rel) = t.get(skip..).and_then(|r| r.find(&needle)) else {
+                    continue;
+                };
+                let at = rel + skip;
+                // The bare `verb(` and `verb '` forms need a word boundary, or
+                // `widget(` reads as a GET. The `::verb(` form is a framework
+                // call and is always preceded by the framework name, so the
+                // letter in front of it is not a word.
+                let qualified = needle.starts_with("::");
+                let before_ok = qualified
+                    || at == 0
+                    || !(t.as_bytes()[at - 1].is_ascii_alphanumeric()
+                        || t.as_bytes()[at - 1] == b'_'
+                        || t.as_bytes()[at - 1] == b':');
+                if before_ok {
+                    matched = Some((at, needle.len()));
+                    break;
+                }
+                skip = at + 1;
+            }
+            // Skip past the whole needle, prefix included. Slicing by the verb
+            // alone started the argument text inside `post(` and every Laravel
+            // route was skipped.
+            let Some((at, len)) = matched else { continue };
+            let after = t[at + len..].trim_start();
+            let after = after.strip_prefix(':').unwrap_or(after);
+            let after = after.strip_prefix('(').unwrap_or(after);
+            let Some(path) = quoted_path(after) else {
+                continue;
+            };
+            let handler = script_handler(after);
+            out.push(Endpoint {
+                method: upper.to_string(),
+                path: normalize_route_path(&path),
+                handler,
+                file: file.to_string(),
+                line: (i + 1) as u64,
+            });
+        }
+    }
+}
+
+/// The handler a script framework route names, when it names one.
+///
+/// `[UserController::class, 'index']` and `'users#index'` both name a callable;
+/// a Sinatra `do` block does not, and an unnamed route is recorded as such
+/// rather than borrowing a neighbour's name.
+fn script_handler(after: &str) -> String {
+    if let Some(at) = after.find('[') {
+        let inner = &after[at..];
+        let mut parts = inner.split(',');
+        parts.next();
+        if let Some(last) = parts.next_back()
+            && let Some(q) = last.find(|c| ['\'', '"'].contains(&c))
+        {
+            let tail = &last[q + 1..];
+            if let Some(end) = tail.find(|c| ['\'', '"'].contains(&c)) {
+                return tail[..end].to_string();
+            }
+        }
+    }
+    if let Some(at) = after.find("=>") {
+        let tail = after[at + 2..].trim_start();
+        if let Some(q) = tail.find(|c| ['\'', '"'].contains(&c)) {
+            let body = &tail[q + 1..];
+            if let Some(end) = body.find(|c| ['\'', '"'].contains(&c)) {
+                let spec = &body[..end];
+                return spec.rsplit('#').next().unwrap_or(spec).to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+/// ASP.NET minimal APIs: `app.MapGet("/users", () => ...)`.
+fn minimal_api_endpoints(lines: &[&str], file: &str, out: &mut Vec<Endpoint>) {
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim();
+        for (_lowercase, upper) in RUST_VERBS {
+            let needle = format!("Map{upper}(");
+            let Some(at) = t.find(&needle) else { continue };
+            let rest = &t[at + needle.len()..];
+            let Some(path) = quoted_path(rest) else {
+                continue;
+            };
+            // A lambda has no name, so this route contributes a path and a verb
+            // but no handler, which is the honest answer and keeps the dead root
+            // check from borrowing somebody else's symbol.
+            out.push(Endpoint {
+                method: upper.to_string(),
+                path: normalize_route_path(&path),
+                handler: String::new(),
+                file: file.to_string(),
+                line: (i + 1) as u64,
+            });
+        }
+    }
+}
+
+/// Routes for the four languages that had none. Without this a C# service, a
+/// Spring service, a Laravel app and a Rails app had no route inventory, so
+/// route to table, auth risk and taint from a request were all empty for them.
+fn scan_managed_endpoints(body: &str, file: &str, out: &mut Vec<Endpoint>) {
+    let lines: Vec<&str> = body.lines().collect();
+    match detect_lang_id(file) {
+        "csharp" => {
+            scan_attr_endpoints(&lines, file, out);
+            minimal_api_endpoints(&lines, file, out);
+        }
+        "java" | "php" => scan_attr_endpoints(&lines, file, out),
+        "ruby" => script_endpoints(&lines, file, out),
+        _ => {}
+    }
+}
+
+fn detect_lang_id(file: &str) -> &'static str {
+    match std::path::Path::new(file)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("cs") => "csharp",
+        Some("java") => "java",
+        Some("php") => "php",
+        Some("rb") => "ruby",
+        _ => "",
+    }
 }
 
 #[cfg(test)]
@@ -394,6 +705,7 @@ pub fn endpoints(files: &[String], root: &Path) -> Vec<Endpoint> {
             "python" => scan_python_endpoints(&body, f, &mut here),
             "go" => scan_go_endpoints(&body, f, &mut here),
             "rust" => scan_rust_endpoints(&body, f, &mut here),
+            "csharp" | "java" | "php" | "ruby" => scan_managed_endpoints(&body, f, &mut here),
             _ => {}
         }
         for e in here {

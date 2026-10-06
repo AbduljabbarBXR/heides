@@ -1098,7 +1098,6 @@ mod liveness {
     }
 
     #[test]
-    #[test]
     fn rust_is_taint_scanned_now() {
         // The gap this repository is judged on: Rust had no source row and no
         // sink row, so `Command::new` fed from the environment was invisible in
@@ -1128,6 +1127,7 @@ mod liveness {
         );
     }
 
+    #[test]
     fn the_receipt_names_a_language_with_no_taint_rules() {
         // The case that matters. A workspace in a language with no taint rule is
         // indexed fully, finds nothing, and would otherwise read as clean with

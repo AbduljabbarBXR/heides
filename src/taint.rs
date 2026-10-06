@@ -18,7 +18,7 @@ pub struct TaintReport {
 /// Source patterns per language, user input entry points. Shared with the
 /// interprocedural engine, which reads the same rows so the two layers can
 /// never disagree about what a source is.
-pub(crate) const SOURCES: [(&str, &str); 40] = [
+pub(crate) const SOURCES: [(&str, &str); 38] = [
     (
         "javascript",
         r"\b(req|request)\.(query|params|body|headers|cookies)\b",
@@ -114,8 +114,6 @@ pub(crate) const SOURCES: [(&str, &str); 40] = [
         "typescript",
         r"\b(req|request)\.(query|params|body|headers|cookies)\b",
     ),
-    ("typescript", r"\bprocess\.env\b"),
-    ("typescript", r"\b(localStorage|sessionStorage)\b"),
 ];
 
 /// Sinks are per language. Where a name is ambiguous between SQL and something
@@ -689,27 +687,11 @@ pub(crate) const SINKS: &[(&str, &str, &str)] = &[
     ("rust", r"\bunsafe\s*\{", "unsafe block"),
     ("rust", r"\btransmute\s*(::<|\()", "unsafe block"),
     ("rust", r"\bset_len\s*\(", "unsafe block"),
-    // TypeScript. JavaScript's rows are the runtime ones and a TypeScript
-    // service calls the same APIs, so they are inherited by name here rather
-    // than duplicated into a table that would drift from it.
-    (
-        "typescript",
-        r"\b(db|database|sqlite|sqlite3|pg|mysql|conn|connection|client|stmt|statement|tx|transaction|pool|sequelize|knex|prisma|typeorm|drizzle|orm|sql|store)\s*\.\s*(run|exec|execSQL|raw|literal|query|all|get|prepare|execute)\s*\(",
-        "SQL",
-    ),
-    (
-        "typescript",
-        r"\b(query|execute|execSQL|queryRaw|executeSql)\s*\(",
-        "SQL",
-    ),
-    ("typescript", r"\b(eval|Function)\s*\(", "eval"),
-    ("typescript", r"\bexec(Sync)?\s*\(", "shell"),
-    ("typescript", r"\bspawn(Sync)?\s*\(", "shell"),
-    (
-        "typescript",
-        r"\bfs\.(readFile|writeFile|unlink|rm)\s*\(",
-        "filesystem",
-    ),
+    // No TypeScript rows here on purpose. scan_file maps typescript to the
+    // javascript rows, so a TypeScript file is analysed by exactly the rules
+    // JavaScript is. Rows written under "typescript" are dead weight that
+    // looks like coverage and never runs, which is the same lie as a table that
+    // claims a language is scanned when the matcher disagrees.
 ];
 
 /// Targets that turn an SSRF into a cloud credential theft. When a tainted
