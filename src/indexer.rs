@@ -89,13 +89,14 @@ fn describe(path: &Path, key: &str, lang: &str) -> FileEntry {
 }
 
 /// The absolute scan root, symlinks resolved when the path exists.
-fn abs_root_of(root: &Path) -> PathBuf {
+pub fn abs_root_of(root: &Path) -> PathBuf {
     std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
 }
 
-/// The stored key for a walked file, relative to the scan root. A path that
+/// The stored key for a walked file, relative to the scan root. Public so
+/// coverage disclosure keys off exactly what the file table stores. A path that
 /// resolves outside the root falls back to its raw display so nothing breaks.
-fn rel_key(abs_root: &Path, path: &Path) -> String {
+pub fn rel_key(abs_root: &Path, path: &Path) -> String {
     let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     abs.strip_prefix(abs_root)
         .unwrap_or(path)
