@@ -154,6 +154,30 @@ fn skip_dir(name: &str) -> bool {
     )
 }
 
+/// Whether a caller count can be trusted as a count of this definition.
+///
+/// Call edges are recorded by name. `as_str` is defined in a dozen places and
+/// called four hundred times; without types there is no honest way to say which
+/// edge belongs to which definition. So the number is published as a bound, and
+/// this says out loud which it is.
+impl Impact {
+    pub fn caller_count_is_exact(&self) -> bool {
+        self.homonyms.is_empty()
+    }
+
+    pub fn count_caveat(&self) -> String {
+        if self.caller_count_is_exact() {
+            return String::new();
+        }
+        format!(
+            "caller counts are an upper bound: {} definition(s) share the name {} ({}), and call edges record names, not identities",
+            self.homonyms.len() + 1,
+            self.symbol,
+            self.homonyms.join(", ")
+        )
+    }
+}
+
 /// The line a caller prints when the workspace is not fully read.
 pub fn skipped_notice(total: usize, by_ext: &[(String, usize)], samples: &[String]) -> String {
     if total == 0 {
@@ -210,6 +234,11 @@ impl ScanLimits {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Impact {
     pub symbol: String,
+    /// Other files defining the same name. Call edges are keyed by name, so
+    /// when this is non-empty the caller count is an upper bound over every
+    /// homonym rather than a count of callers of any one definition. Saying
+    /// "146 callers" for a method named `as_str` is a number, and a wrong one.
+    pub homonyms: Vec<String>,
     pub defined_in: Vec<String>,
     pub direct_callers: Vec<(String, String, u64)>,
     pub transitive_callers: usize,
@@ -256,8 +285,15 @@ pub fn impact(graph: &CodeGraph, symbol: &str, routes: &[(String, String)]) -> I
         ..Impact::default()
     };
     for s in &graph.symbols {
-        if s.name == symbol {
+        if s.name != symbol {
+            continue;
+        }
+        // The first definition is the subject; every later one is a homonym
+        // whose edges the name-keyed count will also swallow.
+        if out.defined_in.is_empty() {
             out.defined_in.push(s.file.clone());
+        } else if !out.defined_in.contains(&s.file) {
+            out.homonyms.push(format!("{}:{}", s.file, s.line));
         }
     }
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -397,6 +433,12 @@ pub fn contradictions(
             e.0 += 1;
         }
     }
+    // How many definitions share each name, so a name-keyed call count is never
+    // printed as if it belonged to one definition.
+    let mut defs_per_name: BTreeMap<&str, usize> = BTreeMap::new();
+    for s in &graph.symbols {
+        *defs_per_name.entry(s.name.as_str()).or_insert(0) += 1;
+    }
     for s in &graph.symbols {
         let Some(&count) = inbound.get(s.name.as_str()) else {
             continue;
@@ -404,6 +446,7 @@ pub fn contradictions(
         if count < 12 || !s.doc.is_empty() {
             continue;
         }
+        let homonyms = defs_per_name.get(s.name.as_str()).copied().unwrap_or(1) - 1;
         // A field or a getter named `kind` is called constantly and documents
         // itself. Only a function is a hotspot a reader would want explained.
         let kind = s.kind.as_str();
@@ -424,9 +467,18 @@ pub fn contradictions(
             "info",
             "doc.hotspot",
             format!(
-                "{} is called {count} time(s) and has no doc comment, in a file where {documented} of {total} symbols do. \
+                "{} is named at the far end of {count} call edge(s) and has no doc comment, in a file where \
+                 {documented} of {total} symbols do. {shared} \
                  The most depended on thing in the file is the one nobody explained.",
-                s.name
+                s.name,
+                shared = if homonyms == 0 {
+                    "No other definition shares the name, so that count is its callers.".to_string()
+                } else {
+                    format!(
+                        "{homonyms} definition(s) share the name, so that is an upper bound across all of \
+                         them, not callers of this one."
+                    )
+                }
             ),
             &s.file,
             s.line,
@@ -714,6 +766,48 @@ mod tests {
         let (n, by_ext, samples) = skipped_files(&root, &indexed);
         assert_eq!(n, 0, "nothing should be skipped, by_ext={by_ext:?}");
         assert!(skipped_notice(n, &by_ext, &samples).is_empty());
+    }
+
+    /// A name shared by two definitions has no knowable caller count without
+    /// types, so heides must publish a bound and say so. The bug this pins was
+    /// live on heides itself: `as_str` is defined in two files and its edges
+    /// were summed into "146 callers", attributed to whichever file came first.
+    #[test]
+    fn a_shared_name_is_reported_as_a_bound_and_an_exact_name_is_not() {
+        let d = scratch("homonym");
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(
+            d.join("src/a.rs"),
+            "pub fn shared() {}\npub fn unique() {}\n",
+        )
+        .unwrap();
+        std::fs::write(d.join("src/b.rs"), "pub fn shared() {}\n").unwrap();
+        let root = d.canonicalize().unwrap();
+        let graph = crate::indexer::build_graph(&root).0;
+
+        let hom = impact(&graph, "shared", &[]);
+        assert_eq!(
+            hom.homonyms.len(),
+            1,
+            "the second definition must be surfaced: {:?}",
+            hom.homonyms
+        );
+        assert!(!hom.caller_count_is_exact());
+        let caveat = hom.count_caveat();
+        assert!(caveat.contains("upper bound"), "got: {caveat}");
+        assert!(
+            caveat.contains("src/b.rs"),
+            "must name where: got: {caveat}"
+        );
+
+        let one = impact(&graph, "unique", &[]);
+        assert!(one.homonyms.is_empty(), "unique must have no homonyms");
+        assert!(one.caller_count_is_exact());
+        assert!(
+            one.count_caveat().is_empty(),
+            "an exact count needs no caveat, got: {}",
+            one.count_caveat()
+        );
     }
 
     #[test]

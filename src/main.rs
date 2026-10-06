@@ -1428,6 +1428,10 @@ fn insight_command(args: &[String]) -> ExitCode {
             for r in &im.routes {
                 println!("  route {r}");
             }
+            let caveat = im.count_caveat();
+            if !caveat.is_empty() {
+                println!("  note: {caveat}");
+            }
             ExitCode::SUCCESS
         }
         "coverage" => {
