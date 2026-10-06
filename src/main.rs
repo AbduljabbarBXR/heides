@@ -2,7 +2,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use heides::{
-    deadcode, frameworks, grounding, harmony, indexer, server, spine, ui::Stopwatch, ui::Ui, watch,
+    deadcode, frameworks, grounding, harmony, indexer, insight, server, spine, ui::Stopwatch,
+    ui::Ui, watch,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -1159,6 +1160,7 @@ fn main() -> ExitCode {
             println!("{}", grounding::web_confirm(q));
             ExitCode::SUCCESS
         }
+        "insight" => insight_command(&args),
         "describe" => {
             let root = PathBuf::from(arg2);
             match indexer::load_or_build(&root) {
@@ -1369,6 +1371,139 @@ const MEASURED_RULES: &[(&str, &str)] = &[
         "the heides workspace itself, every finding reviewed by hand",
     ),
 ];
+
+/// The CLI twin of the `insight.*` MCP tools: what heides can prove by
+/// disagreeing with itself, what a change could reach, and where no rule can
+/// fire at all.
+fn insight_command(args: &[String]) -> ExitCode {
+    // The subcommand and an optional symbol come before the directory, so the
+    // root is whichever later argument is an existing directory, not a fixed
+    // position.
+    let root: std::path::PathBuf = args
+        .iter()
+        .skip(3)
+        .find(|a| std::path::Path::new(a.as_str()).is_dir())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let sub = args.get(2).map(|s| s.as_str()).unwrap_or("contradictions");
+    if sub == "help" || sub == "--help" {
+        println!("usage. heides insight [contradictions|impact <symbol>|coverage|baseline] [dir]");
+        return ExitCode::SUCCESS;
+    }
+    let graph = match indexer::load_or_build(&root) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("{}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+    let files: Vec<String> = graph.files.iter().map(|f| f.path.clone()).collect();
+    match sub {
+        "impact" => {
+            let sym = args
+                .get(3)
+                .filter(|a| !std::path::Path::new(a.as_str()).is_dir())
+                .cloned()
+                .unwrap_or_default();
+            if sym.is_empty() {
+                println!("usage. heides insight impact <symbol> [dir]");
+                return ExitCode::FAILURE;
+            }
+            let routes: Vec<(String, String)> = frameworks::endpoints(&files, &root)
+                .into_iter()
+                .map(|e| (format!("{} {}", e.method, e.path), e.handler))
+                .collect();
+            let im = insight::impact(&graph, &sym, &routes);
+            println!("{}", im.summary());
+            for (caller, file, line) in &im.direct_callers {
+                println!("  {caller} at {file}:{line}");
+            }
+            for r in &im.routes {
+                println!("  route {r}");
+            }
+            ExitCode::SUCCESS
+        }
+        "coverage" => {
+            let reports = harmony::check_workspace_without_deps(&graph);
+            for i in insight::coverage_gaps(&graph, reports.len()) {
+                println!("[{}] {}: {}", i.severity, i.kind, i.message);
+            }
+            ExitCode::SUCCESS
+        }
+        "baseline" => {
+            let reports = harmony::check_workspace_without_deps(&graph);
+            let mut current = std::collections::BTreeMap::new();
+            for r in &reports {
+                current.insert(
+                    insight::finding_key(&r.guard, &r.file, &r.message),
+                    r.severity.clone(),
+                );
+            }
+            let baseline = insight::load_baseline(&root);
+            if args.iter().skip(3).any(|a| a == "save") {
+                match insight::save_baseline(&root, &current) {
+                    Ok(()) => {
+                        println!("baseline saved: {} finding key(s)", current.len());
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("{}", e);
+                        ExitCode::FAILURE
+                    }
+                }
+            } else {
+                let fresh = insight::new_keys(&current, &baseline);
+                println!(
+                    "{} finding(s), {} new since the baseline, {} known",
+                    current.len(),
+                    fresh.len(),
+                    current.len() - fresh.len()
+                );
+                for k in &fresh {
+                    println!("  new: {}", k);
+                }
+                ExitCode::SUCCESS
+            }
+        }
+        _ => {
+            let routes: Vec<(String, String, String, u64)> = frameworks::endpoints(&files, &root)
+                .into_iter()
+                .map(|e| {
+                    (
+                        format!("{} {}", e.method, e.path),
+                        e.handler,
+                        e.file,
+                        e.line,
+                    )
+                })
+                .collect();
+            let dead: std::collections::BTreeSet<(String, u64)> =
+                deadcode::dead_roots(&graph, &root)
+                    .into_iter()
+                    .map(|d| (d.name, 0u64))
+                    .collect();
+            let found = insight::contradictions(&graph, &routes, &dead);
+            if found.is_empty() {
+                println!(
+                    "no contradictions. every route has a handler, and nothing reachable claims to be unreachable."
+                );
+            }
+            for i in &found {
+                let where_ = if i.file.is_empty() {
+                    String::new()
+                } else {
+                    format!(" at {}:{}", i.file, i.line)
+                };
+                println!("[{}] {}{}: {}", i.severity, i.kind, where_, i.message);
+            }
+            if found.iter().any(|i| i.severity == "critical") {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+    }
+}
 
 fn describe_workspace(graph: &spine::CodeGraph, root: &std::path::Path) {
     println!(

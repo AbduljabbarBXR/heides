@@ -2,6 +2,41 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.29.0
+
+**Four signals that need more than one fact.**
+
+Every other guard here reads one signal and applies a rule. These read two
+signals that were computed independently and report where they cannot both be
+true, which is the cheap way to find a real defect.
+
+`insight contradictions` compares them: a route whose handler no definition in
+the workspace matches, a handler the dead root check also reports unreachable,
+the most called function in a well documented file carrying no comment, a file
+that nothing reaches and nothing calls out of. On this repository it finds 13
+documentation hotspots and no route disagreement, which is the answer this
+repository deserves.
+
+**What a change would reach.**
+
+`insight impact <symbol>` is the question an agent asks before every edit, and a
+caller list answers it badly. It reports the transitive size, the files that move
+with the change, the routes behind it, and whether any test reaches it: "four
+callers" and "four callers and no test reaches it" are different answers.
+
+**A finding that is new matters more than one that has always been there.**
+
+`insight baseline save` records today's findings; `insight baseline` then reports
+only the ones it has never seen. A finding key ignores its line number, so a file
+that only moved down does not fill the baseline with noise.
+
+**Clean is only clean where a rule exists.**
+
+`insight coverage` says where it is not. `rust: 44 file(s) indexed, no taint rule
+can fire on any of them` is a different statement from clean, and only one of the
+two is worth acting on. An empty result and an unrun check are not the same
+answer.
+
 ## 0.28.0
 
 **A tool result should not be able to end the conversation.**
