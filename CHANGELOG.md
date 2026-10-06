@@ -2,6 +2,49 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.27.0
+
+**A type annotation was hiding every typed secret.**
+
+The credential rules looked for the first `=` or `:` on a line and read the
+value from there. In a typed declaration the annotation comes first, so the
+search stopped on the type and never reached the value:
+
+```rust
+const GITHUB_TOKEN = "ghp_...";               // reported
+const GITHUB_TOKEN: &str = "ghp_...";        // not reported
+const API: string = "ghp_...";               // not reported
+const std::string API = "ghp_...";           // not reported
+```
+
+Same credential, same file, one character apart. In Rust, TypeScript, C++ and
+Java that is how a constant is written, so the guard was blind to the idiomatic
+declaration of a hardcoded key. The fix finds the quoted literal first and walks
+back to the operator, which also stops a `==` comparison or a `=>` match arm
+being read as an assignment.
+
+**`staged` judged a patch twice.**
+
+A staged review is normally run after the change is already in the working
+tree, because that is the point of one. heides read the working tree as the
+pre-image and applied the hunks again, so every added line landed in the file
+twice. The duplicate declaration rule then raised a *blocker* for each pair, at
+a line number past the end of the file. Adding two functions to a four line
+file produced four blockers, two of them pointing at lines five and six.
+
+Applying a patch is now idempotent. A deletion is still applied, because a hunk
+with nothing to add is a deletion rather than an already applied change, and
+that distinction is what the battle suite caught on the first attempt.
+
+A reviewed file also kept its trailing newline now. Dropping it made every
+staged file differ from disk by a byte no hunk mentioned.
+
+**`.tsx` is parsed as TSX.**
+
+`.tsx` was parsed with the plain TypeScript grammar, so a JSX element opened
+node kinds the walker could not name and the file yielded fewer symbols than the
+same code under a `.ts` extension. The TSX grammar is now selected by extension.
+
 ## Unreleased
 
 **A line comment was swallowing the rest of the file.**

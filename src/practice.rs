@@ -104,15 +104,10 @@ fn value_shaped_credential(line: &str) -> Option<&'static str> {
     }
     // Only the region after a real assignment, so function bodies and
     // comparisons cannot fire it.
-    let at = line.find(['=', ':'])?;
-    let rest = line[at + 1..].trim();
+    let (_, quote_at, quote) = assigned_literal(line)?;
     // The credential must be a quoted literal. An unquoted remainder means this
     // is an env read, a concatenation or prose rather than a hardcoded value.
-    let quote = match rest.chars().next() {
-        Some(c @ ('"' | '\'')) => c,
-        _ => return None,
-    };
-    let trimmed = rest[1..].trim_end();
+    let trimmed = line[quote_at + 1..].trim_end();
     let end = trimmed.rfind(quote)?;
     let inner = &trimmed[..end];
     // An interpolated value is assembled at runtime, so the source does not
@@ -419,45 +414,140 @@ fn is_placeholder_value(content: &str) -> bool {
     false
 }
 
-fn secret_assignment(line: &str) -> bool {
+/// The quoted literal that is the right hand side of an assignment on this
+/// line, as `(operator index, quote index, quote character)`.
+///
+/// Found by walking back from the quote, not by taking the first `=` or `:` in
+/// the line. In a typed declaration the annotation comes first: in
+/// `const TOKEN: &str = "ghp_..."` a `:` precedes the `=`, and in
+/// `const std::string API = "..."` a `::` precedes it too, so a forward search
+/// stopped on the type and the value never parsed as a literal. Every credential
+/// written the idiomatic way in Rust, TypeScript, C++ and Java was invisible to
+/// the guard for that reason.
+///
+/// A two character operator is a comparison, not an assignment. `x == "secret"`
+/// tests a value and `x => "secret"` is a match arm, so neither is a hardcoded
+/// credential.
+fn assigned_literal(line: &str) -> Option<(usize, usize, char)> {
     let bytes = line.as_bytes();
-    let mut op: Option<usize> = None;
-    let mut quote: u8 = 0;
-    for (i, &b) in bytes.iter().enumerate() {
-        if quote != 0 {
-            if b == quote && (i == 0 || bytes[i - 1] != b'\\') {
-                quote = 0;
-            }
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let quote = bytes[i] as char;
+        if quote != '"' && quote != '\'' {
+            i += 1;
             continue;
         }
-        match b {
-            b'"' | b'\'' => quote = b,
-            b'=' | b':' => {
-                op = Some(i);
+        let mut j = i;
+        while j > 0 && (bytes[j - 1] as char).is_whitespace() {
+            j -= 1;
+        }
+        if j > 0 {
+            let op = bytes[j - 1];
+            if op == b'=' || op == b':' {
+                let before = if j >= 2 { bytes[j - 2] } else { 0 };
+                let is_two_char = matches!(
+                    before,
+                    b'=' | b'!'
+                        | b'<'
+                        | b'>'
+                        | b'+'
+                        | b'-'
+                        | b'*'
+                        | b'/'
+                        | b'%'
+                        | b'|'
+                        | b'&'
+                        | b'^'
+                        | b'.'
+                );
+                if !is_two_char {
+                    return Some((j - 1, i, quote));
+                }
+            }
+        }
+        i += 1;
+        while i < bytes.len() {
+            if bytes[i] == b'\\' {
+                i += 2;
+                continue;
+            }
+            if bytes[i] as char == quote {
+                i += 1;
                 break;
             }
-            _ => {}
+            i += 1;
         }
     }
-    let Some(at) = op else {
+    None
+}
+
+/// The identifier a declaration binds, skipping a type annotation and any
+/// keyword that sits between it and the value.
+///
+/// `const TOKEN: &str = "..."` binds `TOKEN`, not `&str`, and
+/// `const std::string API = "..."` binds `API`. Tokens are read from the value
+/// backwards and the first one that is neither type shaped nor a declaration
+/// keyword is the name.
+fn assigned_name(before: &str) -> Option<&str> {
+    const KEYWORDS: &[&str] = &[
+        "const",
+        "static",
+        "let",
+        "var",
+        "final",
+        "pub",
+        "mut",
+        "val",
+        "private",
+        "public",
+        "protected",
+        "internal",
+        "extern",
+        "inline",
+        "readonly",
+        "declare",
+        "def",
+        "func",
+        "function",
+        "class",
+        "struct",
+        "enum",
+        "impl",
+        "trait",
+        "typedef",
+        "auto",
+    ];
+    let tail = before.trim_end();
+    let mut end = tail.len();
+    loop {
+        let head = &tail[..end];
+        let start = head
+            .rfind(|c: char| c.is_whitespace() || c == '(' || c == '[' || c == '{' || c == ',')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let token = &head[start..];
+        let bare = token.trim_end_matches('.');
+        if bare.is_empty() {
+            return None;
+        }
+        let type_shaped = bare.contains(':') || bare.starts_with('&') || bare.starts_with('*');
+        if !type_shaped && !KEYWORDS.contains(&bare) {
+            return Some(bare);
+        }
+        if start == 0 {
+            return None;
+        }
+        end = start - 1;
+    }
+}
+
+fn secret_assignment(line: &str) -> bool {
+    let Some((at, _, _)) = assigned_literal(line) else {
         return false;
     };
-    let prev = if at > 0 { bytes[at - 1] } else { 0 };
-    let next = bytes.get(at + 1).copied().unwrap_or(0);
-    if prev == b'=' || prev == b'!' || prev == b'<' || prev == b'>' {
-        return false;
-    }
-    if next == b'=' || next == b'>' {
-        return false;
-    }
     let before = &line[..at];
     let mut name_was_quoted = false;
-    let mut name = before
-        .trim_end()
-        .rsplit(|c: char| c.is_whitespace() || c == '(' || c == '[' || c == '{' || c == ',')
-        .next()
-        .unwrap_or("")
-        .trim_end_matches('.');
+    let mut name = assigned_name(before).unwrap_or("");
     if name.len() > 1 && (name.starts_with('"') || name.starts_with('\'')) {
         name_was_quoted = true;
         name = &name[1..name.len() - 1];

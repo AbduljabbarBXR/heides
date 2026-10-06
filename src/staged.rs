@@ -121,7 +121,7 @@ fn apply_hunks(original: &str, hunks: &[Hunk]) -> String {
         if pos < 0 {
             pos = 0;
         }
-        let pos = pos as usize;
+        let pos = (pos as usize).min(lines.len());
         let old_count = hunk
             .lines
             .iter()
@@ -134,10 +134,32 @@ fn apply_hunks(original: &str, hunks: &[Hunk]) -> String {
             .map(|l| l[1..].to_string())
             .collect();
         let end = (pos + old_count).min(lines.len());
+        // A patch is normally reviewed after it is already written to the
+        // working tree, because that is what a staged review is for. Applying
+        // it a second time put every added line into the file twice, and the
+        // duplicate declaration rule then raised a blocker for each pair, at a
+        // line number past the end of the file. When the region already reads
+        // as the result of this hunk there is nothing left to do.
+        let new_end = pos + new_lines.len();
+        if !new_lines.is_empty()
+            && new_end <= lines.len()
+            && lines[pos..new_end]
+                .iter()
+                .map(|s| s.as_str())
+                .eq(new_lines.iter().map(|s| s.as_str()))
+        {
+            continue;
+        }
         lines.splice(pos..end, new_lines.iter().cloned());
         delta += new_lines.len() as isize - (end - pos) as isize;
     }
-    lines.join("\n")
+    let mut out = lines.join("\n");
+    // Keep the file's trailing newline. Dropping it made every reviewed file
+    // differ from disk by a byte that no hunk mentioned.
+    if original.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }
 
 /// Check a parsed patch against the workspace graph.
@@ -371,7 +393,30 @@ mod tests {
             "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n";
         let files = parse_patch(patch).unwrap();
         let applied = apply_hunks(original, &files[0].hunks);
-        assert_eq!(applied, "one\nTWO\nthree");
+        assert_eq!(applied, "one\nTWO\nthree\n");
+    }
+
+    #[test]
+    fn a_patch_already_on_disk_is_not_applied_twice() {
+        let original = "fn a() {}\n";
+        let patch = "diff --git a/x.rs b/x.rs\n--- a/x.rs\n+++ b/x.rs\n@@ -1,1 +1,3 @@\n fn a() {}\n+fn b() {}\n+fn c() {}\n";
+        let files = parse_patch(patch).unwrap();
+        let once = apply_hunks(original, &files[0].hunks);
+        assert!(once.contains("fn b() {}") && once.contains("fn c() {}"));
+        // Judging a patch whose change is already in the working tree must be
+        // the same judgement. Applying it again duplicated every added line and
+        // the duplicate declaration rule blocked each pair, at a line number
+        // past the end of the file.
+        let twice = apply_hunks(&once, &files[0].hunks);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn a_file_without_a_trailing_newline_keeps_that() {
+        let original = "one\ntwo";
+        let patch = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n one\n-two\n+TWO";
+        let files = parse_patch(patch).unwrap();
+        assert_eq!(apply_hunks(original, &files[0].hunks), "one\nTWO");
     }
 
     #[test]

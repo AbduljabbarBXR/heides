@@ -28,11 +28,11 @@ pub fn detect_language(path: &Path) -> Option<String> {
         // a fixed buffer in a .c file was invisible to every layer.
         "c" | "h" => "c",
         "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => "cpp",
-        // Ruby has no tree sitter grammar yet, so language_for returns None and
-        // the symbol and call layers yield nothing for it. The file still has
-        // to be recognised, because the taint guard works on lines and does not
-        // need a grammar. A .rb file that parses to no symbols is still worth
-        // scanning.
+        // Ruby is recognised and parsed, so a .rb file contributes symbols and
+        // call edges like every other language here. It is listed separately
+        // because its grammar emits `method` and `singleton_method` rather than
+        // the `function_item` family, and because the taint rules carry explicit
+        // `def`/`end` rows instead of brace rows.
         "rb" => "ruby",
         "html" | "htm" => "html",
         "css" => "css",
@@ -55,18 +55,32 @@ pub fn has_grammar(lang: &str) -> bool {
 }
 
 fn language_for(lang: &str) -> Option<tree_sitter::Language> {
+    language_for_path(lang, false)
+}
+
+/// The grammar for a language, and for a TypeScript file whether it is JSX.
+///
+/// `.tsx` was always parsed with the plain TypeScript grammar, so a JSX
+/// element opened a node tree the walker could not name and the file yielded
+/// fewer symbols than the same code in `.ts`. The two grammars share a
+/// superset of the syntax, so asking for TSX is only asked for a `.tsx` path.
+fn language_for_path(lang: &str, tsx: bool) -> Option<tree_sitter::Language> {
     match lang {
         "rust" => Some(tree_sitter_rust::LANGUAGE.into()),
         "c" => Some(tree_sitter_c::LANGUAGE.into()),
         "cpp" => Some(tree_sitter_cpp::LANGUAGE.into()),
         "javascript" => Some(tree_sitter_javascript::LANGUAGE.into()),
         "typescript" => {
-            // Prefer the TSX variant when the file uses JSX, otherwise plain TS.
-            Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+            // TSX is a separate grammar, not a flag: the JSX node kinds have no
+            // name in the plain TypeScript grammar and the walk stops there.
+            if tsx {
+                Some(tree_sitter_typescript::LANGUAGE_TSX.into())
+            } else {
+                Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+            }
         }
-        // Ruby had no grammar, so a .rb file was detected and then yielded no
-        // symbols and no call edges. Recognised, never parsed: the worst kind of
-        // coverage, because the receipt implied it had been looked at.
+        // Ruby emits `method` and `singleton_method`; both are in the symbol kinds,
+        // so `def name` and `def self.name` both land in the index.
         "ruby" => Some(tree_sitter_ruby::LANGUAGE.into()),
         "python" => Some(tree_sitter_python::LANGUAGE.into()),
         "php" => Some(tree_sitter_php::LANGUAGE_PHP.into()),
@@ -195,7 +209,12 @@ pub fn parse_file(path: &Path, content: &str) -> Option<ParsedFile> {
 
 fn parse_inner(path: &Path, content: &str) -> Option<ParsedFile> {
     let lang = detect_language(path)?;
-    let grammar = language_for(&lang)?;
+    let tsx = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("tsx"))
+        .unwrap_or(false);
+    let grammar = language_for_path(&lang, tsx)?;
     let mut parser = Parser::new();
     parser.set_language(&grammar).ok()?;
     let tree = parser.parse(content.as_bytes(), None)?;
@@ -2048,5 +2067,47 @@ mod ruby_tests {
         let src = "def run\n  system(params[:cmd])\nend\n";
         let r = crate::taint::scan_file(std::path::Path::new("a.rb"), src);
         assert!(r.iter().any(|x| x.message.contains("sink")), "got {r:?}");
+    }
+}
+
+#[cfg(test)]
+mod tsx_tests {
+    use super::*;
+
+    fn parsed_tsx(src: &str) -> ParsedFile {
+        parse_file(std::path::Path::new("App.tsx"), src).expect("a .tsx file must parse")
+    }
+
+    /// A JSX element opened a node tree the plain TypeScript grammar cannot
+    /// name, so a `.tsx` file yielded fewer symbols than the same code in
+    /// `.ts`. The component and the plain function either side of it must both
+    /// survive, which is the whole reason for the separate TSX grammar.
+    #[test]
+    fn a_tsx_component_and_its_neighbour_are_both_symbols() {
+        let src = concat!(
+            "export function App({ name }: { name: string }) {\n",
+            "  return <div className=\"x\">{name}</div>;\n",
+            "}\n",
+            "function helper(n: number) { return n + 1; }\n",
+        );
+        let names: Vec<String> = parsed_tsx(src)
+            .symbols
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        assert!(names.contains(&"App".to_string()), "got {names:?}");
+        assert!(names.contains(&"helper".to_string()), "got {names:?}");
+    }
+
+    #[test]
+    fn a_tsx_call_is_an_edge() {
+        let src =
+            "function helper(n: number) { return n; }\nfunction main() { return helper(1); }\n";
+        let p = parsed_tsx(src);
+        assert!(
+            p.calls.iter().any(|c| c.callee == "helper"),
+            "got {:?}",
+            p.calls
+        );
     }
 }
