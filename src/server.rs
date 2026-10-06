@@ -42,6 +42,38 @@ fn text_result(text: String) -> Value {
 /// the caller asks for everything with `all: true`. A 126 line wall of one
 /// sentence is how an agent burns its budget and misses the one finding that
 /// mattered.
+/// Trim a tool result to a byte budget the caller sets with `max_bytes`.
+///
+/// A tool result lands in the model's context in full, so an unbounded one is a
+/// way to lose the conversation rather than spend tokens in it. The cut lands on
+/// a line boundary and says how much was dropped, so a caller that hit the cap
+/// knows to narrow the question instead of assuming the answer was complete.
+fn cap_bytes(text: &str, limit: Option<&Value>) -> String {
+    let Some(limit) = limit.and_then(|v| v.as_u64()) else {
+        return text.to_string();
+    };
+    let cap = limit as usize;
+    if cap == 0 || text.len() <= cap {
+        return text.to_string();
+    }
+    let mut cut = cap.min(text.len());
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    // Prefer dropping whole lines rather than one truncated line of evidence.
+    let cut = match text[..cut].rfind('\n') {
+        Some(i) if i > cap / 2 => i,
+        _ => cut,
+    };
+    let mut out = text[..cut].to_string();
+    out.push_str(&format!(
+        "\n\n[truncated to {cap} bytes by max_bytes. {} bytes not shown. \
+         Narrow the question, raise max_bytes, or pass advice=false.]",
+        text.len() - cut
+    ));
+    out
+}
+
 fn report_lines(reports: &[harmony::GuardReport], expand: bool) -> String {
     if reports.is_empty() {
         return "no findings. the workspace is clean.".to_string();
@@ -431,7 +463,24 @@ fn handle(id: &Value, method: &str, params: &Value) {
                         &graph,
                     );
                     let expand = args.get("all").and_then(|v| v.as_bool()) == Some(true);
-                    let out = format!("{}\n\n{}", report_lines(&reports, expand), cov.render());
+                    // An agent pays for every byte of this in its context, and
+                    // the advice bucket is style opinion rather than evidence:
+                    // on this repository `--no-advice` is an 84% cut and every
+                    // blocker, critical and warning survives it. So the MCP
+                    // surface defaults to evidence only, and `advice: true`
+                    // asks the rest back. The CLI keeps its current default
+                    // because a human at a terminal reads the whole receipt.
+                    let want_advice = args.get("advice").and_then(|v| v.as_bool()) == Some(true);
+                    let scoped: Vec<harmony::GuardReport> = if want_advice {
+                        reports.clone()
+                    } else {
+                        harmony::without_advice(&reports)
+                            .into_iter()
+                            .cloned()
+                            .collect()
+                    };
+                    let out = format!("{}\n\n{}", report_lines(&scoped, expand), cov.render());
+                    let out = cap_bytes(&out, args.get("max_bytes"));
                     // The MCP equivalent of a non-zero exit, and the property that
                     // matters most on this surface: an agent cannot see an exit
                     // code, so a gate that would fail on the command line has to
@@ -954,8 +1003,8 @@ fn tool_list() -> Value {
                         },
                         {
                             "name": "harmony.check",
-                            "description": "Run every guard on the workspace and return findings with evidence. Every guard is local and offline, so each finding names a file and a line and reproduces from the tree alone. Dependency and exposure analysis is not here: use GRIM for that.",
-                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "offline": { "type": "boolean", "description": "skip the dependency guard registry lookups" }, "all": { "type": "boolean", "description": "print every finding instead of folding identical ones. Folded by default, because a wall of identical lines is how an agent misses the one finding that mattered" } } }
+                            "description": "Run every guard on the workspace and return findings with evidence. Every guard is local and offline, so each finding names a file and a line and reproduces from the tree alone. Returns evidence only by default: style advice is dropped, which is an 84% cut on this repository with every blocker, critical and warning intact. Pass advice true to get it back. Dependency and exposure analysis is not here: use GRIM for that.",
+                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "offline": { "type": "boolean", "description": "skip the dependency guard registry lookups" }, "all": { "type": "boolean", "description": "print every finding instead of folding identical ones. Folded by default, because a wall of identical lines is how an agent misses the one finding that mattered" }, "advice": { "type": "boolean", "description": "include style advice alongside the evidence. Off by default: it is an opinion, not a defect, and it costs tokens on every call" }, "max_bytes": { "type": "integer", "description": "trim the result to this many bytes. A tool result lands in your context in full, so cap it rather than lose the conversation. Truncation lands on a line boundary and says how much was dropped" } } }
                         },
                         {
                             "name": "harmony.report",

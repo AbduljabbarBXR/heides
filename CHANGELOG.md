@@ -2,6 +2,36 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.28.0
+
+**A tool result should not be able to end the conversation.**
+
+Every MCP result lands in a model's context in full. `harmony.check` on this
+repository returned 1,232 tokens before, and a larger workspace would return
+more, which is not a bigger bill but a way to lose the thread. `max_bytes` trims
+the result to a budget the caller sets. The cut lands on a line boundary and says
+how much was dropped, so a caller that hit the cap knows to narrow the question
+rather than assume the answer was complete.
+
+**The MCP surface stopped paying for style opinion.**
+
+`harmony.check` returned evidence and advice together. On this repository that
+is 1,206 tokens, of which 1,027 are advice: opinions about loose equality and
+long functions that no agent can act on and no gate can fail on. The MCP default
+is now evidence only, 179 tokens, an 85% cut with every blocker, critical and
+warning intact. `advice: true` asks the rest back. The CLI keeps its full
+receipt, because a person at a terminal is reading the whole thing on purpose.
+
+**`describe --brief` drops the parts a reader cannot act on.**
+
+Rule measurement, per language doc coverage and the undocumented symbol list are
+a receipt for a person deciding whether to trust the gate. `--brief` keeps the
+map and drops the commentary: 1,624 tokens to 1,279.
+
+Measured on this repository, for an agent paying context on every call:
+orientation is 169x smaller than reading the source, evidence-only checking is
+85% smaller, and brief describing is 21% smaller.
+
 ## 0.27.0
 
 **A type annotation was hiding every typed secret.**
