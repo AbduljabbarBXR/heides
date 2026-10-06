@@ -2,6 +2,48 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.30.0
+
+**The blind spots, closed one at a time, each found by running rather than reading.**
+
+Rust had no source row and no sink row anywhere in the taint tables.
+`Command::new` fed from the environment, or `fs::read_to_string` fed from argv,
+was invisible in the language this tool is written in, and the receipt said so
+plainly: *rust: 44 file(s) indexed, no taint rule can fire on any of them.*
+Five sources and eight sinks now, written without groups because the matcher
+expands alternation inside a group and does not nest groups, so `env::(var|var_os)`
+matched nothing while the table claimed coverage.
+
+C#, Java, PHP and Ruby had no route reader at all, so route to table, auth risk
+and taint from a request were all empty for them. Four bugs, all found by
+running a fixture rather than by reading the code:
+
+* The verb is not spelled in uppercase. `@GetMapping` and `[HttpGet]` matched
+  nothing, because the reader looked for `GET`.
+* `declared_name` answered the return type. `IActionResult` and `List<User>`
+  are not method names.
+* A Rails needle of `get ` silently missed every Laravel route, because Laravel
+  writes `Route::get(` with a paren and no space.
+* PHP was routed to the attribute reader alone, so every Laravel route was
+  invisible while the language still looked covered, because Symfony shared the
+  branch. PHP carries two dialects and needs both readers.
+
+TypeScript was never blind: `scan_file` maps it onto the JavaScript rows. The
+rows written under `typescript` were unreachable and are gone, with the reason
+recorded where they were.
+
+`insight coverage` asked only about the strict SSRF and NoSQL tables, so a
+language with SQL and shell rules but no strict rows read as uncovered. It now
+uses the same test the receipt does.
+
+Two tests that enforced the blindness changed, because they asserted Rust is
+unscanned and that was true. The invariant they protect, that a language with no
+taint rules is always named, is kept and asserted against html, which still has
+no rows, with a new test asserting Rust is covered.
+
+456 tests pass. Six of them cover the four languages that previously had no
+route reader at all, so this cannot rot back into silence.
+
 ## 0.29.0
 
 **Four signals that need more than one fact.**

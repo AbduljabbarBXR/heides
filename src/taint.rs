@@ -18,7 +18,7 @@ pub struct TaintReport {
 /// Source patterns per language, user input entry points. Shared with the
 /// interprocedural engine, which reads the same rows so the two layers can
 /// never disagree about what a source is.
-pub(crate) const SOURCES: [(&str, &str); 32] = [
+pub(crate) const SOURCES: [(&str, &str); 38] = [
     (
         "javascript",
         r"\b(req|request)\.(query|params|body|headers|cookies)\b",
@@ -88,6 +88,32 @@ pub(crate) const SOURCES: [(&str, &str); 32] = [
     ("cpp", r"\bstd::cin\b"),
     ("cpp", r"\bgetline\s*\("),
     ("cpp", r"\bargv\b"),
+    // Rust. It had no source row at all, so no Rust file could ever taint, in a
+    // tool written in Rust. `std::env::var` is the environment, which on a
+    // service is operator supplied and reaches a sink exactly as attacker
+    // input does. `std::env::args` is the command line, and `read_line` off
+    // stdin is the same class of taint as it is in C.
+    //
+    // A bare function parameter is deliberately not a source, the same call
+    // made for Python above and for the same reason: a parameter is only
+    // untrusted where a caller supplies something untrusted, and that needs
+    // argument tracking rather than a pattern.
+    // No groups at all here on purpose. The matcher expands alternation inside a
+    // group but does not nest groups, so a row written as `env::(var|var_os)`
+    // silently matched nothing and Rust stayed invisible while the table said
+    // it was covered. `env::var` also matches `env::var_os`, and `env::args`
+    // matches `env::args_os`, so one plain row each is both simpler and total.
+    ("rust", r"env::var"),
+    ("rust", r"env::args"),
+    ("rust", r"std::env::args_os\s*\("),
+    ("rust", r"\.read_line\s*\("),
+    ("rust", r"\bstdin\s*\(\s*\)"),
+    // TypeScript. Same reasoning as JavaScript: the runtime shapes are the
+    // ones worth naming, and a TypeScript service reads them unchanged.
+    (
+        "typescript",
+        r"\b(req|request)\.(query|params|body|headers|cookies)\b",
+    ),
 ];
 
 /// Sinks are per language. Where a name is ambiguous between SQL and something
@@ -634,6 +660,38 @@ pub(crate) const SINKS: &[(&str, &str, &str)] = &[
     ("ruby", r"`[^`\n]*#\{", "shell"),
     ("ruby", r"%x[\(\[\{<][^\n]*#\{", "shell"),
     ("ruby", r"\bFile\s*\.\s*(write|open)\s*\(", "filesystem"),
+    // Rust. It had no sink row at all, so a `Command::new` fed from an
+    // environment variable was invisible in the language this tool is written
+    // in. The hazards are named the way Rust spells them, so a Rust service is
+    // analysed on its own terms rather than through the C and Java rows.
+    //
+    // `format!` is deliberately absent. It is how almost every Rust line builds
+    // a string, and a blanket row for it would fire on every interpolated
+    // message in the workspace. `unsafe` is here instead, because a block that
+    // the author has promised is sound and has not been is a real finding.
+    ("rust", r"\bCommand::new\s*\(", "shell"),
+    ("rust", r"\bprocess::Command\b", "shell"),
+    ("rust", r"\bstd::process::Command\b", "shell"),
+    (
+        "rust",
+        r"\b(fs|std::fs|tokio::fs)::(read_to_string|read|write|remove_file|File::open)\s*\(",
+        "filesystem",
+    ),
+    ("rust", r"\bFile\s*\.\s*(open|create)\s*\(", "filesystem"),
+    (
+        "rust",
+        r"(sqlx|diesel|sea_orm|rusqlite|postgres|tokio_postgres)::(query|query_one|query_as|execute|insert_into)\s*\(",
+        "SQL",
+    ),
+    ("rust", r"\b(sqlx::query|diesel::dsl|execute)\s*\(", "SQL"),
+    ("rust", r"\bunsafe\s*\{", "unsafe block"),
+    ("rust", r"\btransmute\s*(::<|\()", "unsafe block"),
+    ("rust", r"\bset_len\s*\(", "unsafe block"),
+    // No TypeScript rows here on purpose. scan_file maps typescript to the
+    // javascript rows, so a TypeScript file is analysed by exactly the rules
+    // JavaScript is. Rows written under "typescript" are dead weight that
+    // looks like coverage and never runs, which is the same lie as a table that
+    // claims a language is scanned when the matcher disagrees.
 ];
 
 /// Targets that turn an SSRF into a cloud credential theft. When a tainted

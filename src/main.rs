@@ -328,6 +328,9 @@ fn main() -> ExitCode {
                     if let Some(p) = pulse {
                         p.finish();
                     }
+                    let indexed: std::collections::BTreeSet<String> =
+                        graph.files.iter().map(|f| f.path.clone()).collect();
+                    let (skipped, by_ext, samples) = insight::skipped_files(&root, &indexed);
                     println!(
                         "spine indexed {} files, {} symbols, {} call edges, {} imports ({} touched)",
                         graph.files.len(),
@@ -336,6 +339,10 @@ fn main() -> ExitCode {
                         graph.imports.len(),
                         touched
                     );
+                    let notice = insight::skipped_notice(skipped, &by_ext, &samples);
+                    if !notice.is_empty() {
+                        println!("{}", notice);
+                    }
                     if let Some(mb) = indexer::peak_rss_mb() {
                         eprintln!("peak rss {} MB", mb);
                     }
@@ -1466,17 +1473,23 @@ fn insight_command(args: &[String]) -> ExitCode {
             }
         }
         _ => {
-            let routes: Vec<(String, String, String, u64)> = frameworks::endpoints(&files, &root)
-                .into_iter()
-                .map(|e| {
-                    (
-                        format!("{} {}", e.method, e.path),
-                        e.handler,
-                        e.file,
-                        e.line,
-                    )
-                })
-                .collect();
+            let mut routes: Vec<(String, String, String, u64)> =
+                frameworks::endpoints(&files, &root)
+                    .into_iter()
+                    .map(|e| {
+                        (
+                            format!("{} {}", e.method, e.path),
+                            e.handler,
+                            e.file,
+                            e.line,
+                        )
+                    })
+                    .collect();
+            routes.sort();
+            let (_, limits) = insight::routes_with_limits(&root, &files);
+            if limits.dropped() {
+                println!("note: {}", limits.summary());
+            }
             let dead: std::collections::BTreeSet<(String, u64)> =
                 deadcode::dead_roots(&graph, &root)
                     .into_iter()

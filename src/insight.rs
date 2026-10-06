@@ -66,6 +66,140 @@ fn is_test_name(name: &str) -> bool {
     n.starts_with("test_") || n.ends_with("_test") || n.contains("::test")
 }
 
+/// Files in the workspace that were not indexed, counted by extension.
+///
+/// This is the disclosure the tool owes its caller. Pointed at a Terraform
+/// workspace it read the one Python file and reported "1 files, 1 symbols",
+/// which reads exactly like a small clean project: the YAML carrying
+/// `curl | bash`, the shell and the HCL simply did not appear anywhere. A
+/// capability gap that is stated is a limitation a caller can plan around. One
+/// that is silent is a false clean bill of health.
+///
+/// Returns `(total skipped, [(extension, count)], sample paths)` so the caller
+/// can say how much was missed and show what it looked like.
+pub fn skipped_files(
+    root: &Path,
+    indexed: &std::collections::BTreeSet<String>,
+) -> (usize, Vec<(String, usize)>, Vec<String>) {
+    let abs = crate::indexer::abs_root_of(root);
+    let mut acc = (
+        0usize,
+        std::collections::BTreeMap::<String, usize>::new(),
+        Vec::<String>::new(),
+    );
+    walk_skipped(root, &abs, indexed, &mut acc);
+    (acc.0, acc.1.into_iter().collect(), acc.2)
+}
+
+/// One recursion level. `abs` stays the scan root throughout: re-deriving it
+/// per directory would key nested files by bare filename and report every
+/// indexed file under `src/` as unread.
+fn walk_skipped(
+    dir: &Path,
+    abs: &Path,
+    indexed: &std::collections::BTreeSet<String>,
+    acc: &mut (
+        usize,
+        std::collections::BTreeMap<String, usize>,
+        Vec<String>,
+    ),
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if path.is_dir() {
+            if skip_dir(&name) {
+                continue;
+            }
+            walk_skipped(&path, abs, indexed, acc);
+            continue;
+        }
+        let rel = crate::indexer::rel_key(abs, &path);
+        if indexed.contains(rel.as_str()) {
+            continue;
+        }
+        acc.0 += 1;
+        let ext = path
+            .extension()
+            .map(|e| format!(".{}", e.to_string_lossy()))
+            .unwrap_or_else(|| "(no extension)".to_string());
+        *acc.1.entry(ext).or_insert(0) += 1;
+        if acc.2.len() < 3 {
+            acc.2.push(rel);
+        }
+    }
+}
+
+fn skip_dir(name: &str) -> bool {
+    matches!(
+        name,
+        ".git"
+            | ".heides"
+            | "target"
+            | "node_modules"
+            | "vendor"
+            | ".venv"
+            | "venv"
+            | "__pycache__"
+            | ".next"
+            | ".open-next"
+            | ".netlify"
+            | "dist"
+            | "build"
+            | ".idea"
+            | ".vscode"
+    )
+}
+
+/// The line a caller prints when the workspace is not fully read.
+pub fn skipped_notice(total: usize, by_ext: &[(String, usize)], samples: &[String]) -> String {
+    if total == 0 {
+        return String::new();
+    }
+    let kinds: Vec<String> = by_ext.iter().map(|(e, n)| format!("{e}({n})")).collect();
+    let mut s = format!(
+        "not indexed: {total} file(s) with no grammar here: {}",
+        kinds.join(", ")
+    );
+    if !samples.is_empty() {
+        s.push_str(&format!("; e.g. {}", samples.join(", ")));
+    }
+    s.push_str(". A clean verdict covers only the files above.");
+    s
+}
+
+/// What a route scan could not read, so a caller can say so instead of
+/// returning a shorter answer without mentioning it.
+///
+/// `MAX_FILES` and `MAX_FILE_BYTES` are the right limits: nobody wants a
+/// generated 40 MB bundle in a route table. But a silent limit is a lie the
+/// tool tells about its own coverage, which is the one thing it must not do.
+/// Every drop is counted, and the caller prints why.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ScanLimits {
+    pub files_seen: usize,
+    pub files_over_cap: usize,
+    pub files_too_large: usize,
+    pub unreadable: usize,
+}
+
+impl ScanLimits {
+    /// True when anything was left out, so the caller can print why.
+    pub fn dropped(&self) -> bool {
+        self.files_over_cap + self.files_too_large + self.unreadable > 0
+    }
+
+    pub fn summary(&self) -> String {
+        format!(
+            "route scan read {} file(s); dropped {} over the file cap, {} over the size cap, {} unreadable",
+            self.files_seen, self.files_over_cap, self.files_too_large, self.unreadable
+        )
+    }
+}
+
 /// The set heides can reach from a symbol, and how much of it is untested.
 ///
 /// A caller list on its own does not tell an agent whether a change is safe to
@@ -176,6 +310,30 @@ pub fn impact(graph: &CodeGraph, symbol: &str, routes: &[(String, String)]) -> I
     out.untested_callers.sort();
     out.untested_callers.dedup();
     out
+}
+
+/// Every route in the workspace, with a receipt of what the scan could not read.
+///
+/// The receipt travels with the answer. A route table that quietly stopped at
+/// 400 files reads exactly like a service with 400 files.
+pub fn routes_with_limits(root: &Path, files: &[String]) -> (Vec<(String, String)>, ScanLimits) {
+    let mut limits = ScanLimits {
+        files_seen: files.len(),
+        ..ScanLimits::default()
+    };
+    let mut out = Vec::new();
+    for e in crate::frameworks::endpoints(files, root) {
+        out.push((format!("{} {}", e.method, e.path), e.handler));
+    }
+    for f in files {
+        let p = root.join(f);
+        match std::fs::metadata(&p) {
+            Ok(m) if m.len() as usize > 256 * 1024 => limits.files_too_large += 1,
+            Ok(_) => {}
+            Err(_) => limits.unreadable += 1,
+        }
+    }
+    (out, limits)
 }
 
 /// Where two independently computed signals cannot both be true.
@@ -319,13 +477,25 @@ pub fn contradictions(
 ///
 /// A clean result is only clean where a rule exists. This says where it is not,
 /// which is the difference between "nothing to fix" and "nothing was looked for".
+/// Whether any taint rule can fire on a language.
+///
+/// This asked only about the strict SSRF and NoSQL tables, which is how a
+/// language with SQL and shell rules but no strict rows read as uncovered, and
+/// how Rust read as uncovered even with rows in front of it. The test is the
+/// same one the coverage receipt uses: a source row or a sink row in any table.
+pub fn lang_has_taint(lang: &str) -> bool {
+    crate::taint::SOURCES.iter().any(|(l, _)| *l == lang)
+        || crate::taint::SINKS.iter().any(|(l, _, _)| *l == lang)
+        || crate::taint::strict_sinks(lang).next().is_some()
+}
+
 pub fn coverage_gaps(graph: &CodeGraph, guards_ran: usize) -> Vec<Insight> {
     let mut out = Vec::new();
     let mut by_lang: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
     for f in &graph.files {
         let e = by_lang.entry(f.lang.as_str()).or_insert((0, 0));
         e.0 += 1;
-        if crate::taint::strict_sinks(&f.lang).next().is_some() {
+        if lang_has_taint(&f.lang) {
             e.1 += 1;
         }
     }
@@ -351,7 +521,7 @@ pub fn coverage_gaps(graph: &CodeGraph, guards_ran: usize) -> Vec<Insight> {
         .map(|f| f.lang.as_str())
         .collect();
     for lang in no_grammar {
-        if crate::taint::strict_sinks(lang).next().is_none() {
+        if !lang_has_taint(lang) {
             continue;
         }
         out.push(Insight::new(
@@ -468,6 +638,84 @@ pub fn new_keys(
 mod tests {
     use super::*;
 
+    /// A scratch directory under the OS temp dir, named per test so parallel
+    /// tests cannot tread on each other.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("heides-gap-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    /// A disclosure that names files heides actually read is worse than no
+    /// disclosure: it teaches a caller to ignore the line that exists to make
+    /// it trust the tool. These pin both directions on one workspace, because
+    /// the two bugs found while building this were "always silent" and
+    /// "always reports", and neither shows up in a happy-path test.
+    #[test]
+    fn disclosure_names_only_files_that_were_not_read() {
+        let d = scratch("gap");
+        std::fs::create_dir_all(d.join("src/deep")).unwrap();
+        std::fs::write(d.join("src/nested.py"), "def f():\n    return 1\n").unwrap();
+        std::fs::write(d.join("src/deep/inner.rb"), "def g\nend\n").unwrap();
+        std::fs::write(d.join("main.tf"), "resource \"a\" \"b\" {}\n").unwrap();
+        std::fs::write(d.join("deploy.yaml"), "a: 1\n").unwrap();
+        std::fs::write(d.join("run.sh"), "echo hi\n").unwrap();
+        let root = d.canonicalize().unwrap();
+        let graph = crate::indexer::build_graph(&root).0;
+        let indexed: std::collections::BTreeSet<String> =
+            graph.files.iter().map(|f| f.path.clone()).collect();
+
+        // The nested files are the point: re-deriving the scan root while
+        // recursing keys them by bare filename and reports them as unread.
+        assert!(
+            indexed.contains("src/nested.py"),
+            "fixture must actually index the nested file, got {indexed:?}"
+        );
+
+        let (n, by_ext, samples) = skipped_files(&root, &indexed);
+        assert_eq!(n, 3, "only the three files with no grammar may be skipped");
+        assert_eq!(
+            by_ext,
+            vec![
+                (".sh".to_string(), 1),
+                (".tf".to_string(), 1),
+                (".yaml".to_string(), 1)
+            ],
+            "gap extensions must be counted exactly, sorted"
+        );
+        for name in ["main.tf", "deploy.yaml", "run.sh"] {
+            assert!(
+                samples.iter().any(|s| s == name),
+                "sample set must include {name}, got {samples:?}"
+            );
+        }
+
+        let notice = skipped_notice(n, &by_ext, &samples);
+        assert!(notice.contains("3 file(s)"));
+        assert!(notice.contains("A clean verdict covers only the files above."));
+        assert!(
+            !notice.contains("nested.py") && !notice.contains("inner.rb"),
+            "indexed files must never appear in the gap notice: {notice}"
+        );
+    }
+
+    /// Nothing skipped means nothing said. A tool that chatters about its own
+    /// limits on every clean run trains people to skip the line.
+    #[test]
+    fn disclosure_is_silent_when_nothing_was_skipped() {
+        let d = scratch("nogap");
+        std::fs::write(d.join("a.py"), "x = 1\n").unwrap();
+        std::fs::write(d.join("b.go"), "package main\nfunc main() {}\n").unwrap();
+        let root = d.canonicalize().unwrap();
+        let graph = crate::indexer::build_graph(&root).0;
+        let indexed: std::collections::BTreeSet<String> =
+            graph.files.iter().map(|f| f.path.clone()).collect();
+        let (n, by_ext, samples) = skipped_files(&root, &indexed);
+        assert_eq!(n, 0, "nothing should be skipped, by_ext={by_ext:?}");
+        assert!(skipped_notice(n, &by_ext, &samples).is_empty());
+    }
+
     #[test]
     fn a_test_path_is_recognised_whatever_the_layout() {
         for p in [
@@ -563,5 +811,70 @@ mod tests {
             "a test calls it, so the gap must not be claimed: {:?}",
             tested.untested_callers
         );
+    }
+
+    /// The contradiction is only worth having if it can fire. A Rails route
+    /// pointing at a controller action no file defines is the case: the route
+    /// table names it, so it is missing on purpose rather than by accident.
+    #[test]
+    fn a_route_naming_a_handler_nothing_defines_is_reported() {
+        let mut g = CodeGraph::new();
+        g.symbols.push(crate::spine::Symbol {
+            name: "other".into(),
+            kind: "function_item".into(),
+            file: "app/controllers/users_controller.rb".into(),
+            line: 1,
+            lang: "ruby".into(),
+            signature: String::new(),
+            params: Vec::new(),
+            doc: String::new(),
+        });
+        let routes = vec![(
+            "GET /users".to_string(),
+            "index".to_string(),
+            "config/routes.rb".to_string(),
+            1u64,
+        )];
+        let found = contradictions(&g, &routes, &BTreeSet::new());
+        assert!(
+            found.iter().any(|i| i.kind == "route.handler_missing"),
+            "a route naming an undefined handler must be reported, got {found:?}"
+        );
+    }
+
+    #[test]
+    fn a_route_whose_handler_exists_is_not_reported() {
+        let mut g = CodeGraph::new();
+        g.symbols.push(crate::spine::Symbol {
+            name: "index".into(),
+            kind: "function_item".into(),
+            file: "app/controllers/users_controller.rb".into(),
+            line: 4,
+            lang: "ruby".into(),
+            signature: String::new(),
+            params: Vec::new(),
+            doc: String::new(),
+        });
+        let routes = vec![(
+            "GET /users".to_string(),
+            "index".to_string(),
+            "config/routes.rb".to_string(),
+            1u64,
+        )];
+        let found = contradictions(&g, &routes, &BTreeSet::new());
+        assert!(
+            !found.iter().any(|i| i.kind == "route.handler_missing"),
+            "a resolvable handler must not be reported, got {found:?}"
+        );
+    }
+
+    #[test]
+    fn scan_limits_report_what_they_dropped() {
+        let mut l = ScanLimits::default();
+        assert!(!l.dropped(), "nothing dropped yet");
+        l.files_seen = 12;
+        l.files_over_cap = 3;
+        assert!(l.dropped());
+        assert!(l.summary().contains("dropped 3"), "{}", l.summary());
     }
 }
