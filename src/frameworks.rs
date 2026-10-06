@@ -297,7 +297,8 @@ mod tests {
 
     #[test]
     fn actix_resource_then_route_finds_path_and_handler() {
-        let src = "App::new().service(web::resource(\"/users\").route(web::get().to(list_users)));\n";
+        let src =
+            "App::new().service(web::resource(\"/users\").route(web::get().to(list_users)));\n";
         assert_eq!(
             routes(src),
             vec![("GET".into(), "/users".into(), "list_users".into())]
@@ -890,8 +891,8 @@ fn rust_handler(part: &str) -> Option<String> {
             i += 1;
         }
         let ident = &part[start..i];
-        let boundary_ok = start == 0
-            || !(bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
+        let boundary_ok =
+            start == 0 || !(bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
         let prev = part[..start].trim_end();
         let in_argument = prev.is_empty() || prev.ends_with('(') || prev.ends_with(',');
         let next = part[i..].trim_start();
@@ -921,8 +922,8 @@ fn rust_route_pairs(part: &str) -> Vec<(String, String)> {
         if verbs.is_empty() {
             continue;
         }
-        let handler = rust_handler(segment)
-            .or_else(|| segments.get(idx + 1).and_then(|s| rust_handler(s)));
+        let handler =
+            rust_handler(segment).or_else(|| segments.get(idx + 1).and_then(|s| rust_handler(s)));
         let Some(handler) = handler else {
             continue;
         };
@@ -947,34 +948,32 @@ fn scan_rust_endpoints(body: &str, file: &str, out: &mut Vec<Endpoint>) {
         let lineno = (i + 1) as u64;
 
         // Rocket: #[get("/path")] on the attribute, the handler on the fn below.
-        if trimmed.starts_with("#[") {
-            if let Some((_, verb)) = RUST_VERBS
+        if trimmed.starts_with("#[")
+            && let Some((_, verb)) = RUST_VERBS
                 .iter()
                 .find(|(v, _)| trimmed.starts_with(&format!("#[{v}(")))
+        {
+            let after_paren = trimmed.split_once('(').map(|(_, rest)| rest).unwrap_or("");
+            if let Some(path) = rust_path_literal(after_paren)
+                && let Some(handler) = rust_fn_below(&lines, i + 1)
             {
-                let after_paren = trimmed.split_once('(').map(|(_, rest)| rest).unwrap_or("");
-                if let Some(path) = rust_path_literal(after_paren) {
-                    if let Some(handler) = rust_fn_below(&lines, i + 1) {
-                        out.push(Endpoint {
-                            method: verb.to_string(),
-                            path: normalize_route_path(&path),
-                            handler,
-                            file: file.to_string(),
-                            line: lineno,
-                        });
-                    }
-                }
-                continue;
+                out.push(Endpoint {
+                    method: verb.to_string(),
+                    path: normalize_route_path(&path),
+                    handler,
+                    file: file.to_string(),
+                    line: lineno,
+                });
             }
+            continue;
         }
 
         // actix-web: web::resource("/users").route(web::get().to(list_users))
         if let Some(inner) = rust_call_args(trimmed, "web::resource(")
             .or_else(|| rust_call_args(trimmed, "resource("))
+            && let Some(p) = rust_path_literal(&inner)
         {
-            if let Some(p) = rust_path_literal(&inner) {
-                resource_path = Some(normalize_route_path(&p));
-            }
+            resource_path = Some(normalize_route_path(&p));
         }
 
         for marker in [".route(", ".service("] {
@@ -985,20 +984,19 @@ fn scan_rust_endpoints(body: &str, file: &str, out: &mut Vec<Endpoint>) {
             // route one level down. Reading the outer call as well reports the
             // same endpoint twice, once from the resource and once from the
             // service that wraps it.
-            if marker == ".service(" && (inner.contains("web::resource(") || inner.contains(".route("))
+            if marker == ".service("
+                && (inner.contains("web::resource(") || inner.contains(".route("))
             {
                 continue;
             }
             let parts = split_top_level(&inner);
             let mut path = resource_path.clone();
             let mut verb_args: &[String] = &parts;
-            if let Some(first) = parts.first() {
-                if rust_path_literal(first).is_some() {
-                    if let Some(p) = rust_path_literal(first) {
-                        path = Some(normalize_route_path(&p));
-                    }
-                    verb_args = &parts[1..];
-                }
+            if let Some(first) = parts.first()
+                && let Some(p) = rust_path_literal(first)
+            {
+                path = Some(normalize_route_path(&p));
+                verb_args = &parts[1..];
             }
             let Some(path) = path else {
                 continue;

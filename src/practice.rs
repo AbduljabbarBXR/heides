@@ -1122,8 +1122,16 @@ mod tests {
         );
         let lines: Vec<&str> = src.lines().collect();
         assert_eq!(body_length(&lines, 0, "rust"), 6, "sql() body is 6 lines");
-        assert_eq!(body_length(&lines, 6, "rust"), 3, "next_one() body is 3 lines");
-        assert_eq!(body_length(&lines, 9, "rust"), 1, "next_two() body is 1 line");
+        assert_eq!(
+            body_length(&lines, 6, "rust"),
+            3,
+            "next_one() body is 3 lines"
+        );
+        assert_eq!(
+            body_length(&lines, 9, "rust"),
+            1,
+            "next_two() body is 1 line"
+        );
     }
 
     #[test]

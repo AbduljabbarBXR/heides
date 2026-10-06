@@ -1196,8 +1196,16 @@ mod budget_tests {
             "}\n",
         );
         let lines: Vec<&str> = src.lines().collect();
-        assert_eq!(body_range(&lines, "rust", 1), (0, 7), "parse closes on line 8");
-        assert_eq!(body_range(&lines, "rust", 9), (8, 10), "after closes on line 11");
+        assert_eq!(
+            body_range(&lines, "rust", 1),
+            (0, 7),
+            "parse closes on line 8"
+        );
+        assert_eq!(
+            body_range(&lines, "rust", 9),
+            (8, 10),
+            "after closes on line 11"
+        );
     }
 
     #[test]
@@ -1211,8 +1219,16 @@ mod budget_tests {
             "}\n",
         );
         let lines: Vec<&str> = src.lines().collect();
-        assert_eq!(body_range(&lines, "rust", 1), (0, 2), "pick closes on line 3");
-        assert_eq!(body_range(&lines, "rust", 4), (3, 5), "later closes on line 6");
+        assert_eq!(
+            body_range(&lines, "rust", 1),
+            (0, 2),
+            "pick closes on line 3"
+        );
+        assert_eq!(
+            body_range(&lines, "rust", 4),
+            (3, 5),
+            "later closes on line 6"
+        );
     }
 
     #[test]
@@ -1227,7 +1243,15 @@ mod budget_tests {
             "}\n",
         );
         let lines: Vec<&str> = src.lines().collect();
-        assert_eq!(body_range(&lines, "rust", 1), (0, 3), "brace closes on line 4");
-        assert_eq!(body_range(&lines, "rust", 5), (4, 6), "later closes on line 7");
+        assert_eq!(
+            body_range(&lines, "rust", 1),
+            (0, 3),
+            "brace closes on line 4"
+        );
+        assert_eq!(
+            body_range(&lines, "rust", 5),
+            (4, 6),
+            "later closes on line 7"
+        );
     }
 }
