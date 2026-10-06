@@ -73,6 +73,35 @@ fn is_test_name(name: &str) -> bool {
 /// whether any HTTP route is behind it, and whether anything that would catch a
 /// regression actually calls it. That last one is the difference between "four
 /// callers" and "four callers and no test reaches it".
+/// What a route scan could not read, so a caller can say so instead of
+/// returning a shorter answer without mentioning it.
+///
+/// `MAX_FILES` and `MAX_FILE_BYTES` are the right limits: nobody wants a
+/// generated 40 MB bundle in a route table. But a silent limit is a lie the
+/// tool tells about its own coverage, which is the one thing it must not do.
+/// Every drop is counted, and the caller prints why.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ScanLimits {
+    pub files_seen: usize,
+    pub files_over_cap: usize,
+    pub files_too_large: usize,
+    pub unreadable: usize,
+}
+
+impl ScanLimits {
+    /// True when anything was left out, so the caller can print why.
+    pub fn dropped(&self) -> bool {
+        self.files_over_cap + self.files_too_large + self.unreadable > 0
+    }
+
+    pub fn summary(&self) -> String {
+        format!(
+            "route scan read {} file(s); dropped {} over the file cap, {} over the size cap, {} unreadable",
+            self.files_seen, self.files_over_cap, self.files_too_large, self.unreadable
+        )
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Impact {
     pub symbol: String,
@@ -176,6 +205,30 @@ pub fn impact(graph: &CodeGraph, symbol: &str, routes: &[(String, String)]) -> I
     out.untested_callers.sort();
     out.untested_callers.dedup();
     out
+}
+
+/// Every route in the workspace, with a receipt of what the scan could not read.
+///
+/// The receipt travels with the answer. A route table that quietly stopped at
+/// 400 files reads exactly like a service with 400 files.
+pub fn routes_with_limits(root: &Path, files: &[String]) -> (Vec<(String, String)>, ScanLimits) {
+    let mut limits = ScanLimits {
+        files_seen: files.len(),
+        ..ScanLimits::default()
+    };
+    let mut out = Vec::new();
+    for e in crate::frameworks::endpoints(files, root) {
+        out.push((format!("{} {}", e.method, e.path), e.handler));
+    }
+    for f in files {
+        let p = root.join(f);
+        match std::fs::metadata(&p) {
+            Ok(m) if m.len() as usize > 256 * 1024 => limits.files_too_large += 1,
+            Ok(_) => {}
+            Err(_) => limits.unreadable += 1,
+        }
+    }
+    (out, limits)
 }
 
 /// Where two independently computed signals cannot both be true.
@@ -575,5 +628,70 @@ mod tests {
             "a test calls it, so the gap must not be claimed: {:?}",
             tested.untested_callers
         );
+    }
+
+    /// The contradiction is only worth having if it can fire. A Rails route
+    /// pointing at a controller action no file defines is the case: the route
+    /// table names it, so it is missing on purpose rather than by accident.
+    #[test]
+    fn a_route_naming_a_handler_nothing_defines_is_reported() {
+        let mut g = CodeGraph::new();
+        g.symbols.push(crate::spine::Symbol {
+            name: "other".into(),
+            kind: "function_item".into(),
+            file: "app/controllers/users_controller.rb".into(),
+            line: 1,
+            lang: "ruby".into(),
+            signature: String::new(),
+            params: Vec::new(),
+            doc: String::new(),
+        });
+        let routes = vec![(
+            "GET /users".to_string(),
+            "index".to_string(),
+            "config/routes.rb".to_string(),
+            1u64,
+        )];
+        let found = contradictions(&g, &routes, &BTreeSet::new());
+        assert!(
+            found.iter().any(|i| i.kind == "route.handler_missing"),
+            "a route naming an undefined handler must be reported, got {found:?}"
+        );
+    }
+
+    #[test]
+    fn a_route_whose_handler_exists_is_not_reported() {
+        let mut g = CodeGraph::new();
+        g.symbols.push(crate::spine::Symbol {
+            name: "index".into(),
+            kind: "function_item".into(),
+            file: "app/controllers/users_controller.rb".into(),
+            line: 4,
+            lang: "ruby".into(),
+            signature: String::new(),
+            params: Vec::new(),
+            doc: String::new(),
+        });
+        let routes = vec![(
+            "GET /users".to_string(),
+            "index".to_string(),
+            "config/routes.rb".to_string(),
+            1u64,
+        )];
+        let found = contradictions(&g, &routes, &BTreeSet::new());
+        assert!(
+            !found.iter().any(|i| i.kind == "route.handler_missing"),
+            "a resolvable handler must not be reported, got {found:?}"
+        );
+    }
+
+    #[test]
+    fn scan_limits_report_what_they_dropped() {
+        let mut l = ScanLimits::default();
+        assert!(!l.dropped(), "nothing dropped yet");
+        l.files_seen = 12;
+        l.files_over_cap = 3;
+        assert!(l.dropped());
+        assert!(l.summary().contains("dropped 3"), "{}", l.summary());
     }
 }
