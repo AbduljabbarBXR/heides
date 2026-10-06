@@ -377,6 +377,37 @@ Two flags keep a result from becoming the thing that ends the conversation:
   lands on a line boundary and reports what was dropped, so a capped result is
   never mistaken for a complete one.
 
+### `insight`
+
+Where heides disagrees with itself, and what a change would reach.
+
+```sh
+heides insight contradictions   # signals that cannot both be true
+heides insight impact <symbol>  # what editing this could reach
+heides insight coverage         # where no rule can fire at all
+heides insight baseline save    # record today's findings as known
+heides insight baseline         # what is new since that baseline
+```
+
+`contradictions` compares signals computed independently, so a disagreement is
+evidence rather than a guess: a route whose handler no definition matches, a
+handler the dead root check also calls unreachable, the most called function in a
+well documented file carrying no comment, a file nothing reaches and nothing
+calls out of.
+
+`impact` answers the question an agent asks before every edit. It reports the
+transitive caller count, the files that move with the change, the routes behind
+it, and whether any test reaches it, because "four callers" and "four callers and
+no test reaches it" are different answers.
+
+`coverage` says where a clean verdict means nothing. `rust: 44 file(s) indexed, no
+taint rule can fire on any of them` is a different statement from clean, and only
+one of the two is worth acting on.
+
+`baseline` turns a wall of findings into a delta. A finding that is new matters
+more than one that has always been there, and a finding key ignores its line
+number so a file that only moved down does not fill the baseline with noise.
+
 ## The receipt
 
 Every `check` ends by saying what it actually looked at, on clean runs too:

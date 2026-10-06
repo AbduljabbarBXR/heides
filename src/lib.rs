@@ -12,6 +12,7 @@ pub mod frameworks;
 pub mod grounding;
 pub mod harmony;
 pub mod indexer;
+pub mod insight;
 pub mod interproc;
 pub mod parser;
 pub mod practice;
