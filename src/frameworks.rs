@@ -478,9 +478,24 @@ fn script_handler(after: &str) -> String {
 fn minimal_api_endpoints(lines: &[&str], file: &str, out: &mut Vec<Endpoint>) {
     for (i, line) in lines.iter().enumerate() {
         let t = line.trim();
-        for (_lowercase, upper) in RUST_VERBS {
-            let needle = format!("Map{upper}(");
-            let Some(at) = t.find(&needle) else { continue };
+        // The method name is spelled as written in C#, `MapGet(`, not the
+        // uppercase verb. Formatting from the verb produced `MapGET(` and
+        // matched nothing.
+        const METHODS: [&str; 7] = [
+            "MapGet(",
+            "MapPost(",
+            "MapPut(",
+            "MapDelete(",
+            "MapPatch(",
+            "MapHead(",
+            "MapOptions(",
+        ];
+        for needle in METHODS {
+            let upper = needle
+                .trim_start_matches("Map")
+                .trim_end_matches('(')
+                .to_ascii_uppercase();
+            let Some(at) = t.find(needle) else { continue };
             let rest = &t[at + needle.len()..];
             let Some(path) = quoted_path(rest) else {
                 continue;
@@ -509,7 +524,17 @@ fn scan_managed_endpoints(body: &str, file: &str, out: &mut Vec<Endpoint>) {
             scan_attr_endpoints(&lines, file, out);
             minimal_api_endpoints(&lines, file, out);
         }
-        "java" | "php" => scan_attr_endpoints(&lines, file, out),
+        "java" => scan_attr_endpoints(&lines, file, out),
+        // PHP carries two route dialects and needs both readers. Symfony writes
+        // `#[Route("/x", methods: ["GET"])]` above the method, Laravel writes
+        // the fluent `Route::get('/x', [C::class, 'index'])`. Routing PHP to the
+        // attribute reader alone, as this did, meant every Laravel route was
+        // invisible and the language looked covered because Symfony was in the
+        // same branch.
+        "php" => {
+            scan_attr_endpoints(&lines, file, out);
+            script_endpoints(&lines, file, out);
+        }
         "ruby" => script_endpoints(&lines, file, out),
         _ => {}
     }
@@ -647,6 +672,85 @@ mod tests {
                 ("ANY".into(), "/y".into(), "fallback".into()),
             ]
         );
+    }
+
+    fn managed(body: &str, file: &str) -> Vec<(String, String, String)> {
+        let mut out = Vec::new();
+        scan_managed_endpoints(body, file, &mut out);
+        out.iter()
+            .map(|e| (e.method.clone(), e.path.clone(), e.handler.clone()))
+            .collect()
+    }
+
+    /// These four languages had no route reader at all, so a route to table,
+    /// auth risk and taint from a request were all empty for them.
+    #[test]
+    fn spring_attribute_routes_are_read() {
+        let src = "class C {\n  @GetMapping(\"/api/users\")\n  public List<User> list() { return null; }\n}\n";
+        assert_eq!(
+            managed(src, "UserController.java"),
+            vec![("GET".into(), "/api/users".into(), "list".into())]
+        );
+    }
+
+    /// ASP.NET spells the verb `HttpGet`, not `GET`, and the method name sits
+    /// after the return type. Both mistakes made this read as nothing.
+    #[test]
+    fn aspnet_attribute_routes_are_read() {
+        let src = "[HttpGet(\"/api/users\")]\npublic IActionResult ListUsers() => Ok();\n";
+        assert_eq!(
+            managed(src, "Api.cs"),
+            vec![("GET".into(), "/api/users".into(), "ListUsers".into())]
+        );
+    }
+
+    #[test]
+    fn aspnet_minimal_api_routes_are_read() {
+        let src = "app.MapGet(\"/health\", () => \"ok\");\n";
+        let got = managed(src, "Program.cs");
+        assert_eq!(got[0].0, "GET");
+        assert_eq!(got[0].1, "/health");
+    }
+
+    /// Rails writes `get 'x'`, Laravel writes `Route::get('x'`. A needle of
+    /// `get ` matched the first and silently missed every one of the second.
+    #[test]
+    fn rails_and_laravel_routes_are_both_read() {
+        assert_eq!(
+            managed("  get '/users' => 'users#index'\n", "web.rb"),
+            vec![("GET".into(), "/users".into(), "index".into())]
+        );
+        assert_eq!(
+            managed(
+                "<?php\nRoute::get('/users', [UserController::class, 'index']);\n",
+                "routes.php"
+            ),
+            vec![("GET".into(), "/users".into(), "index".into())]
+        );
+    }
+
+    /// PHP carries two dialects. Reading only the attribute one meant every
+    /// Laravel route was invisible while the language still looked covered.
+    #[test]
+    fn php_reads_both_dialects() {
+        let symfony = "#[Route(\"/x\", methods: [\"GET\"])]\npublic function index() {}\n";
+        assert_eq!(
+            managed(symfony, "A.php"),
+            vec![("GET".into(), "/x".into(), "index".into())]
+        );
+        let laravel = "<?php\nRoute::post('/users', [UserController::class, 'store']);\n";
+        assert_eq!(
+            managed(laravel, "routes.php"),
+            vec![("POST".into(), "/users".into(), "store".into())]
+        );
+    }
+
+    /// An unnamed handler stays unnamed. Borrowing a neighbour's symbol is how
+    /// the dead root check used to call a route handler unreachable.
+    #[test]
+    fn an_unnamed_route_handler_is_not_invented() {
+        let got = managed("app.MapGet(\"/x\", () => \"ok\");\n", "Program.cs");
+        assert_eq!(got[0].2, "", "a lambda has no name to report");
     }
 
     #[test]
