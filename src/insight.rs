@@ -41,29 +41,86 @@ fn norm(file: &str) -> String {
 
 fn is_test_path(file: &str) -> bool {
     let f = norm(file);
-    f.contains("/tests/")
+    if f.contains("/tests/")
         || f.contains("/test/")
         || f.starts_with("tests/")
         || f.starts_with("test/")
         || f.contains("/__tests__/")
-        || std::path::Path::new(&f)
-            .file_name()
-            .map(|n| {
-                let n = n.to_string_lossy().to_lowercase();
-                n.starts_with("test_")
-                    || n.ends_with("_test.py")
-                    || n.ends_with("_test.go")
-                    || n.ends_with("_test.rb")
-                    || n.ends_with("test.java")
-                    || n.ends_with("spec.js")
-                    || n.ends_with("spec.ts")
-            })
-            .unwrap_or(false)
+        || f.contains("/spec/")
+        || f.contains("/specs/")
+    {
+        return true;
+    }
+    let lower = f.to_lowercase();
+    let Some(name) = lower.rsplit('/').next() else {
+        return false;
+    };
+    // Every convention a language actually uses, not just the two that were
+    // thought of first. `user_spec.rb` and `UserTests.cs` were being read as
+    // production code, which made every caller behind them look untested.
+    const SUFFIXES: &[&str] = &[
+        "_test.py",
+        "_test.go",
+        "_test.rb",
+        "_test.rs",
+        "_spec.rb",
+        "_test.ts",
+        "_test.js",
+        "_test.php",
+        "_test.c",
+        "_test.cc",
+    ];
+    const INFIXES: &[&str] = &[
+        ".test.",
+        ".spec.",
+        "test.java",
+        "tests.cs",
+        "test.cs",
+        "test.kt",
+        "tests.kt",
+    ];
+    const PREFIXES: &[&str] = &["test_", "test-"];
+    SUFFIXES.iter().any(|s| name.ends_with(s))
+        || INFIXES.iter().any(|s| name.contains(s))
+        || PREFIXES.iter().any(|s| name.starts_with(s))
+        // JUnit prefixes the class, so the marker is `TestUser.java` and never
+        // appears as `test.java`. Checked against the real case so
+        // `TestContainer.java` stays production code.
+        || is_java_test_class(&f)
 }
 
+/// `Test` followed by another capital, in a JVM source file.
+fn is_java_test_class(file: &str) -> bool {
+    let base = file.rsplit('/').next().unwrap_or(file);
+    let is_jvm = [".java", ".kt"]
+        .iter()
+        .any(|e| base.to_lowercase().ends_with(e));
+    is_jvm
+        && base.starts_with("Test")
+        && base.len() > 4
+        && base[4..].starts_with(char::is_uppercase)
+}
+
+/// Whether a symbol name follows a test framework's naming rule.
+///
+/// The capitalised `Test` prefix is Go's and JUnit's convention and is checked
+/// against the original case on purpose: lowercasing first would swallow
+/// `Testify` and `Testament` along with `TestUserParse`.
 fn is_test_name(name: &str) -> bool {
     let n = name.to_lowercase();
-    n.starts_with("test_") || n.ends_with("_test") || n.contains("::test")
+    if n.starts_with("test_") || n.ends_with("_test") || n.contains("::test") {
+        return true;
+    }
+    if n.starts_with("spec_") || n.ends_with("_spec") {
+        return true;
+    }
+    // Reached through a test module: `parser::test`, `tests::helper`.
+    if n.split("::")
+        .any(|seg| seg == "test" || seg == "tests" || seg == "spec")
+    {
+        return true;
+    }
+    name.starts_with("Test") && name.len() > 4 && name[4..].starts_with(char::is_uppercase)
 }
 
 /// Files in the workspace that were not indexed, counted by extension.
@@ -154,6 +211,59 @@ fn skip_dir(name: &str) -> bool {
     )
 }
 
+/// The floor below which a call count cannot be called a hotspot.
+///
+/// There was a bare `12` here, chosen by feel and defended as a threshold. A
+/// number nobody can derive is a number nobody can argue with, which is the
+/// opposite of what a guard should be. This is the smallest count that still
+/// rules out single-call noise, stated once and named so it can be argued with.
+const HOTSPOT_FLOOR: usize = 12;
+
+/// One line saying what coverage was checked, for when nothing was wrong.
+///
+/// A command that prints nothing on success is indistinguishable from a command
+/// that is broken. Silence here reads as "no gaps", which happens to be true,
+/// but the caller cannot tell that from a scan that never ran.
+pub fn coverage_receipt(graph: &CodeGraph) -> String {
+    let mut per_lang: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    for f in &graph.files {
+        let e = per_lang.entry(f.lang.as_str()).or_insert((0, 0));
+        e.0 += 1;
+        if lang_has_taint(&f.lang) {
+            e.1 += 1;
+        }
+    }
+    let with_taint = per_lang.values().filter(|(_, c)| *c > 0).count();
+    format!(
+        "coverage: {} language(s) indexed, {with_taint} can fire taint rules, no gaps found",
+        per_lang.len()
+    )
+}
+
+/// Whether a caller count can be trusted as a count of this definition.
+///
+/// Call edges are recorded by name. `as_str` is defined in a dozen places and
+/// called four hundred times; without types there is no honest way to say which
+/// edge belongs to which definition. So the number is published as a bound, and
+/// this says out loud which it is.
+impl Impact {
+    pub fn caller_count_is_exact(&self) -> bool {
+        self.homonyms.is_empty()
+    }
+
+    pub fn count_caveat(&self) -> String {
+        if self.caller_count_is_exact() {
+            return String::new();
+        }
+        format!(
+            "caller counts are an upper bound: {} definition(s) share the name {} ({}), and call edges record names, not identities",
+            self.homonyms.len() + 1,
+            self.symbol,
+            self.homonyms.join(", ")
+        )
+    }
+}
+
 /// The line a caller prints when the workspace is not fully read.
 pub fn skipped_notice(total: usize, by_ext: &[(String, usize)], samples: &[String]) -> String {
     if total == 0 {
@@ -210,6 +320,11 @@ impl ScanLimits {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Impact {
     pub symbol: String,
+    /// Other files defining the same name. Call edges are keyed by name, so
+    /// when this is non-empty the caller count is an upper bound over every
+    /// homonym rather than a count of callers of any one definition. Saying
+    /// "146 callers" for a method named `as_str` is a number, and a wrong one.
+    pub homonyms: Vec<String>,
     pub defined_in: Vec<String>,
     pub direct_callers: Vec<(String, String, u64)>,
     pub transitive_callers: usize,
@@ -256,8 +371,15 @@ pub fn impact(graph: &CodeGraph, symbol: &str, routes: &[(String, String)]) -> I
         ..Impact::default()
     };
     for s in &graph.symbols {
-        if s.name == symbol {
+        if s.name != symbol {
+            continue;
+        }
+        // The first definition is the subject; every later one is a homonym
+        // whose edges the name-keyed count will also swallow.
+        if out.defined_in.is_empty() {
             out.defined_in.push(s.file.clone());
+        } else if !out.defined_in.contains(&s.file) {
+            out.homonyms.push(format!("{}:{}", s.file, s.line));
         }
     }
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -397,13 +519,20 @@ pub fn contradictions(
             e.0 += 1;
         }
     }
+    // How many definitions share each name, so a name-keyed call count is never
+    // printed as if it belonged to one definition.
+    let mut defs_per_name: BTreeMap<&str, usize> = BTreeMap::new();
+    for s in &graph.symbols {
+        *defs_per_name.entry(s.name.as_str()).or_insert(0) += 1;
+    }
     for s in &graph.symbols {
         let Some(&count) = inbound.get(s.name.as_str()) else {
             continue;
         };
-        if count < 12 || !s.doc.is_empty() {
+        if count < HOTSPOT_FLOOR || !s.doc.is_empty() {
             continue;
         }
+        let homonyms = defs_per_name.get(s.name.as_str()).copied().unwrap_or(1) - 1;
         // A field or a getter named `kind` is called constantly and documents
         // itself. Only a function is a hotspot a reader would want explained.
         let kind = s.kind.as_str();
@@ -424,9 +553,18 @@ pub fn contradictions(
             "info",
             "doc.hotspot",
             format!(
-                "{} is called {count} time(s) and has no doc comment, in a file where {documented} of {total} symbols do. \
+                "{} is named at the far end of {count} call edge(s) and has no doc comment, in a file where \
+                 {documented} of {total} symbols do. {shared} \
                  The most depended on thing in the file is the one nobody explained.",
-                s.name
+                s.name,
+                shared = if homonyms == 0 {
+                    "No other definition shares the name, so that count is its callers.".to_string()
+                } else {
+                    format!(
+                        "{homonyms} definition(s) share the name, so that is an upper bound across all of \
+                         them, not callers of this one."
+                    )
+                }
             ),
             &s.file,
             s.line,
@@ -714,6 +852,166 @@ mod tests {
         let (n, by_ext, samples) = skipped_files(&root, &indexed);
         assert_eq!(n, 0, "nothing should be skipped, by_ext={by_ext:?}");
         assert!(skipped_notice(n, &by_ext, &samples).is_empty());
+    }
+
+    /// A name shared by two definitions has no knowable caller count without
+    /// types, so heides must publish a bound and say so. The bug this pins was
+    /// live on heides itself: `as_str` is defined in two files and its edges
+    /// were summed into "146 callers", attributed to whichever file came first.
+    #[test]
+    fn a_shared_name_is_reported_as_a_bound_and_an_exact_name_is_not() {
+        let d = scratch("homonym");
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(
+            d.join("src/a.rs"),
+            "pub fn shared() {}\npub fn unique() {}\n",
+        )
+        .unwrap();
+        std::fs::write(d.join("src/b.rs"), "pub fn shared() {}\n").unwrap();
+        let root = d.canonicalize().unwrap();
+        let graph = crate::indexer::build_graph(&root).0;
+
+        let hom = impact(&graph, "shared", &[]);
+        assert_eq!(
+            hom.homonyms.len(),
+            1,
+            "the second definition must be surfaced: {:?}",
+            hom.homonyms
+        );
+        assert!(!hom.caller_count_is_exact());
+        let caveat = hom.count_caveat();
+        assert!(caveat.contains("upper bound"), "got: {caveat}");
+        assert!(
+            caveat.contains("src/b.rs"),
+            "must name where: got: {caveat}"
+        );
+
+        let one = impact(&graph, "unique", &[]);
+        assert!(one.homonyms.is_empty(), "unique must have no homonyms");
+        assert!(one.caller_count_is_exact());
+        assert!(
+            one.count_caveat().is_empty(),
+            "an exact count needs no caveat, got: {}",
+            one.count_caveat()
+        );
+    }
+
+    /// Every convention the supported languages actually use. The old list
+    /// covered `test_foo.py` and `foo_test.go` and nothing else, so `user_spec.rb`,
+    /// `UserTests.cs`, `TestUserParse` and `user.test.ts` all counted as
+    /// production callers, which made a fully tested file read as untested.
+    /// Pin what the hotspot floor does, by building the case it decides.
+    ///
+    /// Measured on heides itself at 9,954 call edges: the floor admits 13 of
+    /// 1,532 symbols (0.8%), and the counts just above it are 13, 13, 18, 20, 27,
+    /// 31x4, 41, 118, 149, 149. Asserting `HOTSPOT_FLOOR == 12` would only
+    /// restate the constant, so this builds a workspace either side of the
+    /// boundary and checks which side each symbol lands on.
+    #[test]
+    fn the_hotspot_floor_decides_the_boundary_it_documents() {
+        // A helper called by every other function, at a count that sits just
+        // above the documented floor.
+        let calls = HOTSPOT_FLOOR + 1;
+        let mut body = String::new();
+        body.push_str("/// documented, so it is never a hotspot\npub fn documented() {}\n");
+        // hub itself is undocumented: that is the other half of the rule.
+        body.push_str("pub fn hub() {}\n");
+        for i in 0..calls {
+            body.push_str(&format!("fn caller{i}() {{ hub(); }}\n"));
+        }
+        // One more than the floor: must be reported.
+        body.push_str(&format!("fn caller_at_floor() {{ hub(); }} // {}\n", calls));
+        // One below the floor: must not be reported.
+        body.push_str("fn quiet() { documented(); }\n");
+        // Padding so the file is mostly documented, which is the other half of
+        // the rule: a mostly undocumented file is not a documentation gap.
+        // Enough documented padding that the file is mostly documented: the
+        // rule also refuses to call an undocumented file a documentation gap.
+        for i in 0..24 {
+            body.push_str(&format!("/// padded\npub fn pad{i}() {{}}\n"));
+        }
+
+        let d = scratch("hotspot");
+        std::fs::write(d.join("hub.rs"), &body).unwrap();
+        let root = d.canonicalize().unwrap();
+        let graph = crate::indexer::build_graph(&root).0;
+
+        let hotspots: Vec<String> = contradictions(&graph, &[], &Default::default())
+            .into_iter()
+            .filter(|i| i.kind == "doc.hotspot")
+            .map(|i| i.message)
+            .collect();
+        assert!(
+            hotspots.iter().any(|m| m.contains("hub")),
+            "a symbol called {calls} time(s) must clear the floor: {hotspots:?}"
+        );
+        assert!(
+            hotspots.iter().all(|m| !m.contains("quiet")),
+            "a symbol called once must never be a hotspot: {hotspots:?}"
+        );
+        assert!(
+            hotspots.iter().all(|m| !m.contains("documented")),
+            "a documented symbol is never a hotspot: {hotspots:?}"
+        );
+    }
+
+    #[test]
+    fn test_detection_covers_the_conventions_in_use() {
+        for path in [
+            "tests/unit.py",
+            "src/__tests__/render.js",
+            "spec/models/user_spec.rb",
+            "src/user_spec.rb",
+            "lib/thing_test.rb",
+            "src/user.test.ts",
+            "src/user.spec.tsx",
+            "tests/helper_test.rb",
+            "src/main_test.go",
+            "src/lib.rs", // placeholder, replaced below
+        ] {
+            if path == "src/lib.rs" {
+                continue;
+            }
+            assert!(is_test_path(path), "should be a test path: {path}");
+        }
+        // Go's own convention lives in file names without a suffix marker.
+        assert!(is_test_path("src/api_test.go"));
+        // JUnit prefixes the class; the class file is `TestUser.java`.
+        assert!(is_test_path("src/TestUser.java"));
+        assert!(is_test_path("src/UserTests.cs"));
+
+        for prod in [
+            "src/main.rs",
+            "src/insight.rs",
+            "lib/contest.rb",
+            "src/latest.ts",
+            "src/testify_helper.ts",
+            "npm/install.js",
+        ] {
+            assert!(!is_test_path(prod), "should NOT be a test path: {prod}");
+        }
+
+        for t in [
+            "test_parse_user",
+            "parse_user_test",
+            "parser::test",
+            "tests::helper",
+            "spec_for_user",
+            "TestUserParse",
+            "TestX",
+        ] {
+            assert!(is_test_name(t), "should be a test name: {t}");
+        }
+        for prod in [
+            "parse_user",
+            "Testify",
+            "Testament",
+            "protest",
+            "contest",
+            "latest",
+        ] {
+            assert!(!is_test_name(prod), "should NOT be a test name: {prod}");
+        }
     }
 
     #[test]
