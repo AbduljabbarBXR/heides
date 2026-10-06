@@ -11,6 +11,22 @@ use std::sync::Mutex;
 
 static COLOR_OVERRIDE: Mutex<Option<bool>> = Mutex::new(None);
 static GROUPED_OVERRIDE: Mutex<bool> = Mutex::new(false);
+static BRIEF: Mutex<bool> = Mutex::new(false);
+
+/// Ask for the data an agent acts on and leave the commentary out.
+///
+/// `describe` carries a few sections that are written for a person reading a
+/// receipt: how each guard's corpus was measured, how much of the code carries
+/// a doc comment, and the list of undocumented symbols. None of it changes what
+/// an agent should do next, and all of it is context the caller pays for on
+/// every orientation call.
+pub fn set_brief(on: bool) {
+    *BRIEF.lock().unwrap() = on;
+}
+
+pub fn brief() -> bool {
+    *BRIEF.lock().unwrap()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ui {

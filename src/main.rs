@@ -32,9 +32,10 @@ fn cmd_takes_positional(cmd: &str) -> bool {
 fn cmd_accepts_flag(cmd: &str, flag: &str) -> bool {
     // Every command honours the presentation and gate flags, because they are
     // consumed before the command is even dispatched.
-    const COMMON: [&str; 6] = [
+    const COMMON: [&str; 7] = [
         "--all",
         "--no-advice",
+        "--brief",
         "--exit-zero",
         "--no-color",
         "--color=always",
@@ -192,6 +193,12 @@ fn main() -> ExitCode {
         // evidence and nothing else.
         if a == "--no-advice" {
             heides::harmony::set_hide_advice(true);
+            continue;
+        }
+        // Leave the commentary out of `describe` and keep the map. For an
+        // agent paying context for every orientation call.
+        if a == "--brief" {
+            heides::ui::set_brief(true);
             continue;
         }
         if !Ui::consume_flag(a) {
@@ -1378,11 +1385,17 @@ fn describe_workspace(graph: &spine::CodeGraph, root: &std::path::Path) {
 
     // Which guards have a real corpus behind them. Printed so that "measured"
     // is a claim the tool makes about itself and not a note in a commit message.
-    println!("rule measurement:");
-    for (guard, corpus) in MEASURED_RULES {
-        println!("  {guard} {}", corpus);
+    //
+    // Skipped by `--brief`. This is a receipt for a person deciding whether to
+    // trust the gate; an agent orienting in a repo is paying context for it on
+    // every call and cannot act on any of it.
+    if !heides::ui::brief() {
+        println!("rule measurement:");
+        for (guard, corpus) in MEASURED_RULES {
+            println!("  {guard} {}", corpus);
+        }
+        println!("  any other guard has no recorded corpus and is unmeasured");
     }
-    println!("  any other guard has no recorded corpus and is unmeasured");
 
     // Doc coverage per language. How many symbols in each language carry a
     // captured comment, so gaps in the eyes are visible and measurable.
@@ -1396,13 +1409,15 @@ fn describe_workspace(graph: &spine::CodeGraph, root: &std::path::Path) {
             .count();
         per_lang.push((lang, documented, total));
     }
-    for (lang, documented, total) in &per_lang {
-        let pct = if *total > 0 {
-            documented * 100 / total
-        } else {
-            0
-        };
-        println!("doc coverage {} {}/{} ({}%)", lang, documented, total, pct);
+    if !heides::ui::brief() {
+        for (lang, documented, total) in &per_lang {
+            let pct = if *total > 0 {
+                documented * 100 / total
+            } else {
+                0
+            };
+            println!("doc coverage {} {}/{} ({}%)", lang, documented, total, pct);
+        }
     }
     let mut undocumented: Vec<(&str, &str, usize, &str)> = Vec::new();
     for s in &graph.symbols {
@@ -1420,7 +1435,7 @@ fn describe_workspace(graph: &spine::CodeGraph, root: &std::path::Path) {
         ));
     }
     undocumented.sort_by(|a, b| a.1.cmp(b.1).then(a.2.cmp(&b.2)));
-    if !undocumented.is_empty() {
+    if !heides::ui::brief() && !undocumented.is_empty() {
         println!(
             "undocumented symbols, first {} of {}",
             15,

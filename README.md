@@ -350,6 +350,33 @@ folding never flatters the result.
 `--no-advice` drops the advisory section entirely, for a gate that wants evidence
 and nothing else.
 
+### What this costs an agent
+
+heides is built to be read by a model, so what a call returns is a budget, not
+just an answer. Measured on this repository:
+
+| Call | Bytes | Tokens |
+|---|---|---|
+| reading every Rust file once | 1,105,462 | 276,365 |
+| `describe` | 6,497 | 1,624 |
+| `describe --brief` | 5,116 | 1,279 |
+| `harmony.check` with advice (MCP) | 4,827 | 1,206 |
+| `harmony.check` default (MCP) | 718 | 179 |
+
+Orientation is 169x smaller than reading the source. Over MCP, `harmony.check`
+returns **evidence only** and `advice: true` asks the style opinion back, because
+an agent cannot act on it and a gate cannot fail on it. The CLI keeps the full
+receipt: a person at a terminal is reading the whole thing on purpose.
+
+Two flags keep a result from becoming the thing that ends the conversation:
+
+* `--brief` on `describe` drops rule measurement, doc coverage and the
+  undocumented symbol list: a receipt for a person judging the gate, not data an
+  agent acts on.
+* `max_bytes` on `harmony.check` trims the result to a budget you set. The cut
+  lands on a line boundary and reports what was dropped, so a capped result is
+  never mistaken for a complete one.
+
 ## The receipt
 
 Every `check` ends by saying what it actually looked at, on clean runs too:
