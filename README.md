@@ -138,15 +138,25 @@ Both halves have a regression test, so the shortcut cannot come back.
 ### Languages
 
 Taint and indexing are separate, and the table is honest about which is which.
+Every row below was measured against the released binary, not inferred from the
+grammar list.
 
 | Language | Indexed with symbols | Taint scanned |
 |---|---|---|
-| JavaScript, TypeScript, Python, PHP, Go, Java, C# | yes | yes |
-| Ruby | no grammar yet | yes |
+| JavaScript, TypeScript, TSX, Python, PHP, Go, Java, C# | yes | yes |
+| C, C++ | yes | no |
+| Ruby | yes | yes |
 | HTML, CSS | yes | no |
 | Rust | yes | no |
 
-TypeScript was silently unscanned for taint until 0.16.0: the parser mapped `.ts` to `typescript` and the rule tables had no `typescript` rows, so every TypeScript file was skipped without a word. Ruby could not taint at all until this release, for three separate reasons: no `rb` extension, no source row, and a block detector that understood braces but not `def` and `end`. Rust is indexed but not taint scanned, so a shell or SQL sink in Rust code is not reported.
+TypeScript was silently unscanned for taint until 0.16.0: the parser mapped `.ts` to `typescript` and the rule tables had no `typescript` rows, so every TypeScript file was skipped without a word. Ruby could not taint at all until this series, for three separate reasons: no `rb` extension, no source row, and a block detector that understood braces but not `def` and `end`. Rust is indexed but not taint scanned, so a shell or SQL sink in Rust code is not reported.
+
+`.tsx` is parsed with the TSX grammar rather than the plain TypeScript one. The
+two are not interchangeable: a JSX element opens node kinds that the plain
+grammar cannot name, and the walk stopped there, so a component file yielded
+fewer symbols than the same code with the `.ts` extension. C and C++ are
+indexed with symbols and call edges, and are not taint scanned: a `sprintf` into
+a fixed buffer feeding `system` produces nothing.
 
 
 ## The gate
@@ -309,7 +319,7 @@ Stated plainly, and tracked with citations and a resolution column in `ROADMAP.m
 * Path traversal beyond the filesystem write sinks, and no command injection rule for framework-specific shell APIs.
 * No open redirect, XXE, unsafe deserialization or crypto misuse rules.
 * A handful of ecosystems are not read for dependencies: Ruby, .NET, Swift, Gradle, Dart, and no transitive resolution from lockfiles.
-* Languages not indexed: C, C++, SQL, shell, Kotlin, Swift, Scala, Dart, Dockerfile. Ruby is taint scanned but has no grammar, so it contributes no symbols to the graph. Rust is indexed but not taint scanned.
+* Languages not indexed: SQL, shell, Kotlin, Swift, Scala, Dart, Dockerfile. C and C++ are indexed with symbols and call edges but carry no taint rows. Rust is indexed but not taint scanned.
 * **There is no network in any guard.** Every finding is provable from the files. The one command that reaches the network is web confirmation inside `grounding.plan`, which is a deliberate lookup a caller asks for by name, not a guard that runs as part of `check`.
 * `staged` validates conflicts only; it does not run taint over the post-patch tree, so a patch that introduces a flow is not yet caught by the gate.
 
