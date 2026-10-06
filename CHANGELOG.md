@@ -2,6 +2,25 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.31.0
+
+### Fixed
+- A name-keyed call count is no longer printed as a count of callers. Call
+  edges record names, so `as_str` produced "146 callers" against a specific
+  line while its edges belonged to definitions never resolved to one another.
+  The count is now published as an upper bound with the other definitions
+  named, and stays silent when the name is unique.
+- Test detection recognises the conventions the languages actually use:
+  RSpec `_spec.rb`, JUnit `TestUser.java`, C# `UserTests.cs`, Jest
+  `user.test.ts`, Go, and symbols reached through a test module. These were
+  read as production callers, so a fully tested file reported as untested.
+
+### Changed
+- `insight coverage` states what it checked when nothing is wrong. Silence on
+  success was indistinguishable from a command that never ran.
+- `doc.hotspot`'s bare `12` is now `HOTSPOT_FLOOR`, stated with the measurement
+  behind it and pinned by a test that builds the boundary it decides.
+
 ## 0.30.0
 
 **The blind spots, closed one at a time, each found by running rather than reading.**

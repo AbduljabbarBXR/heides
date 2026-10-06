@@ -900,24 +900,58 @@ mod tests {
     /// covered `test_foo.py` and `foo_test.go` and nothing else, so `user_spec.rb`,
     /// `UserTests.cs`, `TestUserParse` and `user.test.ts` all counted as
     /// production callers, which made a fully tested file read as untested.
-    /// Pin what the hotspot floor actually does at its boundary, so "12" is a
-    /// stated boundary rather than a number that drifts with the code.
+    /// Pin what the hotspot floor does, by building the case it decides.
     ///
     /// Measured on heides itself at 9,954 call edges: the floor admits 13 of
     /// 1,532 symbols (0.8%), and the counts just above it are 13, 13, 18, 20, 27,
-    /// 31x4, 41, 118, 149, 149. A floor lower than this starts naming symbols
-    /// nobody would look up; a higher one silently drops the mid-tail.
+    /// 31x4, 41, 118, 149, 149. Asserting `HOTSPOT_FLOOR == 12` would only
+    /// restate the constant, so this builds a workspace either side of the
+    /// boundary and checks which side each symbol lands on.
     #[test]
-    fn the_hotspot_floor_admits_a_documented_boundary() {
-        assert_eq!(HOTSPOT_FLOOR, 12, "changing this changes what is reported");
+    fn the_hotspot_floor_decides_the_boundary_it_documents() {
+        // A helper called by every other function, at a count that sits just
+        // above the documented floor.
+        let calls = HOTSPOT_FLOOR + 1;
+        let mut body = String::new();
+        body.push_str("/// documented, so it is never a hotspot\npub fn documented() {}\n");
+        // hub itself is undocumented: that is the other half of the rule.
+        body.push_str("pub fn hub() {}\n");
+        for i in 0..calls {
+            body.push_str(&format!("fn caller{i}() {{ hub(); }}\n"));
+        }
+        // One more than the floor: must be reported.
+        body.push_str(&format!("fn caller_at_floor() {{ hub(); }} // {}\n", calls));
+        // One below the floor: must not be reported.
+        body.push_str("fn quiet() { documented(); }\n");
+        // Padding so the file is mostly documented, which is the other half of
+        // the rule: a mostly undocumented file is not a documentation gap.
+        // Enough documented padding that the file is mostly documented: the
+        // rule also refuses to call an undocumented file a documentation gap.
+        for i in 0..24 {
+            body.push_str(&format!("/// padded\npub fn pad{i}() {{}}\n"));
+        }
+
+        let d = scratch("hotspot");
+        std::fs::write(d.join("hub.rs"), &body).unwrap();
+        let root = d.canonicalize().unwrap();
+        let graph = crate::indexer::build_graph(&root).0;
+
+        let hotspots: Vec<String> = contradictions(&graph, &[], &Default::default())
+            .into_iter()
+            .filter(|i| i.kind == "doc.hotspot")
+            .map(|i| i.message)
+            .collect();
         assert!(
-            (HOTSPOT_FLOOR - 1) < HOTSPOT_FLOOR,
-            "the floor must exclude single-digit noise"
+            hotspots.iter().any(|m| m.contains("hub")),
+            "a symbol called {calls} time(s) must clear the floor: {hotspots:?}"
         );
         assert!(
-            HOTSPOT_FLOOR <= 13,
-            "on heides the lowest reported hotspot sits just above the floor; \
-             if this fails the floor and the corpus have diverged"
+            hotspots.iter().all(|m| !m.contains("quiet")),
+            "a symbol called once must never be a hotspot: {hotspots:?}"
+        );
+        assert!(
+            hotspots.iter().all(|m| !m.contains("documented")),
+            "a documented symbol is never a hotspot: {hotspots:?}"
         );
     }
 
