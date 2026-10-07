@@ -1109,7 +1109,7 @@ fn tool_list() -> Value {
                         },
                         {
                             "name": "harmony.verify",
-                            "description": "Tests plus guards: the machine-checkable definition of done. Call spine.help for details.",
+                            "description": "Tests plus guards: the definition of done, machine checkable. Call spine.help for details.",
                             "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "json": { "type": "boolean", "description": "return the verdict as json with an ok field" } } }
                         },
                         {
