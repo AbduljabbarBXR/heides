@@ -3,3 +3,5 @@
 # binaries downloaded by the npm wrapper postinstall, never commit
 npm/bin/heides
 npm/bin/heides.exe
+
+*.tgz

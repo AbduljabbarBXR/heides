@@ -195,7 +195,24 @@ fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
 /// order the lines appear. A gate that reports the same finding set in a
 /// different order on each run is a gate an agent learns to ignore.
 pub fn scan(root: &Path) -> Vec<ConfigFinding> {
+    scan_with_coverage(root).0
+}
+
+/// The scan plus what it did not understand.
+///
+/// Every other guard in heides now states its own limits, because a capability
+/// gap that is silent is a false clean bill of health. Configuration had the
+/// same hole from a different direction: `classify_value` recognises credentials
+/// by key name, provider prefix and value shape, so a key carrying a real secret
+/// under a name none of those match was dropped without a word. "N configuration
+/// file(s) read, no credentials found" then reads as "this workspace is safe",
+/// when what was actually established is "none of the shapes I know are here".
+///
+/// The counts are of assignments, so the receipt states how much was considered
+/// rather than how little was found.
+pub fn scan_with_coverage(root: &Path) -> (Vec<ConfigFinding>, ConfigCoverage) {
     let mut out: Vec<ConfigFinding> = Vec::new();
+    let mut cov = ConfigCoverage::default();
     for file in collect_config_files(root, 8) {
         let Ok(text) = std::fs::read_to_string(&file) else {
             continue;
@@ -206,10 +223,42 @@ pub fn scan(root: &Path) -> Vec<ConfigFinding> {
             .to_string_lossy()
             .to_string();
         let kind = classify(&file).unwrap_or(ConfigKind::Ini);
-        scan_text(&text, &rel, kind, &mut out);
+        cov.files += 1;
+        scan_text(&text, &rel, kind, &mut out, &mut cov);
     }
     out.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
-    out
+    (out, cov)
+}
+
+/// How much configuration the scan looked at, and how much it could not classify.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ConfigCoverage {
+    pub files: usize,
+    /// Assignments seen with a real value.
+    pub assignments: usize,
+    /// Assignments with a real value that matched no credential shape.
+    pub unclassified: usize,
+    pub unclassified_keys: Vec<String>,
+}
+
+impl ConfigCoverage {
+    pub fn missed(&self) -> bool {
+        self.unclassified > 0
+    }
+
+    pub fn summary(&self) -> String {
+        format!(
+            "{} assignment(s) read, {} matched no credential shape and were not judged: {}. \
+             A clean verdict covers the shapes heides knows, not every key present.",
+            self.assignments,
+            self.unclassified,
+            if self.unclassified_keys.is_empty() {
+                String::new()
+            } else {
+                self.unclassified_keys.join(", ")
+            }
+        )
+    }
 }
 
 /// A one-line statement of what was scanned and what was found.
@@ -226,25 +275,38 @@ pub fn summarise(root: &Path) -> String {
             root.display()
         );
     }
-    let found = scan(root);
-    if found.is_empty() {
-        return format!(
+    let (found, cov) = scan_with_coverage(root);
+    let head = if found.is_empty() {
+        format!(
             "{} configuration file(s) read, no credentials found",
             files.len()
-        );
+        )
+    } else {
+        let critical = found.iter().filter(|f| f.severity == "critical").count();
+        format!(
+            "{} configuration file(s) read, {} credential finding(s), {critical} critical",
+            files.len(),
+            found.len()
+        )
+    };
+    // Bounded scope, stated. A caller reading "no credentials found" needs to
+    // know how much of the configuration that claim was decided over.
+    if cov.missed() {
+        return format!("{head}. {}", cov.summary());
     }
-    let critical = found.iter().filter(|f| f.severity == "critical").count();
-    format!(
-        "{} configuration file(s) read, {} credential finding(s), {critical} critical",
-        files.len(),
-        found.len()
-    )
+    head
 }
 
 // --------------------------------------------------------------- the scanner
 
 /// Parse one file's text into key/value pairs and classify the values.
-fn scan_text(text: &str, rel: &str, kind: ConfigKind, out: &mut Vec<ConfigFinding>) {
+fn scan_text(
+    text: &str,
+    rel: &str,
+    kind: ConfigKind,
+    out: &mut Vec<ConfigFinding>,
+    cov: &mut ConfigCoverage,
+) {
     let lines: Vec<&str> = text.lines().collect();
 
     // A terraform variable names the credential; the value is a bare `default`
@@ -304,8 +366,18 @@ fn scan_text(text: &str, rel: &str, kind: ConfigKind, out: &mut Vec<ConfigFindin
                     None => continue,
                 }
             }
+            if !is_placeholder(&value) && !value.is_empty() {
+                cov.assignments += 1;
+            }
             if let Some(f) = classify_value(&key, &value, rel, n, kind) {
                 out.push(f);
+            } else if !is_placeholder(&value) && !value.is_empty() {
+                // Real value, no recognised shape. Counted, named, and reported,
+                // so the absence of findings is bounded by what was looked for.
+                cov.unclassified += 1;
+                if cov.unclassified_keys.len() < 4 && !cov.unclassified_keys.contains(&key) {
+                    cov.unclassified_keys.push(key);
+                }
             }
         }
     }
@@ -975,4 +1047,75 @@ fn looks_like_prose(v: &str) -> bool {
         return false;
     }
     alpha * 4 >= total * 3
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::{scan_with_coverage, summarise};
+
+    /// A secret under a name none of the shapes match used to vanish, and the
+    /// receipt then said "no credentials found", which reads as safe.
+    ///
+    /// `ZEBULA` is deliberately not a credential word, not a provider prefix and
+    /// not a placeholder. It holds a real value. Heides cannot call it a
+    /// credential from the shape alone, but it can say that it judged the key and
+    /// could not classify it, which bounds the clean verdict to the shapes it
+    /// knows rather than implying it looked at everything.
+    #[test]
+    fn a_key_it_cannot_classify_is_reported_rather_than_dropped() {
+        let d = std::env::temp_dir().join(format!("heides-cfgcov-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(
+            d.join(".env"),
+            "ZEBULA=hunter2SuperSecretValue\nLOG_LEVEL=debug\nAPI_TOKEN=sk-abcdefghijklmnopqrstuvwx\n",
+        )
+        .unwrap();
+        let root = d.canonicalize().unwrap();
+
+        let (found, cov) = scan_with_coverage(&root);
+        assert!(
+            found.iter().any(|f| f.key == "API_TOKEN"),
+            "a provider prefix must still be caught: {found:?}"
+        );
+        assert!(!found.iter().any(|f| f.key == "ZEBULA"));
+        assert!(cov.missed(), "an unclassified real value must be counted");
+        assert!(
+            cov.unclassified_keys.iter().any(|k| k == "ZEBULA"),
+            "and named: {:?}",
+            cov.unclassified_keys
+        );
+
+        // The receipt carries the finding and the gap side by side, so neither
+        // one is read as the whole truth on its own.
+        let s = summarise(&root);
+        assert!(s.contains("credential finding(s)"), "receipt: {s}");
+        assert!(
+            s.contains("matched no credential shape"),
+            "the verdict must state its own scope: {s}"
+        );
+        assert!(
+            s.contains("ZEBULA"),
+            "and name what it could not judge: {s}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Nothing unclassified means nothing said. The receipt stays a receipt.
+    #[test]
+    fn a_fully_classified_config_adds_no_caveat() {
+        let d = std::env::temp_dir().join(format!("heides-cfgclean-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join(".env"), "API_TOKEN=sk-abcdefghijklmnopqrstuvwx\n").unwrap();
+        let root = d.canonicalize().unwrap();
+        let (_, cov) = scan_with_coverage(&root);
+        assert!(!cov.missed(), "nothing should be unclassified: {cov:?}");
+        let s = summarise(&root);
+        assert!(
+            !s.contains("matched no credential shape"),
+            "no gaps means no caveat: {s}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }
