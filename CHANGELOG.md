@@ -2,6 +2,21 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.36.0
+
+### Changed
+- `config.scan` states what it could not classify. Credentials are recognised by
+  key name, provider prefix and value shape, so a key carrying a real secret
+  under a name none of those match was dropped without a word, and "no
+  credentials found" then read as "this workspace is safe". The receipt now
+  carries the finding and the gap side by side:
+
+      1 credential finding(s). 2 assignment(s) read, 1 matched no credential
+      shape and were not judged: ZEBULA. A clean verdict covers the shapes
+      heides knows, not every key present.
+
+  Nothing is added to the receipt when nothing was unclassified.
+
 ## 0.35.0
 
 ### Added
