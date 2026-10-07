@@ -2,6 +2,23 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.33.0
+
+### Changed
+- The MCP handshake no longer pays for tool guidance before the agent knows
+  which tool it needs. `tools/list` carries one line per tool and points at
+  `spine.help`, which serves the full guidance for a single tool on request:
+  1800 to 1581 tokens on connect, and an agent that needs one tool's detail
+  pays for that tool alone.
+
+### Added
+- `spine.help`, returning guidance for every tool or for one named tool.
+
+### Fixed
+- A test that passed locally and failed on every CI run since 0.31.0, because it
+  hardcoded which of two same-named definitions became the subject and symbol
+  order differs by platform.
+
 ## 0.32.0
 
 ### Added
