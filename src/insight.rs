@@ -812,25 +812,22 @@ mod tests {
         );
 
         let (n, by_ext, samples) = skipped_files(&root, &indexed);
-        assert_eq!(n, 3, "only the three files with no grammar may be skipped");
+        // Only Terraform is unread here. YAML and shell are recognised and
+        // parsed, so a gap list that still named them would be the receipt
+        // overstating its own limits, which is the failure this exists to stop.
+        assert_eq!(n, 1, "only the file with no grammar may be skipped");
         assert_eq!(
             by_ext,
-            vec![
-                (".sh".to_string(), 1),
-                (".tf".to_string(), 1),
-                (".yaml".to_string(), 1)
-            ],
+            vec![(".tf".to_string(), 1)],
             "gap extensions must be counted exactly, sorted"
         );
-        for name in ["main.tf", "deploy.yaml", "run.sh"] {
-            assert!(
-                samples.iter().any(|s| s == name),
-                "sample set must include {name}, got {samples:?}"
-            );
-        }
+        assert!(
+            samples.iter().any(|s| s == "main.tf"),
+            "the sample set must name the one gap, got {samples:?}"
+        );
 
         let notice = skipped_notice(n, &by_ext, &samples);
-        assert!(notice.contains("3 file(s)"));
+        assert!(notice.contains("1 file(s)"));
         assert!(notice.contains("A clean verdict covers only the files above."));
         assert!(
             !notice.contains("nested.py") && !notice.contains("inner.rb"),

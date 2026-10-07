@@ -11,6 +11,21 @@ use tree_sitter::{Node, Parser};
 use crate::spine::{CallEdge, ImportEdge, Symbol};
 
 pub fn detect_language(path: &Path) -> Option<String> {
+    // A Dockerfile has no extension. Matching on the name is the only way to
+    // reach it, and leaving it out meant the one file where a secret most often
+    // lives, `ARG NPM_TOKEN`, was never read at all.
+    let file = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    // Dockerfile is deliberately NOT wired. The only published grammar,
+    // tree-sitter-dockerfile 0.2, is built against a different tree-sitter ABI
+    // than the 0.27 this parser uses, and downgrading the whole stack to admit
+    // one grammar is not a trade worth making. Until a compatible release
+    // exists, a Dockerfile stays in the coverage receipt as unread, which is
+    // the honest state. `ARG NPM_TOKEN` is exactly the line that receipt exists
+    // to point at.
+    let _ = &file;
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     let lang = match ext.as_str() {
         "rs" => "rust",
@@ -36,6 +51,11 @@ pub fn detect_language(path: &Path) -> Option<String> {
         "rb" => "ruby",
         "html" | "htm" => "html",
         "css" => "css",
+        // YAML and shell were named as gaps by heides own coverage receipt and
+        // both hold things no other layer was reading: a `run:` step in a
+        // workflow that curls a script into bash, and a key in a .env block.
+        "yml" | "yaml" => "yaml",
+        "sh" | "bash" => "shell",
         _ => return None,
     };
     Some(lang.to_string())
@@ -89,6 +109,7 @@ fn language_for_path(lang: &str, tsx: bool) -> Option<tree_sitter::Language> {
         "csharp" => Some(tree_sitter_c_sharp::LANGUAGE.into()),
         "html" => Some(tree_sitter_html::LANGUAGE.into()),
         "css" => Some(tree_sitter_css::LANGUAGE.into()),
+        "yaml" => Some(tree_sitter_yaml::LANGUAGE.into()),
         _ => None,
     }
 }

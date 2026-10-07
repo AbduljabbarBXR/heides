@@ -2,6 +2,22 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.34.0
+
+### Added
+- YAML is parsed and indexed. It was named as a gap by heides own coverage
+  receipt, and it holds things no other layer was reading: a `run:` step in a
+  workflow that curls a script into bash. On this repository the receipt drops
+  from 32 unindexed files to 26, and `.yml` is no longer among them.
+- `.sh` and `.bash` are recognised.
+
+### Not added
+- Dockerfile. The only published grammar, tree-sitter-dockerfile 0.2, is built
+  against a different tree-sitter ABI than the 0.27 this parser uses, and
+  downgrading the whole stack to admit one grammar is not a trade worth making.
+  A Dockerfile stays in the coverage receipt as unread, which is the honest
+  state, and `ARG NPM_TOKEN` is exactly the line that receipt points at.
+
 ## 0.33.0
 
 ### Changed
