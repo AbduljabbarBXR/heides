@@ -388,6 +388,11 @@ fn handle(id: &Value, method: &str, params: &Value) {
                     }
                     ok(id, text_result(lines.join("\n")));
                 }
+                "spine.help" => {
+                    // The long guidance `tools/list` deliberately left out.
+                    let help = tool_help(args.get("topic").and_then(|v| v.as_str()));
+                    ok(id, text_result(help.to_string()))
+                }
                 "spine.describe" => {
                     let graph = match load_graph(&root) {
                         Ok(g) => g,
@@ -976,8 +981,76 @@ pub fn run() -> ExitCode {
 /// Kept as one function so the schema validator reads the same declarations the
 /// client sees. Validating against a second hand written copy is how a tool ends
 /// up declared with one schema and dispatched with another.
+fn tool_help(topic: Option<&str>) -> Value {
+    const HELP: &[(&str, &str)] = &[
+        (
+            "harmony.check",
+            "Runs every guard offline. Evidence only by default: style advice is dropped, an 84% cut on this repository with every blocker, critical and warning intact. Pass advice=true to get it back. Dependency and exposure analysis is deliberately absent: use GRIM for that. max_bytes trims the result and says how much it dropped.",
+        ),
+        (
+            "harmony.verify",
+            "Runs the workspace tests plus every guard and returns a machine-checkable definition of done. This is the stopping condition for an autonomous loop: clean means finished, not that nothing was inspected. Returns NOT VERIFIED with reasons when anything fails. Pass json=true for a boolean to branch on.",
+        ),
+        (
+            "harmony.report",
+            "Folds identical findings together by default, because a wall of identical lines is how an agent misses the one finding that mattered. Pass all=true to print every finding separately.",
+        ),
+        (
+            "db.schema",
+            "Parses SQL schema and migration directories into a schema graph: cyclic foreign keys, missing indexes, tables with no primary key, sensitive columns. Exits non-zero when there are findings.",
+        ),
+        (
+            "db.tables",
+            "Lists every table with how many reads and writes reach it. A table with zero of both is an orphan: no code touches it and nothing references it.",
+        ),
+        (
+            "spine.query",
+            "Asks the graph for callers, imports, definition, calls out, or a search. kind is one of: callers, imports, definition, calls, search.",
+        ),
+        (
+            "spine.describe",
+            "Reads the whole workspace manifest in one shot: languages, symbol counts, entrypoints, hubs, doc coverage per language. Also states which files were not indexed and why.",
+        ),
+        (
+            "spine.neighbors",
+            "Shows every side of a symbol: definition with its captured doc, callers, and calls out.",
+        ),
+        (
+            "spine.impact",
+            "The set heides can reach from a symbol, how much of it is untested, whether an HTTP route is behind it, and whether anything that would catch a regression actually calls it. Caller counts are name-keyed: when the output says upper bound, several definitions share the name.",
+        ),
+        (
+            "spine.coverage",
+            "Which languages in this workspace can actually fire a rule, and which are merely recognised. A clean verdict covers only the files it says it read.",
+        ),
+        (
+            "spine.contradictions",
+            "Signals that cannot both be true: a route pointing at a handler nothing defines, or a symbol claimed dead that something reachable still calls.",
+        ),
+    ];
+    let want = topic.unwrap_or("").trim();
+    let out: Vec<Value> = HELP
+        .iter()
+        .filter(|(name, _)| want.is_empty() || want.eq_ignore_ascii_case(name))
+        .map(|(name, text)| json!({ "tool": name, "guidance": text }))
+        .collect();
+    let note = if want.is_empty() {
+        "Guidance for every tool. Ask for one by name to narrow it.".to_string()
+    } else if out.is_empty() {
+        format!("No guidance for `{want}`. Ask with no topic for the full list.")
+    } else {
+        format!("Guidance for {want}.")
+    };
+    json!({ "count": out.len(), "note": note, "tools": out })
+}
+
 fn tool_list() -> Value {
     json!([
+                        {
+                            "name": "spine.help",
+                            "description": "Full guidance for any tool, on demand. tools/list carries one line each to keep the handshake cheap.",
+                            "inputSchema": { "type": "object", "properties": { "topic": { "type": "string", "description": "tool name, or omit for all" } } }
+                        },
                         {
                             "name": "spine.scan",
                             "description": "Map the current codebase into the persistent spine index.",
@@ -993,7 +1066,7 @@ fn tool_list() -> Value {
                         },
                         {
                             "name": "spine.describe",
-                            "description": "Read the whole workspace manifest in one shot. Languages, symbol counts, entrypoints, hubs and doc coverage per language.",
+                            "description": "Read the workspace manifest in one shot, including what was not indexed.",
                             "inputSchema": { "type": "object", "properties": { "root": { "type": "string" } } }
                         },
                         {
@@ -1003,8 +1076,8 @@ fn tool_list() -> Value {
                         },
                         {
                             "name": "harmony.check",
-                            "description": "Run every guard on the workspace and return findings with evidence. Every guard is local and offline, so each finding names a file and a line and reproduces from the tree alone. Returns evidence only by default: style advice is dropped, which is an 84% cut on this repository with every blocker, critical and warning intact. Pass advice true to get it back. Dependency and exposure analysis is not here: use GRIM for that.",
-                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "offline": { "type": "boolean", "description": "skip the dependency guard registry lookups" }, "all": { "type": "boolean", "description": "print every finding instead of folding identical ones. Folded by default, because a wall of identical lines is how an agent misses the one finding that mattered" }, "advice": { "type": "boolean", "description": "include style advice alongside the evidence. Off by default: it is an opinion, not a defect, and it costs tokens on every call" }, "max_bytes": { "type": "integer", "description": "trim the result to this many bytes. A tool result lands in your context in full, so cap it rather than lose the conversation. Truncation lands on a line boundary and says how much was dropped" } } }
+                            "description": "Run every guard offline and return findings with evidence. Call spine.help for details.",
+                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "offline": { "type": "boolean", "description": "skip the dependency guard registry lookups" }, "all": { "type": "boolean", "description": "print every finding instead of folding identical ones" }, "advice": { "type": "boolean", "description": "include style advice; off by default because it is opinion, not defect" }, "max_bytes": { "type": "integer", "description": "trim the result to this many bytes; truncation says how much it dropped" } } }
                         },
                         {
                             "name": "harmony.report",
@@ -1036,17 +1109,17 @@ fn tool_list() -> Value {
                         },
                         {
                             "name": "harmony.verify",
-                            "description": "Run the workspace tests plus every guard and return a machine checkable definition of done. This is the stopping condition for an autonomous loop: a clean result means the change is finished, not that nothing was inspected. Returns NOT VERIFIED with reasons when anything fails. Pass json true for a boolean to branch on.",
+                            "description": "Tests plus guards: the machine-checkable definition of done. Call spine.help for details.",
                             "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "json": { "type": "boolean", "description": "return the verdict as json with an ok field" } } }
                         },
                         {
                             "name": "db.schema",
-                            "description": "Parse the SQL schema and migration directories into a schema graph and report what is wrong with it: cyclic foreign keys, missing indexes, tables with no primary key, and sensitive columns. Exits non zero when there are findings.",
+                            "description": "Check the SQL schema for defects. Call spine.help for details.",
                             "inputSchema": { "type": "object", "properties": { "root": { "type": "string" } } }
                         },
                         {
                             "name": "db.tables",
-                            "description": "List every table with how many reads and writes reach it. A table with zero of both is an orphan: no code touches it and nothing references it.",
+                            "description": "List tables and their read/write reach. Call spine.help for details.",
                             "inputSchema": { "type": "object", "properties": { "root": { "type": "string" } } }
                         },
                         {
