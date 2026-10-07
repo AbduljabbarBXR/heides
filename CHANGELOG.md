@@ -2,6 +2,18 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.35.0
+
+### Added
+- Terraform, Swift, Scala and Dart are parsed and indexed. Terraform first: a
+  repo is most embarrassed by the secret it committed in `.tf`, and heides read
+  nothing in one.
+
+### Not added
+- Kotlin. `tree-sitter-kotlin` pins tree-sitter 0.20 as a hard dependency, not a
+  dev one, so admitting it means downgrading the parser for every language.
+- Dockerfile, permanently, as previously decided.
+
 ## 0.34.0
 
 ### Added

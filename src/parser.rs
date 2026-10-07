@@ -55,6 +55,13 @@ pub fn detect_language(path: &Path) -> Option<String> {
         // both hold things no other layer was reading: a `run:` step in a
         // workflow that curls a script into bash, and a key in a .env block.
         "yml" | "yaml" => "yaml",
+        // Infrastructure and app languages, all of which heides previously read
+        // nothing in. Terraform holds the secrets a repo is most embarrassed to
+        // have committed, so it earned its place before the rest.
+        "tf" | "hcl" | "tfvars" => "terraform",
+        "swift" => "swift",
+        "scala" | "sc" => "scala",
+        "dart" => "dart",
         "sh" | "bash" => "shell",
         _ => return None,
     };
@@ -110,6 +117,10 @@ fn language_for_path(lang: &str, tsx: bool) -> Option<tree_sitter::Language> {
         "html" => Some(tree_sitter_html::LANGUAGE.into()),
         "css" => Some(tree_sitter_css::LANGUAGE.into()),
         "yaml" => Some(tree_sitter_yaml::LANGUAGE.into()),
+        "terraform" => Some(tree_sitter_hcl::LANGUAGE.into()),
+        "swift" => Some(tree_sitter_swift::LANGUAGE.into()),
+        "scala" => Some(tree_sitter_scala::LANGUAGE.into()),
+        "dart" => Some(tree_sitter_dart::LANGUAGE.into()),
         _ => None,
     }
 }
