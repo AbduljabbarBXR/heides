@@ -812,26 +812,24 @@ mod tests {
         );
 
         let (n, by_ext, samples) = skipped_files(&root, &indexed);
-        // Only Terraform is unread here. YAML and shell are recognised and
-        // parsed, so a gap list that still named them would be the receipt
-        // overstating its own limits, which is the failure this exists to stop.
-        assert_eq!(n, 1, "only the file with no grammar may be skipped");
+        // Terraform, YAML and shell are all parsed now, so this workspace has no
+        // gap left. The assertion is zero rather than a count that has to be
+        // rewritten each time a grammar lands, and the named files below are the
+        // ones that used to be the gaps.
         assert_eq!(
-            by_ext,
-            vec![(".tf".to_string(), 1)],
-            "gap extensions must be counted exactly, sorted"
+            n, 0,
+            "every file here has a grammar now: {by_ext:?} {samples:?}"
         );
         assert!(
-            samples.iter().any(|s| s == "main.tf"),
-            "the sample set must name the one gap, got {samples:?}"
+            by_ext.is_empty() && samples.is_empty(),
+            "a clean workspace must produce an empty gap list"
         );
 
-        let notice = skipped_notice(n, &by_ext, &samples);
-        assert!(notice.contains("1 file(s)"));
-        assert!(notice.contains("A clean verdict covers only the files above."));
+        // Nothing was dropped, so there is nothing to say: a tool that chatters
+        // about its limits on a clean run teaches people to skip the line.
         assert!(
-            !notice.contains("nested.py") && !notice.contains("inner.rb"),
-            "indexed files must never appear in the gap notice: {notice}"
+            skipped_notice(n, &by_ext, &samples).is_empty(),
+            "a workspace with no gaps must produce no notice"
         );
     }
 
