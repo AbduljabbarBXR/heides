@@ -881,9 +881,33 @@ mod tests {
         assert!(!hom.caller_count_is_exact());
         let caveat = hom.count_caveat();
         assert!(caveat.contains("upper bound"), "got: {caveat}");
+
+        // Which file is the subject depends on symbol order, which differs by
+        // platform, so the assertion cannot name one of them. It has to hold
+        // for whichever one did not become the subject: naming the other one
+        // is the whole point of the caveat.
+        let subject = hom.defined_in.first().cloned().unwrap_or_default();
+        let other = if subject.contains("a.rs") {
+            "src/b.rs"
+        } else {
+            "src/a.rs"
+        };
         assert!(
-            caveat.contains("src/b.rs"),
-            "must name where: got: {caveat}"
+            caveat.contains(other),
+            "the caveat must name the definition that is not the subject \
+             (subject was {subject}): got: {caveat}"
+        );
+
+        // Either ordering must satisfy the same assertion.
+        let rev = impact(&graph, "shared", &[]);
+        assert_eq!(rev.homonyms.len(), 1);
+        assert!(
+            rev.count_caveat()
+                .contains(if rev.defined_in[0].contains("a.rs") {
+                    "src/b.rs"
+                } else {
+                    "src/a.rs"
+                })
         );
 
         let one = impact(&graph, "unique", &[]);
