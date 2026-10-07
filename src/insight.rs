@@ -219,6 +219,23 @@ fn skip_dir(name: &str) -> bool {
 /// rules out single-call noise, stated once and named so it can be argued with.
 const HOTSPOT_FLOOR: usize = 12;
 
+/// Taint-capable languages the corpus has not covered.
+///
+/// `security.taint` is listed as measured, and the corpus behind that row is
+/// C/C++ and ruby. Every other language reuses those rules, so the guard is
+/// trusted on files it was never run against. Rather than let the one row imply
+/// coverage of eighteen, the languages that can fire taint but were not measured
+/// are named wherever a verdict is printed.
+pub fn unmeasured_taint_langs(graph: &CodeGraph) -> Vec<String> {
+    let mut langs: BTreeSet<String> = BTreeSet::new();
+    for f in &graph.files {
+        if lang_has_taint(&f.lang) && !crate::taint::CORPUS_LANGS.contains(&f.lang.as_str()) {
+            langs.insert(f.lang.clone());
+        }
+    }
+    langs.into_iter().collect()
+}
+
 /// One line saying what coverage was checked, for when nothing was wrong.
 ///
 /// A command that prints nothing on success is indistinguishable from a command
@@ -1193,5 +1210,42 @@ mod tests {
         l.files_over_cap = 3;
         assert!(l.dropped());
         assert!(l.summary().contains("dropped 3"), "{}", l.summary());
+    }
+}
+
+#[cfg(test)]
+mod corpus_claim_tests {
+    use super::unmeasured_taint_langs;
+    use crate::indexer::build_graph;
+    use std::path::Path;
+
+    /// The corpus is C/C++ and ruby. Every other taint-capable language reuses
+    /// those rules, and listing the guard as "measured" once read as blanket
+    /// coverage of eighteen. These pin the two halves of that: the covered
+    /// languages are never named as unmeasured, and the rest always are.
+    #[test]
+    fn only_languages_outside_the_corpus_are_named_unmeasured() {
+        assert_eq!(
+            crate::taint::CORPUS_LANGS,
+            &["c", "cpp", "ruby"],
+            "the corpus claim and this test must not drift apart"
+        );
+        let root = Path::new(".");
+        let graph = build_graph(root).0;
+        let unmeasured = unmeasured_taint_langs(&graph);
+        for l in &unmeasured {
+            assert!(
+                !crate::taint::CORPUS_LANGS.contains(&l.as_str()),
+                "{l} is in the corpus and must not be called unmeasured"
+            );
+        }
+        // This workspace is rust, so it must appear: the claim has to bite where
+        // it is actually read, or it is decoration.
+        if graph.files.iter().any(|f| f.lang == "rust") {
+            assert!(
+                unmeasured.iter().any(|l| l == "rust"),
+                "rust reuses the corpus rules and is not measured by them: {unmeasured:?}"
+            );
+        }
     }
 }

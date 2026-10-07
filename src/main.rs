@@ -1452,7 +1452,7 @@ fn run() -> ExitCode {
 const MEASURED_RULES: &[(&str, &str)] = &[
     (
         "security.taint",
-        "401 real C/C++ files for the inline source gate, 0 false criticals; 536 ruby files across rack, sinatra, redis-rb and faraday for the ruby gate",
+        "401 real C/C++ files for the inline source gate, 0 false criticals; 536 ruby files across rack, sinatra, redis-rb and faraday for the ruby gate. C/C++ and ruby ONLY, see taint::CORPUS_LANGS: these rules fire on every other language too, and there they are an untested belief, not a measurement",
     ),
     (
         "security.taint.truncated",
@@ -1527,6 +1527,16 @@ fn insight_command(args: &[String]) -> ExitCode {
             }
             if gaps.is_empty() {
                 println!("{}", insight::coverage_receipt(&graph));
+            }
+            // A guard that fires on files it was never measured against should
+            // say so at the point the verdict is given, not in a footnote.
+            let unmeasured = insight::unmeasured_taint_langs(&graph);
+            if !unmeasured.is_empty() {
+                println!(
+                    "security.taint is measured on {} only; {} here reuse those rules untested",
+                    heides::taint::CORPUS_LANGS.join(", "),
+                    unmeasured.join(", ")
+                );
             }
             ExitCode::SUCCESS
         }

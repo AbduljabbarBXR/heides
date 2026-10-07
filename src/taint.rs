@@ -1,3 +1,11 @@
+/// Languages the taint corpus has actually covered.
+///
+/// A single "measured" claim covering two language families reads as blanket
+/// coverage of eighteen. These rules fire on every language listed in the
+/// tables above, and for the ones absent here the guard is trusted on files it
+/// was never run against. The difference has to be printed, not remembered.
+pub const CORPUS_LANGS: &[&str] = &["c", "cpp", "ruby"];
+
 // Security taint guard.
 //
 // Traces user controlled input into dangerous sinks: SQL, shell, filesystem

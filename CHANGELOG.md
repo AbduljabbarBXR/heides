@@ -2,6 +2,21 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.37.0
+
+### Changed
+- `security.taint` no longer reads as measured on every language. The corpus
+  behind that claim is C/C++ and ruby: 401 C/C++ files and 536 ruby files. The
+  rules fire on all eighteen grammars, so for the other sixteen the guard was
+  being trusted on files it had never been run against. `insight coverage` now
+  names them where the verdict is given:
+
+      security.taint is measured on c, cpp, ruby only; javascript, python,
+      rust here reuse those rules untested
+
+  A rule that has never seen a real corpus is a belief, and this project's whole
+  argument is that the difference has to be printed rather than remembered.
+
 ## 0.36.0
 
 ### Changed
