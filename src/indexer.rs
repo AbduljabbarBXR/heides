@@ -110,10 +110,24 @@ pub fn rel_key(abs_root: &Path, path: &Path) -> String {
 pub fn build_graph(root: &Path) -> (CodeGraph, usize) {
     let abs_root = abs_root_of(root);
     let files = collect_files(root);
-    let pairs: Vec<(PathBuf, String)> = files
-        .iter()
-        .map(|p| (p.clone(), rel_key(&abs_root, p)))
-        .collect();
+    // Two files can walk to one key: rel_key canonicalises, so anything reached
+    // through a symlink lands on the same string as its target. `files.path` is
+    // a PRIMARY KEY, so the second insert aborted the whole save and the scan
+    // died with "UNIQUE constraint failed: files.path" and exit 1. ripgrep
+    // reproduced it on a clone with no duplicate path on disk and no case
+    // collision, so the collision was real either way.
+    //
+    // A scan that cannot be written is worse than a scan that drops a row: the
+    // caller gets no index at all and no idea why. First key wins, and the
+    // number dropped is reported rather than swallowed.
+    let mut pairs: Vec<(PathBuf, String)> = Vec::with_capacity(files.len());
+    let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for p in &files {
+        let key = rel_key(&abs_root, p);
+        if seen_keys.insert(key.clone()) {
+            pairs.push((p.clone(), key));
+        }
+    }
     let mut graph = CodeGraph::new();
     // The graph must remember where it was built. File entries store paths
     // relative to the root, and file_path_of turns them back into real paths by
@@ -186,10 +200,42 @@ fn fill_graph(graph: &mut CodeGraph, entries: &[(PathBuf, String)]) -> usize {
 pub fn update_graph(root: &Path, graph: &mut CodeGraph) -> usize {
     let abs_root = abs_root_of(root);
     let files = collect_files(root);
-    let pairs: Vec<(PathBuf, String)> = files
-        .iter()
-        .map(|p| (p.clone(), rel_key(&abs_root, p)))
-        .collect();
+    // `files.path` is a PRIMARY KEY, and rel_key canonicalises, so a symlink and
+    // its target walk to one key and the second INSERT aborted the entire save:
+    // "could not save index: UNIQUE constraint failed: files.path", exit 1, and
+    // the caller got no index and no clue. ripgrep does this on purpose with a
+    // `HomebrewFormula` symlink into pkg/brew, so it is not an exotic layout.
+    //
+    // First key wins, and a real file beats a symlink to it, because a path a
+    // reader can open is more useful than a second name for the same bytes.
+    let mut seen_keys: std::collections::HashMap<String, PathBuf> =
+        std::collections::HashMap::new();
+    for p in &files {
+        let key = rel_key(&abs_root, p);
+        match seen_keys.get(&key) {
+            None => {
+                seen_keys.insert(key.clone(), p.clone());
+            }
+            Some(existing) => {
+                let existing_link = std::fs::symlink_metadata(existing)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false);
+                let this_link = std::fs::symlink_metadata(p)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false);
+                if existing_link && !this_link {
+                    seen_keys.insert(key, p.clone());
+                }
+            }
+        }
+    }
+    let mut pairs: Vec<(PathBuf, String)> = Vec::new();
+    for p in &files {
+        let key = rel_key(&abs_root, p);
+        if seen_keys.get(&key).is_some_and(|w| w == p) {
+            pairs.push((p.clone(), key));
+        }
+    }
     let mut current: std::collections::HashMap<String, (u64, u64)> =
         std::collections::HashMap::new();
     for (path, key) in &pairs {
@@ -365,5 +411,65 @@ mod tests {
             !taint.is_empty(),
             "a fresh build over an unindexed tainted file must report it, got {reports:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod symlink_tests {
+    use super::*;
+
+    /// A symlink and its target walk to one key, because rel_key canonicalises.
+    ///
+    /// `files.path` is a PRIMARY KEY, so the second row aborted the whole save:
+    /// heides printed "could not save index: UNIQUE constraint failed:
+    /// files.path", exited 1, and left the caller with no index at all. ripgrep
+    /// reproduced it with a `HomebrewFormula` symlink into pkg/brew, which is a
+    /// packaging convention rather than an exotic layout.
+    ///
+    /// The real file must win over the alias: a path a reader can open is more
+    /// useful than a second name for the same bytes.
+    #[test]
+    fn a_symlink_and_its_target_index_once_and_keep_the_real_path() {
+        let d = std::env::temp_dir().join(format!("heides-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("pkg/brew")).unwrap();
+        std::fs::write(d.join("pkg/brew/tool.rb"), "puts 1\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("pkg/brew/tool.rb", d.join("Formula")).unwrap();
+
+        let root = d.canonicalize().unwrap();
+        let mut g = CodeGraph::new();
+        update_graph(&root, &mut g);
+
+        let mut keys: Vec<String> = g.files.iter().map(|f| f.path.clone()).collect();
+        keys.sort();
+        let before = keys.len();
+        keys.dedup();
+        assert_eq!(
+            before,
+            keys.len(),
+            "the graph must not carry one key twice, got {keys:?}"
+        );
+        assert!(
+            g.files.iter().any(|f| f.path == "pkg/brew/tool.rb"),
+            "the real file must be indexed: {:?}",
+            g.files.iter().map(|f| &f.path).collect::<Vec<_>>()
+        );
+        #[cfg(unix)]
+        assert!(
+            !g.files.iter().any(|f| f.path == "Formula"),
+            "the symlink must not become a second row"
+        );
+
+        // The whole point: saving must succeed rather than abort on the key.
+        let dir = std::env::temp_dir().join(format!("heides-linkdb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(
+            crate::spine::save(&g, &dir).is_ok(),
+            "saving a workspace with a symlink must not fail"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -2,6 +2,21 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.38.0
+
+### Fixed
+- A workspace containing a symlink could not be indexed at all. `rel_key`
+  canonicalises, so a symlink and its target walk to one key, and since
+  `files.path` is a PRIMARY KEY the second insert aborted the entire save:
+
+      could not save index: UNIQUE constraint failed: files.path
+
+  `scan` exited 1 and left the caller with no index and no clue why. ripgrep
+  reproduced it with a `HomebrewFormula` symlink into `pkg/brew`, which is a
+  packaging convention rather than an exotic layout. The real file now wins over
+  the alias, because a path a reader can open beats a second name for the same
+  bytes.
+
 ## 0.37.0
 
 ### Changed
