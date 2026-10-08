@@ -532,6 +532,22 @@ fn name_of(node: Node, content: &str) -> Option<String> {
     {
         return Some(name);
     }
+    // An anonymous function expression is named by whatever holds it:
+    // `const beta = function () {}`, `{ "handler": function () {} }`,
+    // `module.exports.handler = function () {}`. Without this the function is
+    // reachable but anonymous, so two of them are indistinguishable and a call
+    // inside one is attributed to nothing at all.
+    if matches!(node.kind(), "function_expression" | "arrow_function")
+        && let Some(parent) = node.parent()
+    {
+        for field in ["name", "key", "left", "property"] {
+            if let Some(n) = field_text(parent, content, field)
+                && !n.is_empty()
+            {
+                return Some(last_segment(&n));
+            }
+        }
+    }
     // Fallback: first identifier leaf below the node.
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -696,8 +712,24 @@ fn enclosing_function(node: Node, content: &str) -> Option<String> {
             || kind == "constructor_declaration"
             || kind == "local_function_statement"
             || kind == "arrow_function"
+            // `const beta = function () {}` and `module.exports = function d() {}`
+            // are function_expression, not function_declaration. Without this the
+            // walk went straight past them to the top of the file and every call
+            // inside was attributed to a single fake caller called "module level".
+            // On express that was 8,285 of 8,577 call edges in the repository.
+            || kind == "function_expression"
         {
-            return name_of(n, content);
+            // An anonymous callback, `app.get("/", function (req, res) {...})`, has
+            // no name of its own. Returning None there put every call inside it
+            // at "module level", which on express was 7,933 of 8,577 edges and
+            // made the whole JavaScript graph useless for impact questions.
+            //
+            // The call is lexically inside the nearest named function, so keep
+            // walking until one is found and attribute it there. That is not a
+            // guess about intent: it is where the code sits.
+            if let Some(name) = name_of(n, content) {
+                return Some(name);
+            }
         }
         cur = n.parent();
     }
@@ -797,6 +829,9 @@ const SYMBOL_KINDS: &[&str] = &[
     "linkage_specification",
     "function_item",
     "function_declaration",
+    // A function expression is a real named thing an agent will ask about.
+    // It was absent, so `const beta = function () {}` produced no symbol at all.
+    "function_expression",
     "generator_function_declaration",
     "function_definition",
     "method_definition",
@@ -2140,6 +2175,123 @@ mod tsx_tests {
             p.calls.iter().any(|c| c.callee == "helper"),
             "got {:?}",
             p.calls
+        );
+    }
+}
+
+#[cfg(test)]
+mod javascript_function_expression_tests {
+    use super::parse_file;
+    use std::path::Path;
+
+    /// Every way JavaScript names a function, and the two that were invisible.
+    ///
+    /// `const beta = function () {}` and `module.exports = function delta() {}`
+    /// parse as `function_expression`, not `function_declaration`. That kind was
+    /// in neither the symbol list nor the enclosing function walk, so both
+    /// functions were absent from the graph entirely and every call inside them
+    /// was attributed to a fake caller called "module level". On express that was
+    /// 8,285 of 8,577 call edges, which made the whole JavaScript graph useless
+    /// for impact questions.
+    const EVERY_FORM: &str = r#"function alpha() { helper(); }
+function helper() { return 1; }
+const beta = function () { helper(); };
+const gamma = () => { helper(); };
+module.exports = function delta() { helper(); };
+class Widget {
+  render() { helper(); }
+}
+"#;
+
+    fn symbols(src: &str) -> Vec<(String, String)> {
+        parse_file(Path::new("app.js"), src)
+            .expect("javascript parses")
+            .symbols
+            .into_iter()
+            .map(|s| (s.name, s.kind))
+            .collect()
+    }
+
+    fn calls(src: &str) -> Vec<(String, String)> {
+        parse_file(Path::new("app.js"), src)
+            .expect("javascript parses")
+            .calls
+            .into_iter()
+            .map(|c| (c.caller, c.callee))
+            .collect()
+    }
+
+    #[test]
+    fn a_function_expression_is_a_symbol_like_any_other_function() {
+        let found = symbols(EVERY_FORM);
+        for name in [
+            "alpha", "helper", "beta", "gamma", "delta", "Widget", "render",
+        ] {
+            assert!(
+                found.iter().any(|(n, _)| n == name),
+                "{name} must be indexed, found only {found:?}"
+            );
+        }
+        assert!(
+            found
+                .iter()
+                .any(|(n, k)| n == "beta" && k == "function_expression"),
+            "beta is a function expression and should be labelled as one: {found:?}"
+        );
+    }
+
+    #[test]
+    fn an_anonymous_function_expression_is_named_by_whatever_holds_it() {
+        let found = symbols(EVERY_FORM);
+        // `delta` names itself. `beta` does not, and is named by the declarator.
+        assert!(
+            found.iter().any(|(n, _)| n == "delta"),
+            "a named function expression uses its own name: {found:?}"
+        );
+        assert!(
+            found.iter().any(|(n, _)| n == "beta"),
+            "an anonymous one is named by the const holding it: {found:?}"
+        );
+    }
+
+    #[test]
+    fn a_call_inside_a_function_is_not_attributed_to_module_level() {
+        let found = calls(EVERY_FORM);
+        assert_eq!(
+            found
+                .iter()
+                .filter(|(caller, _)| caller == "module level")
+                .count(),
+            0,
+            "every call in this fixture is inside a named function: {found:?}"
+        );
+        // Specifically: a call inside a function expression must reach its own
+        // caller, which is the case that was broken.
+        for caller in ["alpha", "beta", "gamma", "delta", "render"] {
+            assert!(
+                found
+                    .iter()
+                    .any(|(c, callee)| c == caller && callee == "helper"),
+                "the call inside {caller} must be attributed to {caller}: {found:?}"
+            );
+        }
+    }
+
+    /// A call that really is at the top of a file is still module level.
+    ///
+    /// The previous rule attributed everything there, so the fix must not
+    /// over-correct into claiming a function that does not exist.
+    #[test]
+    fn a_genuinely_top_level_call_is_still_module_level() {
+        let src = "const x = require('express');\nconst app = express();\n";
+        let found = calls(src);
+        assert_eq!(
+            found
+                .iter()
+                .filter(|(caller, _)| caller == "module level")
+                .count(),
+            2,
+            "these two calls are at the top of the file: {found:?}"
         );
     }
 }

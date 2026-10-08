@@ -2,6 +2,29 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.39.0
+
+### Fixed
+- `function_expression` was missing from both the symbol list and the enclosing
+  function walk, so two of the three ways JavaScript names a function were
+  invisible. `const beta = function () {}` and `module.exports = function
+  delta() {}` produced no symbol at all, and every call inside them was
+  attributed to a fake caller called "module level".
+
+  On expressjs/express: 123 symbols found where 343 exist, and 8,285 of 8,577
+  call edges pointing at that one fake caller. `insight impact` and `neighbors`
+  were unusable for JavaScript, the largest ecosystem heides supports.
+
+  An anonymous function expression is now named by whatever holds it, and a call
+  inside a function with no name of its own is attributed to the nearest named
+  ancestor, because that is where the code lexically sits. A call that really is
+  at the top of a file is still module level, which is asserted too, so the fix
+  cannot over-correct into naming a function that does not exist.
+
+Found by cloning real repositories and running heides on them, not by reading
+the code. Four regression tests, verified to fail three times with the kind
+removed.
+
 ## 0.38.0
 
 ### Fixed
