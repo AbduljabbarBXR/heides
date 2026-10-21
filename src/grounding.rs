@@ -11,7 +11,22 @@ use crate::spine::CodeGraph;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PlanVerdict {
+    /// Whether the plan can be carried out against this workspace.
+    ///
+    /// This used to be true for any plan at all, including a plan that named
+    /// two symbols the workspace does not contain. An agent that reads
+    /// `feasible true` stops checking, and then it writes code against
+    /// symbols that do not exist. The verdict is false unless the plan is
+    /// grounded in something the spine actually holds.
     pub feasible: bool,
+    /// `feasible`, `unverified` or `unknown`.
+    ///
+    /// `unverified` means the plan names real code and code it cannot find.
+    /// `unknown` means the plan names nothing the spine knows about, so
+    /// there is nothing to say about it either way.
+    pub status: String,
+    /// What stands between this plan and a yes.
+    pub blockers: Vec<String>,
     pub notes: Vec<String>,
     /// What the plan was actually grounded on: symbol, file and line. The
     /// audit found plan printing "feasible true" with no evidence, which
@@ -45,6 +60,8 @@ pub fn evaluate(plan: &str, graph: &CodeGraph, root: &Path) -> PlanVerdict {
         notes.push("the plan is empty. describe the objective first.".to_string());
         return PlanVerdict {
             feasible: false,
+            status: "unknown".to_string(),
+            blockers: vec!["the plan is empty".to_string()],
             notes,
             evidence: Vec::new(),
         };
@@ -167,8 +184,42 @@ pub fn evaluate(plan: &str, graph: &CodeGraph, root: &Path) -> PlanVerdict {
         ));
     }
 
+    // The verdict.
+    //
+    // A plan is feasible when the code it talks about exists and nothing it
+    // names is missing. A plan that names code the workspace does not have is
+    // not feasible as written: it either renames something, or it introduces
+    // something, and the difference matters to whoever reads the verdict.
+    // A plan that names nothing the spine knows about is unknown: the tool
+    // has nothing to say about it, and saying yes would be a guess.
+    let mut blockers: Vec<String> = Vec::new();
+    let status;
+    let feasible;
+    if !missing.is_empty() {
+        feasible = false;
+        status = "unverified";
+        for m in &missing {
+            blockers.push(format!(
+                "symbol {} is not in the spine. name it as a new definition, or fix the name.",
+                m
+            ));
+        }
+    } else if found.is_empty() {
+        feasible = false;
+        status = "unknown";
+        blockers.push(
+            "no identifier in this plan exists in the spine, so nothing about it could be verified"
+                .to_string(),
+        );
+    } else {
+        feasible = true;
+        status = "feasible";
+    }
+
     PlanVerdict {
-        feasible: true,
+        feasible,
+        status: status.to_string(),
+        blockers,
         notes,
         evidence,
     }
@@ -270,6 +321,26 @@ pub fn parse_scaffold(plan: &str) -> Result<ScaffoldSpec, String> {
     }
 
     // The stack. Order matters: an explicit mention beats a generic "app".
+    //
+    // A stack the generator cannot produce is refused, not approximated. The
+    // first version of this read one keyword and wrote a Node app for every
+    // request, so "a Flutter app with SQLite" produced a JavaScript file and
+    // an empty requirements.txt. An agent that asked for a Flutter app and
+    // got a Node app would not know it had been given something else, so the
+    // honest answer is to refuse and say which stacks exist.
+    let unsupported = [
+        "dart", "flutter", "java", "kotlin", "go", "golang", "ruby", "php", "c#", "csharp",
+        "swift", "elixir", "svelte", "vue",
+    ];
+    for lang in unsupported {
+        if lower.contains(lang) {
+            return Err(format!(
+                "heides scaffold does not generate {}. the supported stacks are node, python and rust. \
+                 write the project by hand, or ask for one of the supported stacks.",
+                lang
+            ));
+        }
+    }
     let stack = if lower.contains("rust") || lower.contains("cargo") || lower.contains(".rs") {
         Stack::Rust
     } else if lower.contains("python")
@@ -875,7 +946,18 @@ mod tests {
     fn a_plan_with_nothing_existing_says_so_instead_of_pretending() {
         let g = graph_with();
         let v = evaluate("add a health endpoint", &g, &tmp("ground_b"));
-        assert!(v.feasible);
+        // The verdict is false and the status is unknown. It used to be true,
+        // and a plan that names nothing the spine knows about is not a plan
+        // the tool has checked: it is a plan the tool has no evidence for.
+        // An agent reading `feasible true` stops looking, so the answer has
+        // to be the one that keeps it looking.
+        assert!(!v.feasible);
+        assert_eq!(v.status, "unknown");
+        assert!(
+            v.blockers.iter().any(|b| b.contains("no identifier")),
+            "{:?}",
+            v.blockers
+        );
         assert!(v.evidence.is_empty(), "{:?}", v.evidence);
         assert!(
             v.notes

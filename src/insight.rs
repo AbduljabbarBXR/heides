@@ -705,18 +705,44 @@ pub fn coverage_gaps(graph: &CodeGraph, guards_ran: usize) -> Vec<Insight> {
 }
 
 /// A stable identity for a finding, so "is this new" survives a reformat.
+///
+/// The key is the rule, the file and a digest of the message with the line
+/// references removed. The whole message goes into the digest rather than its
+/// first few words, because the first few words are the same for every taint
+/// finding: "user controlled input reaches" says nothing about which sink, so
+/// a SQL finding and a shell finding in the same file were one key, and a
+/// baseline that recorded one of them recorded both.
 pub fn finding_key(guard: &str, file: &str, message: &str) -> String {
     // A line number is position, not identity. Strip "line 12" before digesting
     // so a finding that only moved down the file is still the known finding, and
     // a baseline does not fill itself with noise on the next edit.
     let stripped = strip_line_refs(message);
-    let digits: String = stripped.chars().filter(|c| c.is_ascii_digit()).collect();
-    let letters: String = stripped
-        .chars()
-        .filter(|c| c.is_ascii_alphabetic())
-        .take(24)
-        .collect();
-    format!("{guard}|{file}|{letters}{digits}")
+    format!("{guard}|{file}|{}", digest(&stripped))
+}
+
+/// A short digest of a string.
+///
+/// FNV-1a, 64 bit. Three lines long, no dependency, and stable across
+/// platforms and versions, which is what a key stored in a file has to be.
+fn digest(text: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// The exact identity of a finding: the key plus the line it was reported on.
+///
+/// Two identities, because two jobs need two jobs. The key is what a baseline
+/// matches on, and it survives the finding moving down the file. The
+/// fingerprint is what a CI system stores as "seen", and it is unique per
+/// finding, so two findings of the same rule in the same file are two
+/// fingerprints and not one.
+pub fn fingerprint(guard: &str, file: &str, message: &str, line: u64) -> String {
+    let raw = format!("{}|{line}", finding_key(guard, file, message));
+    digest(&raw)
 }
 
 fn strip_line_refs(message: &str) -> String {

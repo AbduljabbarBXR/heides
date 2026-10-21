@@ -19,8 +19,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::spine::CodeGraph;
 use crate::taint::{
-    SINKS, SOURCES, TaintReport, assigned_var, function_blocks, leading_spaces, make_report,
-    regex_hit, source_taints, strict_class, strict_hit, strict_sinks,
+    SOURCES, TaintReport, assigned_var, function_blocks, leading_spaces, make_report, regex_hit,
+    sink_classes_on_line, source_taints, strict_class, strict_hit, strict_sinks,
 };
 
 const MAX_HOPS: usize = 8;
@@ -548,10 +548,14 @@ fn analyze(fi: &mut FnInfo, lines: &[&str]) {
             }
         }
         // Sinks reached by any tainted name on this line.
-        for (l, pat, kind) in SINKS {
-            if *l != fi.lang || !regex_hit(pat, line) {
-                continue;
-            }
+        //
+        // The classes come from the shared classifier, so a line that holds
+        // `db.exec(...)` is a SQL sink and a line that holds `exec(...)` is a
+        // shell sink. Iterating the table here reported both for the same
+        // line, which is the finding that made the sink classes look
+        // unreliable.
+        for hit in sink_classes_on_line(&fi.lang, line) {
+            let kind = hit.class;
             for (name, pidx) in tainted.iter() {
                 if *pidx != usize::MAX && line.contains(name.as_str()) {
                     let k = kind.to_string();
@@ -916,10 +920,8 @@ pub fn run_workspace_bounded(
             // evidence chain as a function flow. First pass wins per
             // file, line and sink kind.
             if module_scope {
-                for (l, pat, kind) in SINKS {
-                    if *l != fi.lang || !regex_hit(pat, line) {
-                        continue;
-                    }
+                for hit in sink_classes_on_line(&fi.lang, line) {
+                    let kind = hit.class;
                     let mut prov: Option<Prov> = None;
                     for (name, p) in tainted.iter() {
                         if line.contains(name.as_str()) {

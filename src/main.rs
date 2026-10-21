@@ -50,8 +50,61 @@ fn cmd_accepts_flag(cmd: &str, flag: &str) -> bool {
     }
     match cmd {
         "verify" => matches!(flag, "--json" | "--skip-tests"),
+        // The gate flags. `--json` and `--sarif` are the machine readable
+        // forms of the same verdict, `--baseline` and `--new-only` decide
+        // which findings count against the build, and the two severity flags
+        // set the bar.
+        "check" => matches!(
+            flag,
+            "--json" | "--sarif" | "--baseline" | "--new-only" | "--fail-on" | "--min-severity"
+        ),
+        "baseline" => matches!(flag, "--check" | "--json"),
+        "version" => matches!(flag, "--json"),
         _ => false,
     }
+}
+
+/// Flags that take a value, so the value is never read as the root.
+const FLAGS_WITH_VALUE: [&str; 3] = ["--max-bytes", "--fail-on", "--min-severity"];
+
+/// The root of a command, taken from the first argument that is not a flag.
+///
+/// The old shape read the root from a fixed slot, so `heides check --json .`
+/// scanned a directory literally named `--json`. That was fixed by rejecting
+/// the unknown flag, which is right for a flag that does not exist and wrong
+/// for one that does. A command that takes flags and a directory has to find
+/// the directory among the flags, not assume where it is.
+fn root_positional(args: &[String]) -> PathBuf {
+    let mut i = 2usize;
+    while i < args.len() {
+        let a = &args[i];
+        if a.starts_with("--") {
+            if FLAGS_WITH_VALUE.contains(&a.as_str()) {
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        return PathBuf::from(a);
+    }
+    PathBuf::from(".")
+}
+
+/// The value of a flag, in either `--flag value` or `--flag=value` form.
+fn flag_value(args: &[String], flag: &str) -> Option<String> {
+    let mut i = 1usize;
+    while i < args.len() {
+        let a = &args[i];
+        if a == flag {
+            return args.get(i + 1).cloned();
+        }
+        if let Some(rest) = a.strip_prefix(&format!("{flag}=")) {
+            return Some(rest.to_string());
+        }
+        i += 1;
+    }
+    None
 }
 
 fn print_usage() {
@@ -71,6 +124,7 @@ fn print_usage() {
     println!("                  ask the spine: callers, imports, definition, calls");
     println!("                  neighbors, search. dir defaults to .");
     println!("  check [dir]     run every guard and print findings");
+    println!("  baseline [dir]  record the findings the project already accepts");
     println!("  staged [patch] [dir]  check a unified diff before it is applied");
     println!("  plan [text] [dir]     ground an objective against the codebase");
     println!("  scaffold [text] [dir]");
@@ -292,13 +346,13 @@ fn run() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // `--max-bytes N` takes a value, so the positional scan has to step over
-    // both tokens or the number is read as the directory to scan.
+    // A flag with a value takes two tokens, so the positional scan has to step
+    // over both or the value is read as the directory to scan.
     let args: Vec<String> = {
         let mut v: Vec<String> = Vec::new();
         let mut i = 0;
         while i < args.len() {
-            if args[i] == "--max-bytes" {
+            if FLAGS_WITH_VALUE.contains(&args[i].as_str()) {
                 v.push(args[i].clone());
                 if let Some(next) = args.get(i + 1) {
                     v.push(next.clone());
@@ -349,7 +403,13 @@ fn run() -> ExitCode {
                 return ExitCode::SUCCESS;
             }
             "check" => {
-                println!("usage. heides check [dir]");
+                println!(
+                    "usage. heides check [--json] [--sarif] [--baseline] [--new-only] [--fail-on severity] [--min-severity severity] [dir]"
+                );
+                return ExitCode::SUCCESS;
+            }
+            "baseline" => {
+                println!("usage. heides baseline [--check] [dir]");
                 return ExitCode::SUCCESS;
             }
             "staged" => {
@@ -617,37 +677,123 @@ fn run() -> ExitCode {
             ExitCode::SUCCESS
         }
         "check" => {
-            let root = PathBuf::from(arg2);
+            // The root is the first argument that is not a flag, so
+            // `heides check --json .` scans the workspace and not a directory
+            // named `--json`.
+            let root = root_positional(&args);
+            let as_json = args.iter().any(|a| a == "--json");
+            let as_sarif = args.iter().any(|a| a == "--sarif");
+            let use_baseline = args.iter().any(|a| a == "--baseline" || a == "--new-only");
+            let new_only = args.iter().any(|a| a == "--new-only");
+            let min_severity = flag_value(&args, "--min-severity");
+            let fail_on = flag_value(&args, "--fail-on");
             let pulse = Stopwatch::start(&ui, "check");
-            let graph = match indexer::load_or_build(&root) {
+            // The index is refreshed first. A file added since the last scan
+            // was never scanned, and a gate that cannot see a new file is not
+            // a gate.
+            let graph = match indexer::graph_for_check(&root) {
                 Ok(g) => g,
                 Err(e) => {
                     eprintln!("{}", e);
                     return ExitCode::FAILURE;
                 }
             };
-            let (mut reports, cov) = harmony::check_workspace_with_coverage(&root, &graph);
-            // The database guards join the code guards here, so a schema problem
-            // is visible without a second command. A workspace with no database
-            // contributes nothing and the receipt is unchanged.
-            // Both extra guard families, not just the database one. The filter
-            // previously admitted only `database.` guards, so the config
-            // findings that function also returns were dropped here and `check`
-            // reported a clean workspace over a repository with a live key in it.
-            reports
-                .retain(|r| !(r.guard.starts_with("database.") || r.guard.starts_with("config.")));
-            reports.extend(
-                harmony::check_workspace_with_database(&root)
-                    .into_iter()
-                    .filter(|r| r.guard.starts_with("database.") || r.guard.starts_with("config.")),
-            );
+            let (mut reports, cov) = harmony::check_workspace_full(&root, &graph);
             if let Some(p) = pulse {
                 p.finish();
             }
-            // The receipt prints on every run, clean included. 0.15.2 shipped a
-            // check that reported a clean workspace over a workspace it had
-            // analysed nothing in, and the two cases printed the same words.
-            if reports.is_empty() {
+
+            // The severity bar for this run. `--min-severity` decides what is
+            // reported, `--fail-on` decides what fails the build, and both
+            // override the process wide default for this run only.
+            let min_rank = min_severity
+                .as_deref()
+                .and_then(harmony::Threshold::parse)
+                .map(|t| t.rank());
+            if let Some(rank) = min_rank {
+                reports.retain(|r| harmony::severity_rank(&r.severity) >= rank);
+            }
+            let threshold = match fail_on.as_deref().and_then(harmony::Threshold::parse) {
+                Some(t) => t,
+                None => heides::harmony::exit_threshold(),
+            };
+            if let Some(bad) = fail_on
+                .as_deref()
+                .filter(|v| harmony::Threshold::parse(v).is_none())
+            {
+                eprintln!(
+                    "heides: unknown --fail-on value `{bad}`. use blocker, critical, warning or info."
+                );
+                return ExitCode::FAILURE;
+            }
+            if let Some(bad) = min_severity
+                .as_deref()
+                .filter(|v| harmony::Threshold::parse(v).is_none())
+            {
+                eprintln!(
+                    "heides: unknown --min-severity value `{bad}`. use blocker, critical, warning or info."
+                );
+                return ExitCode::FAILURE;
+            }
+
+            // The baseline. A finding the project already accepted is still
+            // reported and still counted, it just does not fail the build.
+            //
+            // The baseline file is the one that already existed, `.heides/baseline`,
+            // written by `heides baseline` and by `heides insight baseline save`.
+            // Two baseline formats in one directory would be two answers to
+            // "what has this project accepted", and only one of them would be
+            // the one the gate reads.
+            let baseline = if use_baseline {
+                Some(insight::load_baseline(&root))
+            } else {
+                None
+            };
+            let baseline_info = baseline.as_ref().map(|b| {
+                let known = reports
+                    .iter()
+                    .filter(|r| {
+                        b.contains_key(&insight::finding_key(&r.guard, &r.file, &r.message))
+                    })
+                    .count();
+                let new = reports.len() - known;
+                heides::report::BaselineInfo {
+                    path: insight::baseline_path(&root).display().to_string(),
+                    known,
+                    new,
+                }
+            });
+            if new_only && let Some(b) = &baseline {
+                reports.retain(|r| {
+                    !b.contains_key(&insight::finding_key(&r.guard, &r.file, &r.message))
+                });
+            }
+            // The findings that decide the exit code. With a baseline, only the
+            // new ones can fail the build.
+            let gate_reports: Vec<&harmony::GuardReport> = match &baseline {
+                Some(b) => reports
+                    .iter()
+                    .filter(|r| {
+                        !b.contains_key(&insight::finding_key(&r.guard, &r.file, &r.message))
+                    })
+                    .collect(),
+                None => reports.iter().collect(),
+            };
+            let gate_failed =
+                !heides::harmony::exit_zero() && harmony::exceeds_refs(&gate_reports, threshold);
+
+            if as_json {
+                let text = heides::report::to_json(
+                    &reports,
+                    &cov,
+                    Some(root.as_path()),
+                    baseline_info.as_ref(),
+                );
+                println!("{text}");
+            } else if as_sarif {
+                let text = heides::report::to_sarif(&reports);
+                println!("{text}");
+            } else if reports.is_empty() {
                 // "clean" is a claim about advisories too, so it never prints
                 // alone when the advisory guard did not run. That guard is gone,
                 // so every guard that ran here is local and every finding names a
@@ -697,15 +843,79 @@ fn run() -> ExitCode {
                 print_flat(&ui, &reports);
                 println!("{}", cov.render());
             }
-            if !heides::harmony::exit_zero()
-                && harmony::exceeds(&reports, heides::harmony::exit_threshold())
-            {
+            if gate_failed {
                 eprintln!(
                     "heides: findings at or above the exit threshold. use --exit-zero for the old behaviour."
                 );
                 return ExitCode::FAILURE;
             }
             ExitCode::SUCCESS
+        }
+        "baseline" => {
+            // The baseline file: the findings this project has already
+            // accepted. Writing it is a decision, so the command says exactly
+            // what it wrote and how many findings it recorded.
+            let root = root_positional(&args);
+            let check_only = args.iter().any(|a| a == "--check");
+            let graph = match indexer::graph_for_check(&root) {
+                Ok(g) => g,
+                Err(e) => {
+                    eprintln!("{}", e);
+                    return ExitCode::FAILURE;
+                }
+            };
+            let (reports, _cov) = harmony::check_workspace_full(&root, &graph);
+            let mut current: std::collections::BTreeMap<String, String> =
+                std::collections::BTreeMap::new();
+            for r in &reports {
+                current.insert(
+                    insight::finding_key(&r.guard, &r.file, &r.message),
+                    r.severity.clone(),
+                );
+            }
+            let stored = insight::load_baseline(&root);
+            if check_only {
+                let fresh = insight::new_keys(&current, &stored);
+                let gone: Vec<&String> = stored
+                    .keys()
+                    .filter(|k| !current.contains_key(*k))
+                    .collect();
+                if fresh.is_empty() && gone.is_empty() {
+                    println!("baseline matches the current findings. nothing changed.");
+                    return ExitCode::SUCCESS;
+                }
+                println!(
+                    "{} finding(s), {} new since the baseline, {} known, {} gone",
+                    current.len(),
+                    fresh.len(),
+                    current.len() - fresh.len(),
+                    gone.len()
+                );
+                for k in &fresh {
+                    println!("  new: {}", k);
+                }
+                // A baseline that no longer matches the code is a stale
+                // baseline, and a stale baseline is how a gate quietly stops
+                // meaning anything. It is reported, and it fails the run.
+                if !fresh.is_empty() || !gone.is_empty() {
+                    return ExitCode::FAILURE;
+                }
+                return ExitCode::SUCCESS;
+            }
+            match insight::save_baseline(&root, &current) {
+                Ok(()) => {
+                    println!(
+                        "baseline saved: {} finding key(s) in {}",
+                        current.len(),
+                        insight::baseline_path(&root).display()
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("heides: could not save the baseline. {}", e);
+                    ExitCode::FAILURE
+                }
+            }
         }
         "verify" => {
             // A machine checkable definition of done: the project's own tests
@@ -1092,11 +1302,15 @@ fn run() -> ExitCode {
             };
             let verdict = grounding::evaluate(&plan, &graph, &root);
             println!("feasible {}", verdict.feasible);
+            println!("status {}", verdict.status);
             for e in &verdict.evidence {
                 println!(
                     "  grounded {} {} at {}:{}",
                     e.kind, e.symbol, e.file, e.line
                 );
+            }
+            for b in &verdict.blockers {
+                println!("  blocked {}", b);
             }
             for n in &verdict.notes {
                 println!("  {}", n);
@@ -1429,7 +1643,23 @@ fn run() -> ExitCode {
         }
         "mcp" => server::run(),
         "version" => {
-            println!("{}", VERSION);
+            // The plain form is one number, for a human. The JSON form is for
+            // a client that has to decide whether this build is new enough to
+            // talk to: the Lens app reads it and refuses an engine that
+            // cannot answer the questions it asks.
+            if args.iter().any(|a| a == "--json") {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "name": "heides",
+                        "version": VERSION,
+                        "protocol": "heides.mcp/v1",
+                        "findings_schema": heides::report::SCHEMA,
+                    })
+                );
+            } else {
+                println!("{}", VERSION);
+            }
             ExitCode::SUCCESS
         }
         _ => {
@@ -1942,6 +2172,24 @@ mod flag_tests {
         }
         // The existing guarantee still holds: an unknown flag is never a path.
         assert!(!cmd_accepts_flag("check", "--max-byte"));
-        assert!(!cmd_accepts_flag("check", "--json"));
+        assert!(!cmd_accepts_flag("check", "--sarin"));
+        assert!(!cmd_accepts_flag("scan", "--json"));
+    }
+
+    #[test]
+    fn the_machine_readable_flags_are_accepted_where_they_mean_something() {
+        // The gate flags exist so a CI job can read the answer. A flag that is
+        // accepted by a command that ignores it is worse than a flag that is
+        // rejected, because the job then reads a format it did not ask for.
+        assert!(cmd_accepts_flag("check", "--json"));
+        assert!(cmd_accepts_flag("check", "--sarif"));
+        assert!(cmd_accepts_flag("check", "--baseline"));
+        assert!(cmd_accepts_flag("check", "--new-only"));
+        assert!(cmd_accepts_flag("check", "--fail-on"));
+        assert!(cmd_accepts_flag("check", "--min-severity"));
+        assert!(cmd_accepts_flag("baseline", "--check"));
+        assert!(cmd_accepts_flag("version", "--json"));
+        assert!(!cmd_accepts_flag("scan", "--sarif"));
+        assert!(!cmd_accepts_flag("baseline", "--sarif"));
     }
 }

@@ -26,7 +26,7 @@ pub struct TaintReport {
 /// Source patterns per language, user input entry points. Shared with the
 /// interprocedural engine, which reads the same rows so the two layers can
 /// never disagree about what a source is.
-pub(crate) const SOURCES: [(&str, &str); 38] = [
+pub(crate) const SOURCES: [(&str, &str); 45] = [
     (
         "javascript",
         r"\b(req|request)\.(query|params|body|headers|cookies)\b",
@@ -122,6 +122,25 @@ pub(crate) const SOURCES: [(&str, &str); 38] = [
         "typescript",
         r"\b(req|request)\.(query|params|body|headers|cookies)\b",
     ),
+    // Dart. The language the Flutter half of the world writes in, and it had
+    // no source row at all, so a Dart file could never taint: no SQL injection
+    // through a sqflite query, no command injection through Process.run, no
+    // cross site scripting through a WebView.
+    //
+    // The shapes are the ones a Dart service actually reads:
+    //
+    //   stdin.readLineSync()          a command line tool reading its input
+    //   Platform.environment[]        the environment
+    //   request.body / readAsString() the body of an inbound request (shelf)
+    //   controller.text               what the user typed into a Flutter field
+    //   queryParameters[]             a value out of a parsed request URL
+    ("dart", r"\bstdin\s*\.\s*readLineSync\s*\("),
+    ("dart", r"\bstdin\s*\.\s*readLine\s*\("),
+    ("dart", r"\bPlatform\s*\.\s*environment\s*\["),
+    ("dart", r"\brequest\s*\.\s*body\b"),
+    ("dart", r"\brequest\s*\.\s*readAsString\s*\("),
+    ("dart", r"\bcontroller\s*\.\s*text\b"),
+    ("dart", r"\bqueryParameters\s*\["),
 ];
 
 /// Sinks are per language. Where a name is ambiguous between SQL and something
@@ -179,6 +198,159 @@ fn is_only_literal_or_sanitizer(line: &str) -> bool {
         }
     }
     rhs_is_constant(t)
+}
+
+/// One call expression on a line.
+///
+/// The sink tables match a line, and a line can hold more than one call. That
+/// is where the "a SQL sink and a shell sink on one line" findings came from:
+/// a line with `db.exec(cmd)` matched the receiver scoped SQL row and the bare
+/// shell row, and both were reported. The class of a sink is a property of the
+/// call, not of the line, so the call is what gets classified.
+struct CallSite {
+    /// The receiver qualified callee: `db.query`, `Process.run`.
+    expr: String,
+    /// Where the callee name starts inside the expression.
+    name_offset: usize,
+    /// Where the call expression starts in the line.
+    start: usize,
+    /// Where the call expression ends in the line.
+    end: usize,
+}
+
+/// Every call expression on a line, in the order they appear.
+fn call_sites(line: &str) -> Vec<CallSite> {
+    let b = line.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i];
+        if c.is_ascii_alphanumeric() || c == b'_' {
+            let start = i;
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            let name_end = i;
+            let mut j = i;
+            while j < b.len() && b[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < b.len() && b[j] == b'(' {
+                // The matching close paren, so a nested call does not split
+                // the expression in half.
+                let mut depth = 0i32;
+                let mut k = j;
+                while k < b.len() {
+                    if b[k] == b'(' {
+                        depth += 1;
+                    } else if b[k] == b')' {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    k += 1;
+                }
+                let end = if k < b.len() { k + 1 } else { k };
+                // The receiver in front of the name: `db.`, `this.`, `self::`,
+                // `Process.`. The characters that can be part of one.
+                let mut rs = start;
+                while rs > 0 {
+                    let p = b[rs - 1];
+                    if p.is_ascii_alphanumeric()
+                        || p == b'_'
+                        || p == b'.'
+                        || p == b'?'
+                        || p == b':'
+                        || p == b'>'
+                        || p == b'$'
+                    {
+                        rs -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                out.push(CallSite {
+                    expr: line[rs..name_end].to_string(),
+                    name_offset: start - rs,
+                    start: rs,
+                    end,
+                });
+                i = end;
+                continue;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The sink classes that fire on a line, one entry per class.
+///
+/// The classification is per call, not per line, so a line holding a receiver
+/// scoped sink and a bare one reports the more specific class only. The
+/// interprocedural pass uses this too, because it reported the same line as
+/// both a SQL sink and a shell sink for exactly the reason this function
+/// exists.
+pub(crate) fn sink_classes_on_line(lang: &str, line: &str) -> Vec<SinkHit> {
+    let sites = call_sites(line);
+    // The groups are the calls on the line, plus one group for the rules that
+    // matched something that is not a call. Two rules that match the same call
+    // are one sink with two candidate classes, and the more specific one wins.
+    let mut groups: Vec<((i64, &'static str), SinkHit)> = Vec::new();
+    for (l, pat, sink) in SINKS {
+        if *l != lang {
+            continue;
+        }
+        let Some((pos, _len)) = find_match(pat, line) else {
+            continue;
+        };
+        let site = sites.iter().position(|s| s.start <= pos && pos < s.end);
+        let (covered, expr) = match site {
+            Some(idx) => (
+                sites[idx]
+                    .name_offset
+                    .saturating_sub(pos - sites[idx].start),
+                sites[idx].expr.clone(),
+            ),
+            None => (0usize, String::new()),
+        };
+        let key = match site {
+            Some(idx) => (idx as i64, ""),
+            None => (-1i64, *sink),
+        };
+        let hit = SinkHit {
+            class: sink,
+            expr,
+            covered,
+        };
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, existing)) => {
+                // The more specific rule wins, so `db.exec` is SQL and a bare
+                // `exec` is a shell, and one call never reports under two
+                // classes.
+                if covered > existing.covered {
+                    *existing = hit;
+                }
+            }
+            None => groups.push((key, hit)),
+        }
+    }
+    groups.into_iter().map(|(_, h)| h).collect()
+}
+
+/// One sink class that fired on a line, and the call it belongs to.
+pub(crate) struct SinkHit {
+    /// The sink class: `SQL`, `shell`, `XSS`.
+    pub class: &'static str,
+    /// The receiver qualified callee, empty when the rule matched something
+    /// that is not a call.
+    pub expr: String,
+    /// How much of the receiver the rule matched. A rule that matched the
+    /// receiver (`db.exec`) is more specific than one that matched only the
+    /// callee (`exec`), and the specific one wins.
+    covered: usize,
 }
 
 /// The part of a statement outside string literals, used only to spot the
@@ -512,6 +684,18 @@ pub(crate) const SANITIZERS: &[(&str, &str)] = &[
     // finding is the wrong trade. A project that wraps an escape in its own
     // `safe_shell()` now gets a false positive, which is the honest direction:
     // it is visible, and the wrapper can be added as a named row.
+    //
+    // Dart. `HtmlEscape` is the package:html wrapper, and it is the one that
+    // escapes for HTML output.
+    ("dart", r"\bHtmlEscape\s*\.\s*convert\s*\("),
+    ("dart", r"\bconst\s+HtmlEscape"),
+    ("dart", r"\bhtmlEscape\s*\("),
+    // Java and C#. A prepared statement binds the value, and the HTML
+    // encoders escape it for the output it lands in.
+    ("java", r"\bPreparedStatement\b"),
+    ("csharp", r"\bHttpUtility\s*\.\s*HtmlEncode\s*\("),
+    ("csharp", r"\bWebUtility\s*\.\s*HtmlEncode\s*\("),
+    ("csharp", r"\bAntiXss\s*\.\s*HtmlEncode\s*\("),
 ];
 
 pub(crate) const SINKS: &[(&str, &str, &str)] = &[
@@ -700,6 +884,69 @@ pub(crate) const SINKS: &[(&str, &str, &str)] = &[
     // JavaScript is. Rows written under "typescript" are dead weight that
     // looks like coverage and never runs, which is the same lie as a table that
     // claims a language is scanned when the matcher disagrees.
+    //
+    // Dart. The rows are the ones the Dart packages actually expose:
+    //
+    //   db.execute(...) / db.rawQuery(...)   sqflite, the SQL sink
+    //   Process.run(...) / Process.start(...) the shell sink
+    //   File(...).readAsString()             the filesystem sink
+    //   loadUrl(...) / loadHtmlString(...)    a WebView, the XSS sink
+    //   invokeMethod(...)                    a platform channel
+    //
+    // The receiver is required for the SQL rows on purpose. Dart has no
+    // `execute` in the standard library outside a database, and a bare
+    // `execute(` row would fire on every function with that name.
+    (
+        "dart",
+        r"\b(db|database|conn|connection|tx|pool|sqlite|executor)\s*\.\s*(execute|rawQuery|rawUpdate|rawInsert|rawDelete|query|insert|update|delete)\s*\(",
+        "SQL",
+    ),
+    ("dart", r"\b(File|Directory)\s*\(", "filesystem"),
+    ("dart", r"\breadAsString\s*\(", "filesystem"),
+    ("dart", r"\bwriteAsString\s*\(", "filesystem"),
+    ("dart", r"\bwriteAsBytes\s*\(", "filesystem"),
+    // A WebView renders what it is given. Loading a URL that came from the
+    // request, or HTML built from it, is cross site scripting in the app.
+    ("dart", r"\bloadUrl\s*\(", "XSS"),
+    ("dart", r"\bloadHtmlString\s*\(", "XSS"),
+    ("dart", r"\bloadData\s*\(", "XSS"),
+    // A platform channel hands a message to the host, and the host can do
+    // things with it that the Dart side cannot see.
+    ("dart", r"\binvokeMethod\s*\(", "platform channel"),
+    // Cross site scripting in the languages that render HTML. `innerHTML` is
+    // the classic one, and it was not in the table at all: a DOM XSS in a
+    // React or vanilla app was invisible to every layer.
+    ("javascript", r"\.\s*(innerHTML|outerHTML)\s*=", "XSS"),
+    ("javascript", r"\bdocument\s*\.\s*write\s*\(", "XSS"),
+    ("javascript", r"\binsertAdjacentHTML\s*\(", "XSS"),
+    ("javascript", r"\bdangerouslySetInnerHTML\b", "XSS"),
+    (
+        "javascript",
+        r"\bresolve\s*\.\s*dangerouslySetInnerHTML\b",
+        "XSS",
+    ),
+    ("python", r"\brender_template_string\s*\(", "XSS"),
+    ("python", r"\bMarkup\s*\(", "XSS"),
+    // Deserialization. A pickle, a YAML load or a PHP unserialize turns bytes
+    // into objects, and the object decides what the program does next.
+    ("python", r"\bpickle\s*\.\s*loads?\s*\(", "deserialization"),
+    ("python", r"\bcPickle\s*\.\s*loads?\s*\(", "deserialization"),
+    (
+        "python",
+        r"\byaml\s*\.\s*(load|unsafe_load|full_load)\s*\(",
+        "deserialization",
+    ),
+    ("python", r"\bmarshal\s*\.\s*loads\s*\(", "deserialization"),
+    ("javascript", r"\bunserialize\s*\(", "deserialization"),
+    ("php", r"\bunserialize\s*\(", "deserialization"),
+    ("ruby", r"\bMarshal\s*\.\s*load\s*\(", "deserialization"),
+    (
+        "ruby",
+        r"\bYAML\s*\.\s*(load|unsafe_load)\s*\(",
+        "deserialization",
+    ),
+    ("java", r"\bObjectInputStream\s*\(", "deserialization"),
+    ("java", r"\breadObject\s*\(", "deserialization"),
 ];
 
 /// Targets that turn an SSRF into a cloud credential theft. When a tainted
@@ -911,6 +1158,52 @@ pub(crate) const SSRF_SINKS: &[StrictSink] = &[
         "ssrf",
         &[]
     ),
+    // Dart. The HTTP client is the one a Flutter app and a Dart service both
+    // use, so a URL that came from the request reaching it is the same
+    // request forgery as anywhere else.
+    sink!(
+        "dart",
+        r"\bhttp\s*\.\s*(get|post|put|delete|patch|head|read)\s*\(",
+        "SSRF",
+        "ssrf",
+        &[]
+    ),
+    sink!(
+        "dart",
+        r"\b(client|dio|HttpClient)\s*\.\s*(get|post|put|delete|patch|head)\s*\(",
+        "SSRF",
+        "ssrf",
+        &[]
+    ),
+    // Dart shell execution lives in its own table, below.
+];
+
+/// Command execution sinks that need a co occurrence list to be precise.
+///
+/// A shell sink is a different question from an SSRF sink: the risk is not
+/// where the request goes, it is that the value can change the structure of
+/// the command. The rules live in their own table because they are gated the
+/// same way but they are not the same thing.
+pub(crate) const SHELL_SINKS: &[StrictSink] = &[
+    // Dart shell execution. `Process.run` passes an argument list to the
+    // program directly, so it is not a shell and nothing can be injected
+    // through it. The two shapes that do reach a shell are `runInShell`, and
+    // `run` or `start` with `runInShell: true` on the same line. The
+    // co occurrence list is what tells the two apart.
+    sink!(
+        "dart",
+        r"\bProcess\s*\.\s*runInShell\s*\(",
+        "shell",
+        "shell",
+        &[]
+    ),
+    sink!(
+        "dart",
+        r"\bProcess\s*\.\s*(run|runSync|start)\s*\(",
+        "shell",
+        "shell",
+        &["runInShell"]
+    ),
 ];
 
 /// NoSQL injection: request data reaching a document query, where an attacker
@@ -1064,11 +1357,12 @@ pub(crate) const NOSQL_SINKS: &[StrictSink] = &[
     ),
 ];
 
-/// Every strict rule for one language, SSRF before NoSQL.
+/// Every strict rule for one language, SSRF and NoSQL before shell.
 pub(crate) fn strict_sinks(lang: &str) -> impl Iterator<Item = &'static StrictSink> {
     SSRF_SINKS
         .iter()
         .chain(NOSQL_SINKS.iter())
+        .chain(SHELL_SINKS.iter())
         .filter(move |s| s.lang == lang)
 }
 
@@ -1111,6 +1405,95 @@ fn article(class: &str) -> &'static str {
         Some('a' | 'e' | 'i' | 'o' | 'u' | 'A' | 'E' | 'I' | 'O' | 'U') => "an",
         _ => "a",
     }
+}
+/// The sink classes where a function parameter reaching the sink is worth a
+/// report.
+///
+/// A parameter is only untrusted where a caller supplies something untrusted,
+/// and that needs argument tracking rather than a pattern. Dart gets the
+/// pattern anyway, because in a Dart service or a Flutter handler the
+/// parameter usually is the request data and nothing else in the language
+/// says so.
+///
+/// The filesystem class is deliberately not in this list: `File(path)` with a
+/// path argument is ordinary code, and a rule that fires on ordinary code is a
+/// rule nobody reads.
+const PARAM_SINK_CLASSES: [&str; 8] = [
+    "SQL",
+    "shell",
+    "XSS",
+    "deserialization",
+    "eval",
+    "NoSQL",
+    "SSRF",
+    "prompt",
+];
+
+/// The parameter names of a Dart function signature.
+///
+/// The name is the last identifier in each parameter: `String id` is `id`,
+/// `int count = 3` is `count`, `{required this.name}` is `name`.
+fn dart_parameters(sig: &str) -> Vec<String> {
+    let Some(open) = sig.find('(') else {
+        return Vec::new();
+    };
+    let mut depth = 0i32;
+    let mut close = sig.len();
+    for (i, b) in sig.as_bytes().iter().enumerate().skip(open) {
+        match b {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let inner = &sig[open + 1..close];
+    let mut out = Vec::new();
+    for part in split_top_level_commas(inner) {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        // The trailing identifier, skipping a numeric default.
+        let ident = part
+            .rsplit(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .find(|t| !t.is_empty() && !t.chars().all(|c| c.is_ascii_digit()))
+            .unwrap_or("");
+        if ident.is_empty() {
+            continue;
+        }
+        // A type with no name in it is not a parameter.
+        if ident.chars().all(|c| c.is_uppercase() || c == '_') {
+            continue;
+        }
+        out.push(ident.to_string());
+    }
+    out
+}
+
+/// Whether a name appears in a line as a whole word.
+///
+/// A substring match is not enough for a parameter name: `id` inside `void`
+/// or `idempotent` is not a use of the parameter.
+fn mentions_name(line: &str, name: &str) -> bool {
+    let mut from = 0usize;
+    while let Some(found) = line[from..].find(name) {
+        let at = from + found;
+        let end = at + name.len();
+        let before_ok = at == 0 || !is_word_char(line[..at].chars().last().unwrap_or(' '));
+        let after_ok =
+            end >= line.len() || !is_word_char(line[end..].chars().next().unwrap_or(' '));
+        if before_ok && after_ok {
+            return true;
+        }
+        from = at + name.len();
+    }
+    false
 }
 
 /// Scan one source file for taint flows.
@@ -1200,6 +1583,16 @@ pub fn scan_file(path: &Path, content: &str) -> Vec<TaintReport> {
         std::collections::HashSet::new();
     for (block_start, block_end, indent) in blocks {
         let mut tainted: Vec<(String, usize)> = Vec::new();
+        // Dart function parameters. In a Dart service and in a Flutter
+        // handler the parameter usually is the request data, and nothing else
+        // in the language says so, so a parameter is treated as untrusted for
+        // the classes where that matters. The filesystem class is not one of
+        // them: `File(path)` with a path argument is ordinary code.
+        let param_names: Vec<String> = if lang == "dart" {
+            dart_parameters(lines[block_start])
+        } else {
+            Vec::new()
+        };
         for i in block_start..=block_end {
             let line = lines[i];
             let line_no = i as u64 + 1;
@@ -1220,71 +1613,97 @@ pub fn scan_file(path: &Path, content: &str) -> Vec<TaintReport> {
                     }
                 }
             }
-            for (l, pat, sink) in SINKS {
-                if *l != lang {
-                    continue;
-                }
-                if !regex_hit(pat, line) {
-                    continue;
-                }
+            // Classify every sink rule that fires on this line against the
+            // call it belongs to. A line that holds one call gets one class,
+            // and the class is the one the most specific rule claims for that
+            // call.
+            let hits: Vec<SinkHit> = sink_classes_on_line(&lang, line);
+            // `used` is the flow from a name to a sink. A source read inline
+            // in the sink call has no name at all, which is the normal Ruby
+            // shape: `system(params[:cmd])` reads params and hands it straight
+            // to the sink. `reads_source` is exactly that case, so it counts.
+            //
+            // It is not applied to every language. It is applied to ruby and
+            // to c and cpp, where the shape is the normal one, and it is
+            // deliberately not applied to javascript or java, where an inline
+            // `req.query.x` reaching a sink is rarer and the broadened gate has
+            // not been measured there.
+            //
+            // Sanitizers and literals both end the flow, and both are checked
+            // before the sink is reported rather than after, so a sanitized
+            // value never reaches the report at all.
+            let sanitized = SANITIZERS
+                .iter()
+                .any(|(sl, pat)| *sl == lang && regex_hit(pat, line));
+            let line_is_literal = is_only_literal_or_sanitizer(line);
+            let inline_source =
+                reads_source && matches!(lang.as_str(), "ruby" | "c" | "cpp") && !line_is_literal;
+            // A tainted name from a real source read reaches this line.
+            let tainted_on_line = tainted.iter().any(|(v, _)| line.contains(v.as_str()));
+            // A Dart parameter reaches this line. It is a weaker claim than a
+            // source read, so it is kept apart and only counts for the classes
+            // where a parameter reaching the sink is worth a report.
+            let param_on_line = param_names.iter().any(|p| mentions_name(line, p.as_str()));
+            let used = !sanitized
+                && !line_is_literal
+                && (inline_source || tainted_on_line || param_on_line);
+            let source = tainted.iter().find(|(_, src_i)| {
+                let src_line = lines[*src_i];
+                let src_indent = leading_spaces(src_line);
+                *src_i < i && src_indent >= indent && (i - *src_i) < 60
+            });
+            // The evidence line names where the value came from. A parameter
+            // has no source line of its own, so it says so.
+            let evidence = if source.is_some() {
+                source_evidence(source, line_no)
+            } else if param_on_line {
+                "a function parameter".to_string()
+            } else {
+                source_evidence(None, line_no)
+            };
+            for hit in &hits {
                 // Overlapping patterns are deliberate (a bare name plus a
                 // receiver scoped one). Report a line and sink class once.
-                if !reported_pairs.insert((line_no, sink)) {
+                if !reported_pairs.insert((line_no, hit.class)) {
                     continue;
                 }
-                // `used` is the flow from a name to a sink. A source read inline
-                // in the sink call has no name at all, which is the normal Ruby
-                // shape: `system(params[:cmd])` reads params and hands it straight
-                // to the sink. `reads_source` is exactly that case, so it counts.
-                //
-                // It is not applied to every language. It is applied to ruby and
-                // to c and cpp, where the shape is the normal one: a Rails
-                // controller calls `system(params[:cmd])`, and compact C calls
-                // `strcpy(buf, getenv("NAME"))`, both with nothing in between to
-                // bind. Both are measured, 536 real Ruby files and 401 real C++
-                // files, and both report zero false criticals.
-                //
-                // It is deliberately not applied to javascript or java, where an
-                // inline `req.query.x` reaching a sink is rarer and the broadened
-                // gate has not been measured there.
-                // Sanitizers and literals both end the flow, and both are checked
-                // before the sink is reported rather than after, so a sanitized
-                // value never reaches the report at all.
-                let sanitized = SANITIZERS
-                    .iter()
-                    .any(|(sl, pat)| *sl == lang && regex_hit(pat, line));
-                let line_is_literal = is_only_literal_or_sanitizer(line);
-                let inline_source = reads_source
-                    && matches!(lang.as_str(), "ruby" | "c" | "cpp")
-                    && !line_is_literal;
-                let used = !sanitized
-                    && !line_is_literal
-                    && (inline_source || tainted.iter().any(|(v, _)| line.contains(v.as_str())));
-                let source = tainted.iter().find(|(_, src_i)| {
-                    let src_line = lines[*src_i];
-                    let src_indent = leading_spaces(src_line);
-                    *src_i < i && src_indent >= indent && (i - *src_i) < 60
-                });
-                if *sink == "prompt" {
+                // A parameter only counts as untrusted input for the classes
+                // where that is worth a report.
+                if param_on_line
+                    && !tainted_on_line
+                    && !inline_source
+                    && !PARAM_SINK_CLASSES.contains(&hit.class)
+                {
+                    continue;
+                }
+                if hit.class == "prompt" {
                     if used {
                         reports.push(make_report(
                             path,
                             line_no,
                             format!(
                                 "user input reaches a prompt construction on this line (prompt injection risk). source {}",
-                                source_evidence(source, line_no)
+                                evidence
                             ),
                         ));
                     }
                 } else if used || source.is_some() {
+                    // The sink is named, not just its class: `db.query` and
+                    // `db.raw` are different problems on the same line.
+                    let where_ = if hit.expr.is_empty() {
+                        "on this line".to_string()
+                    } else {
+                        format!("at {}", hit.expr)
+                    };
                     reports.push(make_report(
                         path,
                         line_no,
                         format!(
-                            "user controlled input reaches {} {} sink on this line. source {}",
-                            article(sink),
-                            sink,
-                            source_evidence(source, line_no)
+                            "user controlled input reaches {} {} sink {}. source {}",
+                            article(hit.class),
+                            hit.class,
+                            where_,
+                            evidence
                         ),
                     ));
                 }
@@ -1293,7 +1712,7 @@ pub fn scan_file(path: &Path, content: &str) -> Vec<TaintReport> {
             // the handler is not enough, the tainted value has to reach this
             // line, otherwise every handler that reads input and calls a health
             // check endpoint turns into a finding.
-            if !used_as_value(&tainted, line) && !reads_source {
+            if !used_as_value(&tainted, line) && !reads_source && !param_on_line {
                 continue;
             }
             let source = tainted.iter().find(|(_, src_i)| {
@@ -1373,6 +1792,15 @@ fn is_word_char(c: char) -> bool {
 
 /// Match a rule pattern against a line with word boundary support.
 pub(crate) fn regex_hit(pattern: &'static str, line: &str) -> bool {
+    find_match(pattern, line).is_some()
+}
+
+/// The byte position and length of a rule pattern's match on a line.
+///
+/// The same matching as `regex_hit`, with the position kept, because a sink
+/// rule has to be attributed to the call it matched rather than to the line it
+/// happened to sit on.
+fn find_match(pattern: &'static str, line: &str) -> Option<(usize, usize)> {
     // Lock free on the hot path. This runs once per rule row per line, so a
     // 49KB file took roughly seventy thousand calls, and every one of them took
     // a mutex. Measured at 75 microseconds per call on one large file, which is
@@ -1423,11 +1851,11 @@ pub(crate) fn regex_hit(pattern: &'static str, line: &str) -> bool {
                 true
             };
             if before_ok && after_ok {
-                return true;
+                return Some((pos, cand.len()));
             }
         }
     }
-    false
+    None
 }
 
 /// Normalize a rule pattern once and enumerate every concrete candidate
@@ -1506,6 +1934,7 @@ fn strict_sinks_all() -> Vec<&'static str> {
     SSRF_SINKS
         .iter()
         .chain(NOSQL_SINKS.iter())
+        .chain(SHELL_SINKS.iter())
         .map(|s| s.pattern)
         .collect()
 }

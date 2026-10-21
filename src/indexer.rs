@@ -35,12 +35,65 @@ fn skip_dir(name: &str) -> bool {
             | "dist"
             | "build"
             | "out"
+            // Flutter and Dart build products. `.plugin_symlinks` is a
+            // directory of links into the pub cache: the same plugin code
+            // under a second path, so every finding in it was reported twice.
+            | ".dart_tool"
+            | ".plugin_symlinks"
+            | ".pub-cache"
+            | ".expo"
+            | ".gradle"
+            | "Pods"
+            | "coverage"
+            | "htmlcov"
+            | ".terraform"
     )
 }
 
 pub fn collect_files(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     walk(root, &mut out);
+    out
+}
+
+/// The files of a workspace, with the workspace policy applied.
+///
+/// The policy is applied at the walk rather than at the guard, because a file
+/// that is not scanned produces no findings at all: not a finding that was
+/// suppressed, not a finding that was deduplicated, no finding. That is the
+/// difference between noise control and noise hiding, and it is why the
+/// receipt counts what was excluded.
+pub fn collect_files_with_policy(root: &Path, policy: &crate::policy::Policy) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let abs_root = abs_root_of(root);
+    walk_with_policy(root, &abs_root, policy, &mut out);
+    out
+}
+
+/// The files the policy excluded, so the receipt can name them.
+///
+/// Only files the walker would otherwise have read count as excluded. A file
+/// inside `node_modules` was never in scope, so it is not something the policy
+/// excluded, and saying so would put a number in the receipt that nobody can
+/// act on.
+pub fn excluded_files(
+    root: &Path,
+    policy: &crate::policy::Policy,
+    graph: &CodeGraph,
+) -> Vec<String> {
+    let abs_root = abs_root_of(root);
+    let mut out = Vec::new();
+    for p in collect_files(root) {
+        let key = rel_key(&abs_root, &p);
+        if policy.is_ignored(&key) {
+            out.push(key);
+        }
+    }
+    let indexed: std::collections::HashSet<String> =
+        graph.files.iter().map(|f| f.path.clone()).collect();
+    out.retain(|k| !indexed.contains(k));
+    out.sort();
+    out.dedup();
     out
 }
 
@@ -62,6 +115,55 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
             && let Ok(meta) = std::fs::metadata(&path)
             && meta.len() <= MAX_FILE_BYTES
         {
+            out.push(path);
+        }
+    }
+}
+
+/// The walk with the policy applied: an excluded path is not descended into,
+/// an excluded file is not collected, and a file over the size limit is not
+/// read.
+fn walk_with_policy(
+    dir: &Path,
+    abs_root: &Path,
+    policy: &crate::policy::Policy,
+    out: &mut Vec<PathBuf>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(name) = entry.file_name().to_str()
+                && skip_dir(name)
+            {
+                continue;
+            }
+            let key = rel_key(abs_root, &path);
+            if policy.is_ignored(&key) {
+                continue;
+            }
+            walk_with_policy(&path, abs_root, policy, out);
+        } else if path.is_file() {
+            let key = rel_key(abs_root, &path);
+            if policy.is_ignored(&key) {
+                continue;
+            }
+            if !parser::is_indexable(&path) {
+                continue;
+            }
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            let limit = policy.max_file_bytes.unwrap_or(MAX_FILE_BYTES);
+            if meta.len() > limit {
+                continue;
+            }
+            let lang = parser::detect_language(&path).unwrap_or_default();
+            if !policy.language_allowed(&lang) {
+                continue;
+            }
             out.push(path);
         }
     }
@@ -109,7 +211,8 @@ pub fn rel_key(abs_root: &Path, path: &Path) -> String {
 /// Returns the graph and the number of files successfully parsed.
 pub fn build_graph(root: &Path) -> (CodeGraph, usize) {
     let abs_root = abs_root_of(root);
-    let files = collect_files(root);
+    let policy = crate::policy::Policy::load(root);
+    let files = collect_files_with_policy(root, &policy);
     // Two files can walk to one key: rel_key canonicalises, so anything reached
     // through a symlink lands on the same string as its target. `files.path` is
     // a PRIMARY KEY, so the second insert aborted the whole save and the scan
@@ -199,7 +302,8 @@ fn fill_graph(graph: &mut CodeGraph, entries: &[(PathBuf, String)]) -> usize {
 /// files that were added, changed or removed.
 pub fn update_graph(root: &Path, graph: &mut CodeGraph) -> usize {
     let abs_root = abs_root_of(root);
-    let files = collect_files(root);
+    let policy = crate::policy::Policy::load(root);
+    let files = collect_files_with_policy(root, &policy);
     // `files.path` is a PRIMARY KEY, and rel_key canonicalises, so a symlink and
     // its target walk to one key and the second INSERT aborted the entire save:
     // "could not save index: UNIQUE constraint failed: files.path", exit 1, and
@@ -319,6 +423,22 @@ pub fn load_or_build(root: &Path) -> Result<CodeGraph, String> {
         eprintln!("built index from {} parsed files", count);
         Ok(graph)
     }
+}
+
+/// The graph for a gate, refreshed when the workspace moved under the index.
+///
+/// The index is a cache, and a cache that is never invalidated is a lie: a
+/// file added since the last scan was never scanned, and the gate reported the
+/// workspace clean. The refresh is a walk plus a reparse of the files that
+/// changed, which is what `scan` does, so it costs the same as a scan and
+/// not more.
+pub fn graph_for_check(root: &Path) -> Result<CodeGraph, String> {
+    let mut graph = load_or_build(root)?;
+    let changed = update_graph(root, &mut graph);
+    if changed > 0 {
+        crate::spine::save(&graph, &PathBuf::from(root))?;
+    }
+    Ok(graph)
 }
 
 #[cfg(test)]

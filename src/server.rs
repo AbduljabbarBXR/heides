@@ -133,45 +133,6 @@ fn report_lines(reports: &[harmony::GuardReport], expand: bool) -> String {
 /// client. The lesson outlives the helper, because the next setting an agent
 /// can pass will have the same shape. A setting that changes behaviour is
 /// scoped to the call that asked for it, never to the process.
-fn report_json(reports: &[harmony::GuardReport], cov: &harmony::Coverage) -> String {
-    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
-    for r in reports {
-        *counts.entry(&r.severity).or_insert(0) += 1;
-    }
-    let findings: Vec<serde_json::Value> = reports
-        .iter()
-        .map(|r| {
-            json!({
-                "guard": r.guard,
-                "severity": r.severity,
-                "message": r.message,
-                "file": r.file,
-                "line": r.line,
-            })
-        })
-        .collect();
-    serde_json::to_string_pretty(&json!({
-        "clean": reports.is_empty(),
-        "coverage": {
-            "files": cov.files,
-            "files_read": cov.files_read,
-            "languages": cov.languages,
-            "taint_untested": cov.taint_untested,
-            "no_grammar": cov.no_grammar,
-            "unreadable": cov.unreadable,
-            "receipt": cov.render(),
-        },
-        "counts": {
-            "blocker": counts.get("blocker").copied().unwrap_or(0),
-            "critical": counts.get("critical").copied().unwrap_or(0),
-            "warning": counts.get("warning").copied().unwrap_or(0),
-            "info": counts.get("info").copied().unwrap_or(0),
-        },
-        "findings": findings,
-    }))
-    .unwrap_or_default()
-}
-
 fn load_graph(root: &str) -> Result<spine::CodeGraph, String> {
     indexer::load_or_build(&std::path::PathBuf::from(root))
 }
@@ -232,6 +193,7 @@ fn handle(id: &Value, method: &str, params: &Value) {
                 "spine.query" => {
                     let kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("");
                     let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    let limits = Limits::from_args(&args);
                     let graph = match load_graph(&root) {
                         Ok(g) => g,
                         Err(e) => {
@@ -255,7 +217,7 @@ fn handle(id: &Value, method: &str, params: &Value) {
                                     })
                                     .collect();
                                 lines.insert(0, format!("{} call site(s)", callers.len()));
-                                lines.join("\n")
+                                bounded(lines, &limits)
                             }
                         }
                         "imports" => {
@@ -273,7 +235,7 @@ fn handle(id: &Value, method: &str, params: &Value) {
                                     })
                                     .collect();
                                 lines.insert(0, format!("{} importer(s)", importers.len()));
-                                lines.join("\n")
+                                bounded(lines, &limits)
                             }
                         }
                         "definition" => {
@@ -290,7 +252,7 @@ fn handle(id: &Value, method: &str, params: &Value) {
                                         )
                                     })
                                     .collect();
-                                lines.join("\n")
+                                bounded(lines, &limits)
                             }
                         }
                         "calls" => {
@@ -308,7 +270,7 @@ fn handle(id: &Value, method: &str, params: &Value) {
                                     })
                                     .collect();
                                 lines.insert(0, format!("{} call(s)", calls.len()));
-                                lines.join("\n")
+                                bounded(lines, &limits)
                             }
                         }
                         "search" => match spine::search(&std::path::PathBuf::from(&root), name) {
@@ -328,7 +290,7 @@ fn handle(id: &Value, method: &str, params: &Value) {
                                         h.name, h.kind, name, h.file, h.line, doc
                                     ));
                                 }
-                                lines.join("\n")
+                                bounded(lines, &limits)
                             }
                             Err(e) => e,
                         },
@@ -341,6 +303,7 @@ fn handle(id: &Value, method: &str, params: &Value) {
                 }
                 "spine.neighbors" => {
                     let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    let limits = Limits::from_args(&args);
                     let graph = match load_graph(&root) {
                         Ok(g) => g,
                         Err(e) => {
@@ -386,7 +349,7 @@ fn handle(id: &Value, method: &str, params: &Value) {
                             ));
                         }
                     }
-                    ok(id, text_result(lines.join("\n")));
+                    ok(id, text_result(bounded(lines, &limits)));
                 }
                 "spine.help" => {
                     // The long guidance `tools/list` deliberately left out.
@@ -511,10 +474,12 @@ fn handle(id: &Value, method: &str, params: &Value) {
                             return;
                         }
                     };
-                    let (reports, cov) = harmony::check_workspace_with_coverage(
-                        &std::path::PathBuf::from(&root),
-                        &graph,
-                    );
+                    // The full workspace check, so the report is the same
+                    // verdict the command line gives: the code guards, the
+                    // database guards, the configuration guards and the
+                    // workspace policy.
+                    let (reports, cov) =
+                        harmony::check_workspace_full(&std::path::PathBuf::from(&root), &graph);
                     // The receipt travels inside the JSON, because an agent that
                     // receives a clean result must be able to see how much was
                     // actually inspected without a second call.
@@ -524,7 +489,17 @@ fn handle(id: &Value, method: &str, params: &Value) {
                     // now the exit threshold, which is the property an agent
                     // actually branches on.
                     let gate_failed = harmony::exceeds(&reports, harmony::exit_threshold());
-                    let mut j = report_json(&reports, &cov);
+                    // The findings carry the same fields the command line
+                    // prints in JSON: a fingerprint, a key, a CWE, a
+                    // confidence and a suggestion. An agent that reads one
+                    // surface and a client that reads the other then see the
+                    // same finding, not two versions of it.
+                    let mut j = crate::report::to_json(
+                        &reports,
+                        &cov,
+                        Some(std::path::Path::new(&root)),
+                        None,
+                    );
                     j.pop();
                     j.push_str(&format!(
                         ",\"security_gate\":{},\"security_posture\":\"local_only\"}}",
@@ -547,7 +522,87 @@ fn handle(id: &Value, method: &str, params: &Value) {
                         }
                     };
                     match harmony::check_staged(&std::path::PathBuf::from(&root), &graph, patch) {
-                        Ok(reports) => ok(id, text_result(report_lines(&reports, expand))),
+                        Ok(reports) => {
+                            // A structured verdict, not prose. The pre apply
+                            // gate is read by an agent, and an agent cannot
+                            // tell "safe" from "the tool said nothing" when
+                            // the answer is a sentence.
+                            let conflicts: Vec<Value> = reports
+                                .iter()
+                                .filter(|r| r.guard == "staged.apply")
+                                .map(|r| {
+                                    json!({
+                                        "file": r.file,
+                                        "line": r.line,
+                                        "severity": r.severity,
+                                        "message": r.message,
+                                    })
+                                })
+                                .collect();
+                            let findings: Vec<Value> = {
+                                let mut folded: Vec<&harmony::GuardReport> = Vec::new();
+                                for r in reports.iter().filter(|r| r.guard != "staged.apply") {
+                                    if expand {
+                                        folded.push(r);
+                                        continue;
+                                    }
+                                    // Identical findings fold. A patch that
+                                    // introduces the same problem in nine
+                                    // files is one problem, and a list of nine
+                                    // rows is how it hides.
+                                    if !folded.iter().any(|e| {
+                                        e.guard == r.guard
+                                            && e.file == r.file
+                                            && e.message == r.message
+                                    }) {
+                                        folded.push(r);
+                                    }
+                                }
+                                folded
+                                    .into_iter()
+                                    .map(|r| {
+                                        json!({
+                                            "file": r.file,
+                                            "line": r.line,
+                                            "severity": r.severity,
+                                            "rule": r.guard,
+                                            "message": r.message,
+                                            "fingerprint": crate::insight::fingerprint(
+                                                &r.guard, &r.file, &r.message, r.line),
+                                        })
+                                    })
+                                    .collect()
+                            };
+                            let safe_to_apply = conflicts.is_empty();
+                            let summary = if safe_to_apply {
+                                if findings.is_empty() {
+                                    "the patch applies cleanly and introduces no finding."
+                                        .to_string()
+                                } else {
+                                    format!(
+                                        "the patch applies cleanly and introduces {} finding(s).",
+                                        findings.len()
+                                    )
+                                }
+                            } else {
+                                format!(
+                                    "the patch does not apply cleanly: {} conflict(s).",
+                                    conflicts.len()
+                                )
+                            };
+                            ok(
+                                id,
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&json!({
+                                    "safe_to_apply": safe_to_apply,
+                                    "conflicts": conflicts,
+                                    "findings": findings,
+                                    "coverage": {
+                                        "files_in_patch": patch_files(patch),
+                                    },
+                                    "summary": summary,
+                                })).unwrap_or_default() }] }),
+                            );
+                        }
                         Err(e) => err(id, 2, &format!("patch could not be parsed. {}", e)),
                     }
                 }
@@ -981,6 +1036,99 @@ pub fn run() -> ExitCode {
 /// Kept as one function so the schema validator reads the same declarations the
 /// client sees. Validating against a second hand written copy is how a tool ends
 /// up declared with one schema and dispatched with another.
+/// The output limits of a tool answer.
+///
+/// An agent loop needs a bounded answer, and a tool that returns everything
+/// without saying how much it left out is a tool that gets called once and
+/// then believed. The list tools take a limit, an offset and a byte cap, and
+/// every answer says how many rows there were and how many were returned.
+struct Limits {
+    limit: usize,
+    offset: usize,
+    max_bytes: usize,
+}
+
+impl Limits {
+    fn from_args(args: &Value) -> Limits {
+        let num = |key: &str, default: usize| -> usize {
+            args.get(key)
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize)
+                .unwrap_or(default)
+        };
+        Limits {
+            limit: num("limit", 200),
+            offset: num("offset", 0),
+            max_bytes: num("max_bytes", 64_000),
+        }
+    }
+}
+
+/// Apply the limits to a list of rows.
+///
+/// The first row is the count header, so it is never dropped: an answer that
+/// says how many rows there were and then lists fewer is honest, and an answer
+/// that lists fewer without saying so is a lie about completeness.
+fn bounded(lines: Vec<String>, limits: &Limits) -> String {
+    let (header, body) = match lines.split_first() {
+        Some((h, rest)) => (h.clone(), rest.to_vec()),
+        None => return String::new(),
+    };
+    let total = body.len();
+    let start = limits.offset.min(total);
+    let mut rows: Vec<String> = body.into_iter().skip(start).collect();
+    let mut dropped = 0usize;
+    if rows.len() > limits.limit {
+        dropped = rows.len() - limits.limit;
+        rows.truncate(limits.limit);
+    }
+    let mut bytes = header.len() + 1;
+    let mut kept: Vec<String> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let n = row.len() + 1;
+        if bytes + n > limits.max_bytes {
+            dropped += 1;
+            continue;
+        }
+        bytes += n;
+        kept.push(row);
+    }
+    let mut out = String::new();
+    out.push_str(&header);
+    out.push('\n');
+    for row in kept {
+        out.push_str(&row);
+        out.push('\n');
+    }
+    if dropped > 0 {
+        out.push_str(&format!(
+            "{} row(s) were left out. ask again with a higher limit or an offset.\n",
+            dropped
+        ));
+    }
+    out.trim_end().to_string()
+}
+
+/// The files a patch touches, for the coverage receipt of a staged verdict.
+fn patch_files(patch: &str) -> Vec<String> {
+    let Ok(parsed) = crate::staged::parse_patch(patch) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = parsed
+        .iter()
+        .map(|f| {
+            if f.new_path.is_empty() {
+                f.old_path.clone()
+            } else {
+                f.new_path.clone()
+            }
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn tool_help(topic: Option<&str>) -> Value {
     const HELP: &[(&str, &str)] = &[
         (
@@ -1061,18 +1209,28 @@ fn tool_list() -> Value {
                             "description": "Query the spine graph. Ask who calls a symbol, who imports a module, or where a symbol is defined.",
                             "inputSchema": { "type": "object", "properties": {
                                 "kind": { "type": "string", "enum": ["callers", "imports", "definition", "calls", "search"] },
-                                "name": { "type": "string" }
+                                "name": { "type": "string" },
+                                "root": { "type": "string", "description": "the workspace to answer about. the server working directory is the default" },
+                                "limit": { "type": "integer", "description": "how many rows to return. 200 by default" },
+                                "offset": { "type": "integer", "description": "how many rows to skip. 0 by default" },
+                                "max_bytes": { "type": "integer", "description": "cap the answer at this many bytes. 64000 by default" }
                             }, "required": ["kind", "name"] }
                         },
                         {
                             "name": "spine.describe",
                             "description": "Read the workspace manifest in one shot, including what was not indexed.",
-                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" } } }
+                            "inputSchema": { "type": "object", "properties": { "root": { "type": "string" }, "max_bytes": { "type": "integer", "description": "cap the answer at this many bytes. 64000 by default" } } }
                         },
                         {
                             "name": "spine.neighbors",
                             "description": "Show every side of a symbol, definition with its captured doc, callers and calls out.",
-                            "inputSchema": { "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"] }
+                            "inputSchema": { "type": "object", "properties": {
+                                "name": { "type": "string" },
+                                "root": { "type": "string", "description": "the workspace to answer about. the server working directory is the default" },
+                                "limit": { "type": "integer", "description": "how many rows to return. 200 by default" },
+                                "offset": { "type": "integer", "description": "how many rows to skip. 0 by default" },
+                                "max_bytes": { "type": "integer", "description": "cap the answer at this many bytes. 64000 by default" }
+                            }, "required": ["name"] }
                         },
                         {
                             "name": "harmony.check",

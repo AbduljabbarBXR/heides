@@ -60,9 +60,10 @@ fn an_unknown_flag_is_refused_rather_than_used_as_the_root() {
         real.stderr
     );
 
-    // The bug: `--json` is a real flag but `check` does not accept it, and the
-    // old parser read it as the root.
-    let wrong = run(&dir, &["check", "--json", "."]);
+    // The bug: a flag the command does not accept was read as the root.
+    // `--json` is accepted by `check` now, so the flag that proves the rule
+    // is one that is not in the table.
+    let wrong = run(&dir, &["check", "--jsonn", "."]);
     assert!(
         !wrong.ok,
         "an unaccepted flag must not exit 0, stdout was: {}",
@@ -72,6 +73,35 @@ fn an_unknown_flag_is_refused_rather_than_used_as_the_root() {
         wrong.stderr.contains("unknown flag"),
         "the refusal must name the flag, stderr was: {}",
         wrong.stderr
+    );
+    assert!(
+        !dir.join("--jsonn").exists(),
+        "no directory named after a flag may be created"
+    );
+}
+
+#[test]
+fn a_flag_and_a_directory_together_scan_the_directory() {
+    // `heides check --json .` used to scan a directory literally named
+    // `--json`. The flag is real now, so the pair has to mean what it says.
+    let dir = scratch("flag_and_root");
+    std::fs::write(
+        dir.join("app.py"),
+        "import subprocess\ndef view(cmd):\n    subprocess.call(\"sh -c \" + cmd, shell=True)\n",
+    )
+    .expect("write fixture");
+
+    let out = run(&dir, &["check", "--json", "."]);
+    assert!(!out.ok, "the finding must still fail the gate");
+    assert!(
+        out.stdout.contains("\"schema\": \"heides.findings/v1\""),
+        "the json flag must produce the json report, got: {}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("shell"),
+        "the finding must be in the json report, got: {}",
+        out.stdout
     );
     assert!(
         !dir.join("--json").exists(),
