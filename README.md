@@ -254,6 +254,7 @@ any of them.
 | `query` | `callers`, `imports`, `definition`, `calls`, `neighbors`, `search`. Who calls a symbol, where a definition lives, what it calls, free text search over names, signatures, docs, literals and comments. |
 | `check` | Run every guard. The gate. Non-zero exit when a finding is a blocker or critical. |
 | `staged` | Check a unified diff before applying it. |
+| `baseline` | Record the findings this project has already accepted, so `check --baseline` fails only on the new ones. |
 | `verify` | Assertions a project can state about itself: its own tests plus every local guard, with a boolean to branch on. |
 | `db` | `tables`, `columns`, `reads`, `writes`, `orphans`, `missingindex`, `policies`, `cycles`, `schema`, `routes`, `touch`. The database graph, read from the code. |
 | `deps` | Removed. It used to ask whether a pinned version was a known CVE. It now refuses and points at [GRIM](https://pypi.org/project/grim-mcp/). |
@@ -264,7 +265,7 @@ any of them.
 | `scaffold` | Generate a project from a plan and index it. Takes free text. |
 | `changed-since` | Indexed files whose mtime is after a unix timestamp. The same answer as the `spine.changed_since` tool. |
 | `watch` | Re-index and re-check on change. |
-| `version` | Print the version. |
+| `version` | Print the version. `--json` reports the version, the protocol and the findings schema, so a client can refuse an engine that is too old. |
 | `mcp` | Run the MCP server over stdio. |
 
 ## MCP tool reference
@@ -314,14 +315,98 @@ answer.
 
 Stated plainly, and tracked with citations and a resolution column in `ROADMAP.md`. Two things about this list are worth being explicit about. A gap listed here is a limit you can plan around; a silent no-op is not, and one shipped in 0.15.2, where a check on a never-indexed workspace reported a clean workspace. That specific defect is now pinned by two tests: one asserts a freshly built graph can read back every file it lists, the other asserts a first run over an unindexed tainted file reports it.
 
-* No database layer yet. There is no `.sql` parsing, no schema graph, no way to ask which code touches a table. This is the largest known gap. Note this is a missing *database* layer, not a missing store: the spine is already one embedded SQLite file, so this extends an existing store rather than introducing one.
-* No API surface graph, so nothing answers "what does `POST /users` end up writing to" in one call. This is the flagship item.
-* Path traversal beyond the filesystem write sinks, and no command injection rule for framework-specific shell APIs.
-* No open redirect, XXE, unsafe deserialization or crypto misuse rules.
-* A handful of ecosystems are not read for dependencies: Ruby, .NET, Swift, Gradle, Dart, and no transitive resolution from lockfiles.
-* Languages not indexed: SQL, shell, Kotlin, Swift, Scala, Dart, Dockerfile. C and C++ are indexed with symbols and call edges but carry no taint rows. Rust is indexed but not taint scanned.
-* **There is no network in any guard.** Every finding is provable from the files. The one command that reaches the network is web confirmation inside `grounding.plan`, which is a deliberate lookup a caller asks for by name, not a guard that runs as part of `check`.
-* `staged` validates conflicts only; it does not run taint over the post-patch tree, so a patch that introduces a flow is not yet caught by the gate.
+The list below matches the code as of 0.40.0. An earlier version of this section
+claimed there was no database layer and that Dart was not indexed; both were
+false by 0.39.0, and a section that lies about what the tool does is worse than
+no section at all.
+
+* The taint corpus behind `security.taint` was measured on C, C++ and Ruby
+  files. Every other language reuses those rules, and the tool says so at the
+  point of the verdict rather than in a footnote. The Dart rules are the
+  newest and the least measured.
+* There is no argument tracking, so a value that reaches a sink through a
+  struct field, a map entry or a list element is not followed. A Dart
+  function parameter counts as untrusted input; a parameter of a function in
+  another language does not.
+* Interprocedural analysis is bounded by a step budget. When the budget runs
+  out the finding says so instead of stopping quietly.
+* Path traversal beyond the filesystem write sinks, and no command injection
+  rule for framework specific shell APIs.
+* No open redirect, XXE or crypto misuse rules. Unsafe deserialization and
+  cross site scripting rules landed in 0.40.0 and cover the common shapes.
+* The dependency guard is gone, and that is deliberate: it cannot tell *no
+  vulnerability* from *has not heard of it yet*, and false confidence is
+  indistinguishable from a pass. CVEs, secrets and exposure live in
+  [GRIM](https://pypi.org/project/grim-mcp/). `heides deps` and the `deps.*`
+  tools exist to say exactly that.
+* The staged gate validates conflicts and signatures and runs taint over the
+  patched tree, but it does not run the whole guard set over the post patch
+  tree, so a patch that breaks a database constraint is not yet caught.
+* There is no network in any guard. Every finding is provable from the files.
+  The one command that reaches the network is web confirmation inside
+  `grounding.plan`, which is a deliberate lookup a caller asks for by name,
+  not a guard that runs as part of `check`.
+
+## Using it as a gate
+
+A gate has to be quiet enough to read and strict enough to fail. Three files do
+that work, and all three are optional.
+
+```sh
+heides baseline              # record the findings this project has accepted
+heides check --baseline      # fail only on findings that are not in it
+heides check --json          # the same verdict, in a schema a job can read
+heides check --sarif         # the same verdict, as SARIF 2.1.0
+```
+
+`.heidesignore` holds path rules in the gitignore style:
+
+```text
+# generated and vendored trees
+**/*.g.dart
+**/*.freezed.dart
+.build/
+coverage/
+
+# samples and fixtures are not shipped code
+samples/
+```
+
+`.heides/config.json` holds everything else:
+
+```json
+{
+  "exclude": ["**/*.min.js"],
+  "severity_overrides": { "security.taint": "warning" },
+  "max_file_bytes": 400000,
+  "languages": ["dart", "javascript", "python"]
+}
+```
+
+A single finding can be silenced where it lives, with the reason next to it:
+
+```python
+name = input()  # heides-ignore security.taint the value is validated above
+```
+
+The suppression can expire, and an expired suppression suppresses nothing:
+
+```python
+name = input()  # heides-ignore security.taint until 2026-12-31
+```
+
+In CI, the baseline is the difference between a gate that is used and a gate
+that is switched off:
+
+```yaml
+- uses: AbduljabbarBXR/heides@v0.40.0
+  with:
+    command: check
+    baseline: true
+- uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: heides.sarif
+```
 
 
 ## Reading the output

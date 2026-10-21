@@ -1,0 +1,91 @@
+name: heides
+description: Run the HEIDES guards on a workspace and fail the job on a finding.
+author: heides
+
+branding:
+  icon: shield
+  color: purple
+
+inputs:
+  command:
+    description: The heides command to run. check is the gate.
+    required: false
+    default: check
+  root:
+    description: The directory to scan.
+    required: false
+    default: .
+  baseline:
+    description: Fail only on findings that are not in .heides/baseline.
+    required: false
+    default: "true"
+  min-severity:
+    description: Only report findings at or above this severity. info, warning, critical or blocker.
+    required: false
+    default: ""
+  fail-on:
+    description: Fail the job on findings at or above this severity. info, warning, critical or blocker.
+    required: false
+    default: ""
+  sarif:
+    description: Write the findings to this SARIF file and upload it to code scanning.
+    required: false
+    default: heides.sarif
+  version:
+    description: The heides version to install.
+    required: false
+    default: latest
+
+outputs:
+  sarif:
+    description: The path of the SARIF file that was written.
+    value: ${{ inputs.sarif }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install heides
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ "${{ inputs.version }}" = "latest" ]; then
+          npm install --global heides@latest
+        else
+          npm install --global "heides@${{ inputs.version }}"
+        fi
+        heides version
+
+    - name: Run the gate
+      shell: bash
+      env:
+        HEIDES_ROOT: ${{ inputs.root }}
+        HEIDES_BASELINE: ${{ inputs.baseline }}
+        HEIDES_MIN_SEVERITY: ${{ inputs.min-severity }}
+        HEIDES_FAIL_ON: ${{ inputs.fail-on }}
+        HEIDES_SARIF: ${{ inputs.sarif }}
+      run: |
+        set -uo pipefail
+        args=("${{ inputs.command }}" "$HEIDES_ROOT")
+        if [ "$HEIDES_BASELINE" = "true" ]; then
+          args+=(--baseline)
+        fi
+        if [ -n "$HEIDES_MIN_SEVERITY" ]; then
+          args+=(--min-severity "$HEIDES_MIN_SEVERITY")
+        fi
+        if [ -n "$HEIDES_FAIL_ON" ]; then
+          args+=(--fail-on "$HEIDES_FAIL_ON")
+        fi
+        # The text answer is what a human reads in the log.
+        heides "${args[@]}"
+        status=$?
+        # The SARIF is what code scanning reads. It is written whatever the
+        # verdict was, because a passing run with findings is still findings.
+        heides "${args[@]}" --sarif > "$HEIDES_SARIF" || true
+        exit $status
+
+    - name: Upload the findings
+      if: always()
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ inputs.sarif }}
+        category: heides

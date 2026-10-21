@@ -4,7 +4,7 @@
 // and normalizes the results into one report shape. Guards are deterministic
 // and explainable. A guard never guesses: it reports evidence.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::spine::CodeGraph;
@@ -42,6 +42,11 @@ pub struct Coverage {
     /// Files indexed but contributing no symbols, which is what a language
     /// without a grammar looks like.
     pub no_grammar: Vec<String>,
+    /// Files the walker found and the workspace policy excluded. Counted, so
+    /// an excluded tree is visible rather than silently absent.
+    pub excluded_files: usize,
+    /// A few of the excluded paths, so the count can be checked.
+    pub excluded_sample: Vec<String>,
 }
 
 impl Coverage {
@@ -74,6 +79,15 @@ impl Coverage {
                 self.unreadable.len(),
                 self.unreadable.join(", ")
             ));
+        }
+        if self.excluded_files > 0 {
+            out.push_str(&format!(
+                "\nexcluded by policy: {} file(s)",
+                self.excluded_files
+            ));
+            if !self.excluded_sample.is_empty() {
+                out.push_str(&format!(" ({})", self.excluded_sample.join(", ")));
+            }
         }
         out
     }
@@ -123,6 +137,8 @@ pub fn coverage_of(graph: &CodeGraph) -> Coverage {
         languages: langs.into_iter().collect(),
         taint_untested: untested.into_iter().collect(),
         no_grammar: no_grammar.into_iter().collect(),
+        excluded_files: 0,
+        excluded_sample: Vec::new(),
     }
 }
 
@@ -134,6 +150,129 @@ pub fn check_workspace_with_coverage(
 ) -> (Vec<GuardReport>, Coverage) {
     let reports = check_workspace_without_deps(graph);
     (reports, coverage_of(graph))
+}
+
+/// The whole check: code guards, database guards, configuration guards and the
+/// workspace policy, in one call.
+///
+/// The CLI and the MCP server both come through here, so a finding is reported
+/// the same way whichever surface asked for it. The policy is applied last,
+/// after every guard has run, so an excluded path costs nothing in guard time
+/// and still shows up in the receipt as excluded rather than as absent.
+pub fn check_workspace_full(root: &Path, graph: &CodeGraph) -> (Vec<GuardReport>, Coverage) {
+    let (mut reports, mut cov) = check_workspace_with_coverage(root, graph);
+    // The database guards join the code guards here, so a schema problem is
+    // visible without a second command. A workspace with no database
+    // contributes nothing and the receipt is unchanged.
+    reports.retain(|r| !(r.guard.starts_with("database.") || r.guard.starts_with("config.")));
+    reports.extend(
+        check_workspace_with_database(root)
+            .into_iter()
+            .filter(|r| r.guard.starts_with("database.") || r.guard.starts_with("config.")),
+    );
+    let (kept, policy) = apply_policy(root, reports);
+    let kept = collapse_duplicates(kept);
+    if policy.present {
+        let excluded = crate::indexer::excluded_files(root, &policy, graph);
+        cov.excluded_files = excluded.len();
+        cov.excluded_sample = excluded.into_iter().take(5).collect();
+    }
+    (kept, cov)
+}
+
+/// Collapse findings that say the same thing about the same place.
+///
+/// The intra file pass and the interprocedural pass both find a flow that
+/// crosses a function boundary, and they describe it in different words. A
+/// reader sees the same problem twice and starts to doubt the tool, and a
+/// machine sees two findings where there is one.
+///
+/// Two findings are the same when they are the same rule about the same line
+/// and the same kind of sink. The kind is read out of the message, because
+/// the message is where the sink class is written.
+pub fn collapse_duplicates(reports: Vec<GuardReport>) -> Vec<GuardReport> {
+    let mut seen: HashSet<(String, String, u64, String)> = HashSet::new();
+    let mut out = Vec::with_capacity(reports.len());
+    for r in reports {
+        let key = (
+            r.guard.clone(),
+            r.file.clone(),
+            r.line,
+            sink_class_of(&r.message).unwrap_or_else(|| r.message.clone()),
+        );
+        if seen.insert(key) {
+            out.push(r);
+        }
+    }
+    out
+}
+
+/// The sink class a taint message names, if it names one.
+fn sink_class_of(message: &str) -> Option<String> {
+    let at = message.find("reaches ")?;
+    let rest = &message[at + "reaches ".len()..];
+    let rest = rest
+        .strip_prefix("a ")
+        .or_else(|| rest.strip_prefix("an "))
+        .unwrap_or(rest);
+    let end = rest.find(" sink")?;
+    let class = rest[..end].trim();
+    if class.is_empty() {
+        None
+    } else {
+        Some(class.to_string())
+    }
+}
+
+/// Apply the workspace policy to a set of findings.
+///
+/// Three things happen here, in this order:
+///
+/// 1. A finding in a path the policy excludes is dropped. The file was not
+///    scanned either, so most excluded paths never produce a finding at all;
+///    this is the belt to that braces, for findings whose file is empty or
+///    absolute.
+/// 2. A finding on a line with an inline suppression is dropped. The
+///    suppression is read from the file itself, so it travels with the code.
+/// 3. A finding whose rule has a severity override is re-labelled. The rule
+///    still fires, the severity is the project's call.
+pub fn apply_policy(
+    root: &Path,
+    reports: Vec<GuardReport>,
+) -> (Vec<GuardReport>, crate::policy::Policy) {
+    let policy = crate::policy::Policy::load(root);
+    let mut suppressions: HashMap<String, crate::policy::Suppressions> = HashMap::new();
+    let mut kept = Vec::with_capacity(reports.len());
+    for r in reports {
+        if !r.file.is_empty() {
+            let rel = r.file.trim_start_matches("./").replace('\\', "/");
+            if policy.is_ignored(&rel) {
+                continue;
+            }
+            // The inline suppression is read from the file itself, so it works
+            // whether or not the workspace has a policy file. A suppression
+            // that needs a second file to exist is a suppression nobody uses.
+            let entry = suppressions.entry(rel.clone()).or_insert_with(|| {
+                let path = root.join(&rel);
+                match std::fs::read_to_string(&path) {
+                    Ok(content) => crate::policy::Suppressions::parse(&content),
+                    Err(_) => crate::policy::Suppressions::default(),
+                }
+            });
+            if entry.suppresses(&r.guard, r.line) {
+                continue;
+            }
+        }
+        let severity = policy.severity_for(&r.guard, &r.severity);
+        kept.push(GuardReport {
+            guard: r.guard,
+            severity,
+            message: r.message,
+            file: r.file,
+            line: r.line,
+        });
+    }
+    (kept, policy)
 }
 
 /// Run the full workspace check: taint, edge cases and practices.
@@ -639,7 +778,21 @@ pub fn exceeds(reports: &[GuardReport], threshold: Threshold) -> bool {
         .any(|r| threshold.rank() <= severity_rank(&r.severity))
 }
 
-fn severity_rank(s: &str) -> u8 {
+/// The same question, asked about a borrowed list of findings.
+///
+/// A baseline run gates on the findings that are new, and those are a list of
+/// references into the reports rather than a copy of them. Copying a thousand
+/// findings to ask a question about ten of them is the kind of waste this
+/// codebase does not do elsewhere.
+pub fn exceeds_refs(reports: &[&GuardReport], threshold: Threshold) -> bool {
+    reports
+        .iter()
+        .any(|r| threshold.rank() <= severity_rank(&r.severity))
+}
+
+/// How severe a severity label is. Public so the CLI can filter a run by
+/// severity without repeating the table.
+pub fn severity_rank(s: &str) -> u8 {
     match s {
         "info" => 0,
         "warning" => 1,

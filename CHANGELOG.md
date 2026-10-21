@@ -2,6 +2,116 @@
 
 All notable changes to HEIDES are recorded here.
 
+## 0.40.0
+
+The release that turns the tool from a report into a gate. Everything here was
+found by running the released binary against real repositories: a Flutter app,
+a PHP and JavaScript service, a Rust project, a Python project, and a synthetic
+fixture with planted sources and sinks.
+
+### Added
+
+- **A workspace policy.** `.heidesignore` holds gitignore style path rules, and
+  `.heides/config.json` holds an include list, an exclude list, severity
+  overrides per rule, a maximum file size and a list of languages to scan.
+  Both are optional, and a workspace with neither is scanned exactly as
+  before. The policy is applied at the walk, not at the report, so an excluded
+  path produces no finding at all, and the coverage receipt says how many
+  files were excluded so the exclusion is visible rather than a gap.
+
+- **Inline suppressions.** `// heides-ignore security.taint the reason` silences
+  one rule on one line, `// heides-ignore-file security.taint` silences it for
+  the file, and an optional `until 2026-12-31` expires the suppression. An
+  expired suppression suppresses nothing, and a suppression that is written
+  inside a string literal is not a suppression.
+
+- **A baseline that a gate can use.** `heides baseline` records the findings a
+  project has accepted in `.heides/baseline`, `heides check --baseline` fails
+  only on findings that are not in it, and `heides check --new-only` prints only
+  those. The baseline is the file that already existed, so there is one answer
+  to "what has this project accepted" and not two. A known finding is still
+  reported and still counted. It only stops failing the build.
+
+- **Machine readable output.** `heides check --json` prints the
+  `heides.findings/v1` schema, and `heides check --sarif` prints SARIF 2.1.0.
+  Every finding carries a stable fingerprint, a stable key, a CWE, a
+  confidence, a suggestion, the source line and a scope tag that says whether
+  it sits in test code. `heides version --json` reports the version, the
+  protocol and the findings schema, so a client can refuse an engine that is
+  too old to answer what it asks.
+
+- **The gate flags.** `--fail-on` sets the severity bar for one run,
+  `--min-severity` decides what is reported at all, and `--json` and `--sarif`
+  decide the shape of the answer. `heides check` now refreshes a stale index
+  before it reads, because a file added since the last scan was never scanned
+  and a gate that cannot see a new file is not a gate.
+
+- **A GitHub Action.** `uses: AbduljabbarBXR/heides@v0.40.0` runs the gate in
+  a workflow, with the baseline honoured and the findings uploaded as SARIF.
+
+### Fixed
+
+- **One call, one sink class.** A line was classified by the sink table, and
+  the table has both a bare row and a receiver scoped row. `db.exec(cmd)`
+  matched the SQL row and the shell row, and both were reported. The class of a
+  sink is a property of the call, so the call is what gets classified now, and
+  the more specific rule wins. `exec(cmd)` is a shell sink, `db.exec(cmd)` is a
+  SQL sink, and neither reports the other.
+
+- **Dart and Flutter.** Dart had no source row at all, so a Dart file could
+  never taint. There are now sources for the standard library, for `shelf`
+  request bodies, for Flutter text fields and for query parameters, and sinks
+  for sqflite, for `Process`, for the filesystem, for a WebView and for a
+  platform channel. A Dart function parameter counts as untrusted input for
+  the classes where that matters, because in a Dart service the parameter
+  usually is the request data and nothing else in the language says so. The
+  filesystem class is deliberately excluded: `File(path)` is ordinary code.
+
+- **Dart shell execution is precise.** `Process.run` passes an argument list
+  to the program, so it is not a shell and nothing can be injected through it.
+  Only `runInShell`, and `run` or `start` with `runInShell: true` on the same
+  line, are shell sinks.
+
+- **Sinks that were missing.** Cross site scripting through `innerHTML`,
+  `document.write`, `insertAdjacentHTML`, `dangerouslySetInnerHTML`,
+  `render_template_string` and a Dart WebView. Unsafe deserialization through
+  `pickle`, `yaml.load`, `unserialize`, `Marshal.load` and
+  `ObjectInputStream`. Sanitizers for `HtmlEscape`, `PreparedStatement` and
+  the .NET HTML encoders.
+
+- **`plan` is honest.** It answered `feasible true` for any plan at all,
+  including one that named two symbols the workspace does not contain, and
+  including a plan that named nothing the spine knows about. The verdict is now
+  false unless the plan is grounded, the status says which of `feasible`,
+  `unverified` and `unknown` applies, and the blockers say what is missing.
+
+- **`scaffold` refuses what it cannot build.** It read one keyword and wrote a
+  Node app for every request, so "a Flutter app with SQLite" produced a
+  JavaScript file and an empty requirements file. An unsupported stack is now
+  refused by name, with the supported stacks listed.
+
+- **`staged` over MCP answers in structure.** The verdict is JSON with
+  `safe_to_apply`, `conflicts`, `findings` and `coverage`, not prose. A patch
+  that applies cleanly says so in a field an agent can read.
+
+- **Every workspace tool accepts a root, and every list tool is bounded.**
+  `spine.query`, `spine.neighbors` and `spine.describe` take `root`, and the
+  list tools take `limit`, `offset` and `max_bytes`. An answer that was cut
+  short says how many rows were left out.
+
+- **Duplicate findings are collapsed.** The intra file pass and the
+  interprocedural pass both find a flow that crosses a function boundary and
+  they describe it in different words. A finding is now reported once per rule,
+  file, line and sink class.
+
+### Changed
+
+- The finding key used by the baseline is a digest of the whole message with
+  the line references removed, rather than the first twenty four letters of it.
+  The old key could not tell a SQL finding from a shell finding in the same
+  file. Baselines written by an earlier version are read as unknown, so every
+  finding shows up once and the baseline is rewritten with `heides baseline`.
+
 ## 0.39.0
 
 ### Fixed
